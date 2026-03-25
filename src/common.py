@@ -169,16 +169,24 @@ def resolve_canonical_column(df: pd.DataFrame, canonical_name: str) -> str:
     if canonical_name in df.columns:
         return canonical_name
 
-    suffix_matches = [c for c in df.columns if c.endswith(f"__{canonical_name}")]
-    if len(suffix_matches) == 1:
-        return suffix_matches[0]
+    score_map: dict[str, int] = {}
+    for col in df.columns.astype(str):
+        if col.endswith(f"__{canonical_name}"):
+            score_map[col] = max(score_map.get(col, 0), 90)
+        if col.endswith(f"_{canonical_name}"):
+            score_map[col] = max(score_map.get(col, 0), 80)
+        if col.endswith(canonical_name):
+            score_map[col] = max(score_map.get(col, 0), 70)
+        if canonical_name in col:
+            score_map[col] = max(score_map.get(col, 0), 10)
 
-    fuzzy_matches = [c for c in df.columns if canonical_name in c]
-    if len(fuzzy_matches) == 1:
-        return fuzzy_matches[0]
+    if not score_map:
+        raise KeyError(
+            f"Could not identify canonical column '{canonical_name}'. "
+            f"Available columns: {list(df.columns)}"
+        )
 
-    raise KeyError(
-        f"Could not uniquely identify canonical column '{canonical_name}'. "
-        f"Suffix matches (__{canonical_name}): {suffix_matches}; "
-        f"fuzzy matches containing '{canonical_name}': {fuzzy_matches}"
-    )
+    best_score = max(score_map.values())
+    best = [c for c, s in score_map.items() if s == best_score]
+    # Deterministic tie-breaker: shortest name first (usually closest to canonical), then alphabetical.
+    return sorted(best, key=lambda c: (len(c), c))[0]
