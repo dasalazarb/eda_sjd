@@ -21,8 +21,8 @@ Core rule: **merge by `SUBJECT_NUMBER` at patient level**; do **not** perform a 
 ```
 project/
   data_raw/
-    CTDB_Data_Download_11D.xlsx
-    CTDB_Data_Download_15D.xlsx
+    CTDB Data Download 11D.xlsx
+    CTDB Data Download 15D.xlsx
   data_intermediate/
   data_analytic/
   reports/

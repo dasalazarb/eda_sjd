@@ -58,6 +58,15 @@ def ingest_one(path: Path, source_protocol: str, logger) -> pd.DataFrame:
     return df
 
 
+def resolve_raw_path(candidates: list[str]) -> Path:
+    for candidate in candidates:
+        path = RAW_DIR / candidate
+        if path.exists():
+            return path
+    joined = ", ".join(candidates)
+    raise FileNotFoundError(f"None of the expected raw files were found in {RAW_DIR}: {joined}")
+
+
 def main() -> None:
     logger = setup_logger("01_ingest")
 
@@ -66,8 +75,8 @@ def main() -> None:
         "Reads raw Excel files, creates {category}__{variable} headers, cleans fields, and saves enriched raw datasets.",
     )
 
-    f11 = RAW_DIR / "CTDB_Data_Download_11D.xlsx"
-    f15 = RAW_DIR / "CTDB_Data_Download_15D.xlsx"
+    f11 = resolve_raw_path(["CTDB Data Download 11D.xlsx", "CTDB_Data_Download_11D.xlsx"])
+    f15 = resolve_raw_path(["CTDB Data Download 15D.xlsx", "CTDB Data Download 15D.xslx", "CTDB_Data_Download_15D.xlsx"])
 
     print_step(1, "Read 11D and 15D raw files with two-row grouped headers")
     df11 = ingest_one(f11, "11D", logger)
