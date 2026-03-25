@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import pandas as pd
 
-from common import INTERMEDIATE_DIR, print_kv, save_parquet_and_csv, setup_logger
+from common import INTERMEDIATE_DIR, print_kv, resolve_canonical_column, save_parquet_and_csv, setup_logger
 
 
 KEY_COLS = ["subject_number", "patient_record_number", "visit_datetime"]
 
 
 def deduplicate_within_protocol(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    existing_keys = [c for c in KEY_COLS if c in df.columns]
+    existing_keys = []
+    for key in KEY_COLS:
+        try:
+            existing_keys.append(resolve_canonical_column(df, key))
+        except KeyError:
+            continue
     if not existing_keys:
         kept = df.copy()
         audit = pd.DataFrame({"row_id_raw": df["row_id_raw"], "decision": "kept_as_is", "reason": "missing_dedup_keys"})
