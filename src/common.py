@@ -163,3 +163,30 @@ def required_columns_check(df: pd.DataFrame, cols: Iterable[str], logger: loggin
     missing = [c for c in cols if c not in df.columns]
     if missing:
         logger.warning("%s missing required columns: %s", dataset, missing)
+
+
+def resolve_canonical_column(df: pd.DataFrame, canonical_name: str) -> str:
+    if canonical_name in df.columns:
+        return canonical_name
+
+    score_map: dict[str, int] = {}
+    for col in df.columns.astype(str):
+        if col.endswith(f"__{canonical_name}"):
+            score_map[col] = max(score_map.get(col, 0), 90)
+        if col.endswith(f"_{canonical_name}"):
+            score_map[col] = max(score_map.get(col, 0), 80)
+        if col.endswith(canonical_name):
+            score_map[col] = max(score_map.get(col, 0), 70)
+        if canonical_name in col:
+            score_map[col] = max(score_map.get(col, 0), 10)
+
+    if not score_map:
+        raise KeyError(
+            f"Could not identify canonical column '{canonical_name}'. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    best_score = max(score_map.values())
+    best = [c for c, s in score_map.items() if s == best_score]
+    # Deterministic tie-breaker: shortest name first (usually closest to canonical), then alphabetical.
+    return sorted(best, key=lambda c: (len(c), c))[0]
