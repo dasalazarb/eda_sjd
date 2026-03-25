@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -75,13 +76,20 @@ def build_group_prefixed_columns(group_row: pd.Series, variable_row: pd.Series) 
 
 
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    cols = (
-        df.columns.astype(str)
-        .str.strip()
-        .str.lower()
-        .str.replace(r"[^0-9a-zA-Z]+", "_", regex=True)
-        .str.strip("_")
-    )
+    def _normalize_column_name(col: object) -> str:
+        raw = str(col).strip().lower()
+        parts = raw.split("__")
+        normalized_parts: list[str] = []
+
+        for idx, part in enumerate(parts, start=1):
+            clean = re.sub(r"[^0-9a-zA-Z]+", "_", part).strip("_")
+            if not clean:
+                clean = f"unnamed_part_{idx}"
+            normalized_parts.append(clean)
+
+        return "__".join(normalized_parts)
+
+    cols = pd.Index([_normalize_column_name(col) for col in df.columns])
     out = df.copy()
     out.columns = _make_unique_columns(cols)
     return out
@@ -143,7 +151,12 @@ def drop_sensitive_name_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[st
     drop_cols: list[str] = []
 
     for col in out.columns.astype(str):
-        if col in {"first_name", "last_name"} or col.endswith("__first_name") or col.endswith("__last_name"):
+        if (
+            col in {"first_name", "last_name", "frist_name"}
+            or col.endswith("__first_name")
+            or col.endswith("__last_name")
+            or col.endswith("__frist_name")
+        ):
             drop_cols.append(col)
 
     if drop_cols:
