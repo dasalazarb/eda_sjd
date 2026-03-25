@@ -180,9 +180,16 @@ def profile_dataframe(df: pd.DataFrame, name: str) -> pd.DataFrame:
 
     for col in df.columns:
         s = df[col]
-        missing = s.isna().mean() * 100
-        nunique = s.nunique(dropna=True)
-        top = s.dropna().astype(str).value_counts().head(5).to_dict()
+        missing_mask = s.isna()
+        if pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s):
+            normalized = s.astype(str).str.strip()
+            missing_tokens_mask = normalized.str.upper().isin(MISSING_TOKENS)
+            missing_mask = missing_mask | missing_tokens_mask
+
+        non_missing = s[~missing_mask]
+        missing = missing_mask.mean() * 100
+        nunique = non_missing.nunique(dropna=True)
+        top = non_missing.astype(str).value_counts().head(5).to_dict()
 
         records.append(
             {
