@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import numpy as np
 import pandas as pd
 
@@ -13,19 +15,53 @@ from common import (
     setup_logger,
 )
 
+LINKAGE_KEYS = ["subject_number", "patient_record_number", "visit_date", "time_24_hour"]
+
+
+def _normalize_identifier(series: pd.Series) -> pd.Series:
+    """Normalize identifiers for deterministic matching and overlap counts."""
+    normalized = series.astype(str).str.strip()
+    normalized = normalized.replace({"": np.nan, "nan": np.nan, "None": np.nan})
+    return normalized
+
+
+def _resolve_columns(df: pd.DataFrame, canonical_names: Iterable[str]) -> dict[str, str]:
+    """
+    Resolve canonical names from heterogeneous schemas.
+
+    Supports columns like:
+      - subject_number
+      - categoria__subject_number
+      - anything_subject_number
+    """
+    resolved: dict[str, str] = {}
+    for canonical in canonical_names:
+        try:
+            resolved[canonical] = resolve_canonical_column(df, canonical)
+        except KeyError:
+            continue
+    return resolved
+
 
 def overlap_table(df11: pd.DataFrame, df15: pd.DataFrame) -> pd.DataFrame:
-    subject11 = resolve_canonical_column(df11, "subject_number")
-    subject15 = resolve_canonical_column(df15, "subject_number")
-    a = set(df11[subject11].dropna().astype(str).unique())
-    b = set(df15[subject15].dropna().astype(str).unique())
+    subject11 = _resolve_columns(df11, ["subject_number"]).get("subject_number")
+    subject15 = _resolve_columns(df15, ["subject_number"]).get("subject_number")
+    if not subject11 or not subject15:
+        return pd.DataFrame(columns=["subject_number", "in_11d", "in_15d", "overlap_type"])
+
+    a = set(_normalize_identifier(df11[subject11]).dropna().unique())
+    b = set(_normalize_identifier(df15[subject15]).dropna().unique())
 
     union = sorted(a | b)
     out = pd.DataFrame({"subject_number": union})
     out["in_11d"] = out["subject_number"].isin(a)
     out["in_15d"] = out["subject_number"].isin(b)
     out["overlap_type"] = np.select(
-        [out["in_11d"] & out["in_15d"], out["in_11d"] & ~out["in_15d"], ~out["in_11d"] & out["in_15d"]],
+        [
+            out["in_11d"] & out["in_15d"],
+            out["in_11d"] & ~out["in_15d"],
+            ~out["in_11d"] & out["in_15d"],
+        ],
         ["both", "only_11d", "only_15d"],
         default="unknown",
     )
@@ -33,30 +69,32 @@ def overlap_table(df11: pd.DataFrame, df15: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_episode_candidates(df11: pd.DataFrame, df15: pd.DataFrame) -> pd.DataFrame:
-    canonical_to_actual_11 = {}
-    canonical_to_actual_15 = {}
-    for key in ["subject_number", "patient_record_number", "visit_date", "time_24_hour"]:
-        try:
-            canonical_to_actual_11[key] = resolve_canonical_column(df11, key)
-        except KeyError:
-            pass
-        try:
-            canonical_to_actual_15[key] = resolve_canonical_column(df15, key)
-        except KeyError:
-            pass
+    resolved_11 = _resolve_columns(df11, LINKAGE_KEYS)
+    resolved_15 = _resolve_columns(df15, LINKAGE_KEYS)
 
-    left_cols = list(canonical_to_actual_11.values()) + ["row_id_raw"]
-    right_cols = list(canonical_to_actual_15.values()) + ["row_id_raw"]
-    left = df11[left_cols].rename(columns={**{v: k for k, v in canonical_to_actual_11.items()}, "row_id_raw": "row_id_11d"})
-    right = df15[right_cols].rename(columns={**{v: k for k, v in canonical_to_actual_15.items()}, "row_id_raw": "row_id_15d"})
+    left_cols = [*resolved_11.values(), "row_id_raw"]
+    right_cols = [*resolved_15.values(), "row_id_raw"]
+    left = df11[left_cols].rename(
+        columns={**{actual: canonical for canonical, actual in resolved_11.items()}, "row_id_raw": "row_id_11d"}
+    )
+    right = df15[right_cols].rename(
+        columns={**{actual: canonical for canonical, actual in resolved_15.items()}, "row_id_raw": "row_id_15d"}
+    )
 
-    on_cols = [c for c in ["subject_number", "patient_record_number", "visit_date", "time_24_hour"] if c in left.columns and c in right.columns]
+    for key in ["subject_number", "patient_record_number"]:
+        if key in left.columns:
+            left[key] = _normalize_identifier(left[key])
+        if key in right.columns:
+            right[key] = _normalize_identifier(right[key])
+
+    on_cols = [c for c in LINKAGE_KEYS if c in left.columns and c in right.columns]
+    output_cols = ["subject_number", "rule_type", "row_id_11d", "row_id_15d"]
     if not on_cols:
-        return pd.DataFrame(columns=["subject_number", "rule_type", "row_id_11d", "row_id_15d"])
+        return pd.DataFrame(columns=output_cols)
 
     exact = left.merge(right, on=on_cols, how="inner")
     if exact.empty:
-        return pd.DataFrame(columns=["subject_number", "rule_type", "row_id_11d", "row_id_15d"])
+        return pd.DataFrame(columns=output_cols)
 
     exact["rule_type"] = "A_exact_same_episode"
     return exact
