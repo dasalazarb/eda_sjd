@@ -99,11 +99,23 @@ def replace_empty_with_nan(df: pd.DataFrame) -> pd.DataFrame:
 def parse_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    if "visit_date" in out.columns:
-        out["visit_date"] = pd.to_datetime(out["visit_date"], errors="coerce")
+    def _resolve_column_name(base_col: str) -> str | None:
+        if base_col in out.columns:
+            return base_col
+        candidates = [c for c in out.columns if str(c).endswith(f"__{base_col}")]
+        if not candidates:
+            return None
+        non_dup = [c for c in candidates if "__dup" not in str(c)]
+        return non_dup[0] if non_dup else candidates[0]
 
-    if "time_24_hour" in out.columns:
-        t = pd.to_datetime(out["time_24_hour"], errors="coerce", format="mixed")
+    visit_date_col = _resolve_column_name("visit_date")
+    time_col = _resolve_column_name("time_24_hour")
+
+    if visit_date_col:
+        out["visit_date"] = pd.to_datetime(out[visit_date_col], errors="coerce")
+
+    if time_col:
+        t = pd.to_datetime(out[time_col], errors="coerce", format="mixed")
         out["time_24_hour"] = t.dt.strftime("%H:%M:%S")
         out.loc[t.isna(), "time_24_hour"] = np.nan
 
