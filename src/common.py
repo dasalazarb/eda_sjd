@@ -43,6 +43,40 @@ def setup_logger(name: str) -> logging.Logger:
     return logger
 
 
+def _make_unique_columns(columns: pd.Index) -> pd.Index:
+    seen: dict[str, int] = {}
+    unique: list[str] = []
+
+    for col in columns.astype(str):
+        n = seen.get(col, 0)
+        if n == 0:
+            unique.append(col)
+        else:
+            unique.append(f"{col}__dup{n}")
+        seen[col] = n + 1
+
+    return pd.Index(unique)
+
+
+def build_group_prefixed_columns(group_row: pd.Series, variable_row: pd.Series) -> pd.Index:
+    group_filled = group_row.ffill()
+    out: list[str] = []
+
+    for i, (group, variable) in enumerate(zip(group_filled, variable_row), start=1):
+        group_txt = "" if pd.isna(group) else str(group).strip()
+        variable_txt = "" if pd.isna(variable) else str(variable).strip()
+
+        if not variable_txt:
+            variable_txt = f"unnamed_col_{i}"
+
+        if group_txt:
+            out.append(f"{group_txt}__{variable_txt}")
+        else:
+            out.append(variable_txt)
+
+    return pd.Index(out)
+
+
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     cols = (
         df.columns.astype(str)
@@ -52,7 +86,7 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         .str.strip("_")
     )
     out = df.copy()
-    out.columns = cols
+    out.columns = _make_unique_columns(cols)
     return out
 
 
@@ -72,7 +106,7 @@ def parse_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
         out["visit_date"] = pd.to_datetime(out["visit_date"], errors="coerce")
 
     if "time_24_hour" in out.columns:
-        t = pd.to_datetime(out["time_24_hour"], errors="coerce")
+        t = pd.to_datetime(out["time_24_hour"], errors="coerce", format="mixed")
         out["time_24_hour"] = t.dt.strftime("%H:%M:%S")
         out.loc[t.isna(), "time_24_hour"] = np.nan
 
