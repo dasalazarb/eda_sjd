@@ -63,16 +63,13 @@ def build_group_prefixed_columns(group_row: pd.Series, variable_row: pd.Series) 
     out: list[str] = []
 
     for i, (group, variable) in enumerate(zip(group_filled, variable_row), start=1):
-        group_txt = "" if pd.isna(group) else str(group).strip()
+        group_txt = "uncategorized" if pd.isna(group) else str(group).strip()
         variable_txt = "" if pd.isna(variable) else str(variable).strip()
 
         if not variable_txt:
             variable_txt = f"unnamed_col_{i}"
 
-        if group_txt:
-            out.append(f"{group_txt}__{variable_txt}")
-        else:
-            out.append(variable_txt)
+        out.append(f"{group_txt}__{variable_txt}")
 
     return pd.Index(out)
 
@@ -126,6 +123,31 @@ def save_parquet_and_csv(df: pd.DataFrame, base_path: Path, logger: logging.Logg
     df.to_csv(base_path.with_suffix(".csv"), index=False)
     logger.info("Saved %s.{parquet,csv} rows=%d cols=%d", base_path, len(df), len(df.columns))
 
+
+
+
+def drop_sensitive_name_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    out = df.copy()
+    drop_cols: list[str] = []
+
+    for col in out.columns.astype(str):
+        if col in {"first_name", "last_name"} or col.endswith("__first_name") or col.endswith("__last_name"):
+            drop_cols.append(col)
+
+    if drop_cols:
+        out = out.drop(columns=drop_cols)
+
+    return out, sorted(drop_cols)
+
+
+def print_script_overview(script_name: str, description: str) -> None:
+    print("\n" + "=" * 84)
+    print(f"{script_name} | {description}")
+    print("=" * 84)
+
+
+def print_step(step_number: int, message: str) -> None:
+    print(f"\n  Step {step_number:02d} -> {message}")
 
 def profile_dataframe(df: pd.DataFrame, name: str) -> pd.DataFrame:
     records = []

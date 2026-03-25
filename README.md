@@ -55,6 +55,47 @@ Every script:
 - emits console prints for quick traceability
 - persists machine-readable outputs (`.parquet`, `.csv`)
 
+
+## Header and privacy rules during ingest
+
+- Column names are built as `{category}__{variable}` from the first two header rows in the raw workbooks.
+  - Example: `ids__subject_number`.
+  - If a category cell is empty, the fallback category is `uncategorized`, keeping the same format.
+- During ingest, the pipeline removes any `FIRST_NAME` and `LAST_NAME` fields (after standardization: `first_name`, `last_name`, `*__first_name`, `*__last_name`) from raw-enriched outputs to avoid propagating direct identifiers.
+
+## Script-by-script execution narrative
+
+Each script prints an English, step-by-step console narrative with numbered steps for traceability.
+
+1. `01_ingest.py`
+   - Reads each Excel raw file.
+   - Builds grouped headers via `build_group_prefixed_columns(...)`.
+   - Standardizes names with `standardize_columns(...)`, replaces missing tokens with `replace_empty_with_nan(...)`, parses temporal fields with `parse_datetime_columns(...)`, and removes sensitive name variables with `drop_sensitive_name_columns(...)`.
+   - Adds lineage columns (`source_protocol`, `source_file`, `row_id_raw`) and saves raw-enriched outputs.
+2. `02_profile_individual.py`
+   - Loads both enriched raw datasets.
+   - Profiles each dataset using `profile_dataframe(...)`.
+   - Saves independent EDA reports and prints shape/key-ID summaries.
+3. `03_linkage.py`
+   - Builds patient overlap map with `overlap_table(...)`.
+   - Builds exact episode candidates using `build_episode_candidates(...)` after canonical column resolution.
+   - Saves linkage tables and prints overlap/candidate counts.
+4. `04_dedup_rules.py`
+   - Applies `deduplicate_within_protocol(...)` on each source.
+   - Consolidates kept rows and conflict/audit decisions.
+   - Saves deduplicated visits + conflict log and prints dedup summary.
+5. `05_build_backbone.py`
+   - Builds patient-level aggregates using `build_patient_master(...)`.
+   - Saves `patient_master` and `visits_long`.
+   - Prints backbone counts.
+6. `06_postmerge_eda.py`
+   - Computes post-merge quality/readiness metrics from `patient_master` and `visits_long`.
+   - Saves `eda_postmerge.csv` and prints metric summary.
+7. `07_build_cohorts.py`
+   - Derives baseline, longitudinal, and time-to-event cohorts.
+   - Saves cohorts and `analysis_readiness.csv`.
+   - Prints cohort-level summary counts.
+
 ## Operational definitions encoded in the pipeline
 
 - Patient unit: `SUBJECT_NUMBER`

@@ -3,7 +3,15 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from common import INTERMEDIATE_DIR, print_kv, resolve_canonical_column, save_parquet_and_csv, setup_logger
+from common import (
+    INTERMEDIATE_DIR,
+    print_kv,
+    print_script_overview,
+    print_step,
+    resolve_canonical_column,
+    save_parquet_and_csv,
+    setup_logger,
+)
 
 
 def overlap_table(df11: pd.DataFrame, df15: pd.DataFrame) -> pd.DataFrame:
@@ -57,12 +65,20 @@ def build_episode_candidates(df11: pd.DataFrame, df15: pd.DataFrame) -> pd.DataF
 def main() -> None:
     logger = setup_logger("03_linkage")
 
+    print_script_overview(
+        "03_linkage.py",
+        "Builds cross-protocol patient overlap and exact episode candidates between 11D and 15D.",
+    )
+
+    print_step(1, "Load enriched 11D and 15D datasets")
     df11 = pd.read_parquet(INTERMEDIATE_DIR / "11d_raw_enriched.parquet")
     df15 = pd.read_parquet(INTERMEDIATE_DIR / "15d_raw_enriched.parquet")
 
+    print_step(2, "Generate overlap table and exact episode candidate matches")
     ov = overlap_table(df11, df15)
     ep = build_episode_candidates(df11, df15)
 
+    print_step(3, "Save linkage outputs and print summary counts")
     save_parquet_and_csv(ov, INTERMEDIATE_DIR / "overlap_subjects", logger)
     save_parquet_and_csv(ep, INTERMEDIATE_DIR / "episode_candidates", logger)
 

@@ -8,8 +8,11 @@ from common import (
     RAW_DIR,
     INTERMEDIATE_DIR,
     build_group_prefixed_columns,
+    drop_sensitive_name_columns,
     parse_datetime_columns,
     print_kv,
+    print_script_overview,
+    print_step,
     replace_empty_with_nan,
     save_parquet_and_csv,
     setup_logger,
@@ -44,6 +47,9 @@ def ingest_one(path: Path, source_protocol: str, logger) -> pd.DataFrame:
         )
     df = replace_empty_with_nan(df)
     df = parse_datetime_columns(df)
+    df, dropped_name_cols = drop_sensitive_name_columns(df)
+    if dropped_name_cols:
+        logger.info("Removed sensitive name columns from %s: %s", path.name, dropped_name_cols)
 
     df["source_protocol"] = source_protocol
     df["source_file"] = path.name
@@ -55,15 +61,23 @@ def ingest_one(path: Path, source_protocol: str, logger) -> pd.DataFrame:
 def main() -> None:
     logger = setup_logger("01_ingest")
 
+    print_script_overview(
+        "01_ingest.py",
+        "Reads raw Excel files, creates {category}__{variable} headers, cleans fields, and saves enriched raw datasets.",
+    )
+
     f11 = RAW_DIR / "CTDB_Data_Download_11D.xlsx"
     f15 = RAW_DIR / "CTDB_Data_Download_15D.xlsx"
 
+    print_step(1, "Read 11D and 15D raw files with two-row grouped headers")
     df11 = ingest_one(f11, "11D", logger)
     df15 = ingest_one(f15, "15D", logger)
 
+    print_step(2, "Save cleaned raw outputs to data_intermediate")
     save_parquet_and_csv(df11, INTERMEDIATE_DIR / "11d_raw_enriched", logger)
     save_parquet_and_csv(df15, INTERMEDIATE_DIR / "15d_raw_enriched", logger)
 
+    print_step(3, "Print ingest metrics for traceability")
     print_kv(
         "Ingest summary",
         {

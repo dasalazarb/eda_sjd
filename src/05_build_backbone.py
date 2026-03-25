@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import pandas as pd
 
-from common import ANALYTIC_DIR, INTERMEDIATE_DIR, print_kv, resolve_canonical_column, save_parquet_and_csv, setup_logger
+from common import (
+    ANALYTIC_DIR,
+    INTERMEDIATE_DIR,
+    print_kv,
+    print_script_overview,
+    print_step,
+    resolve_canonical_column,
+    save_parquet_and_csv,
+    setup_logger,
+)
 
 
 def build_patient_master(visits: pd.DataFrame) -> pd.DataFrame:
@@ -29,9 +38,18 @@ def build_patient_master(visits: pd.DataFrame) -> pd.DataFrame:
 def main() -> None:
     logger = setup_logger("05_build_backbone")
 
+    print_script_overview(
+        "05_build_backbone.py",
+        "Builds patient-level master table and longitudinal visits backbone from deduplicated data.",
+    )
+
+    print_step(1, "Load deduplicated visits")
     visits = pd.read_parquet(INTERMEDIATE_DIR / "deduped_visits.parquet")
+
+    print_step(2, "Create patient_master with visit count and temporal span")
     master = build_patient_master(visits)
 
+    print_step(3, "Save patient_master and visits_long outputs")
     save_parquet_and_csv(master, ANALYTIC_DIR / "patient_master", logger)
     save_parquet_and_csv(visits, ANALYTIC_DIR / "visits_long", logger)
 

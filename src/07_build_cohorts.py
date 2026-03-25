@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import pandas as pd
 
-from common import ANALYTIC_DIR, REPORTS_DIR, print_kv, save_parquet_and_csv, setup_logger
+from common import ANALYTIC_DIR, REPORTS_DIR, print_kv, print_script_overview, print_step, save_parquet_and_csv, setup_logger
 
 
 def main() -> None:
     logger = setup_logger("07_build_cohorts")
 
+    print_script_overview(
+        "07_build_cohorts.py",
+        "Builds baseline, longitudinal, and time-to-event cohorts and writes analysis readiness checks.",
+    )
+
+    print_step(1, "Load patient_master and visits_long")
     master = pd.read_parquet(ANALYTIC_DIR / "patient_master.parquet")
     visits = pd.read_parquet(ANALYTIC_DIR / "visits_long.parquet")
 
+    print_step(2, "Derive baseline, longitudinal, and time-to-event cohorts")
     baseline = visits.sort_values(["subject_number", "visit_datetime"]).groupby("subject_number", as_index=False).first()
     longitudinal = visits.groupby("subject_number").filter(lambda x: len(x) >= 2)
 
@@ -19,6 +26,7 @@ def main() -> None:
         (time_to_event["last_visit"] - time_to_event["first_visit"]).dt.total_seconds() / 86400
     )
 
+    print_step(3, "Save cohort outputs and analysis readiness table")
     save_parquet_and_csv(baseline, ANALYTIC_DIR / "cohort_baseline", logger)
     save_parquet_and_csv(longitudinal, ANALYTIC_DIR / "cohort_longitudinal", logger)
     save_parquet_and_csv(time_to_event, ANALYTIC_DIR / "cohort_time_to_event", logger)
