@@ -9,6 +9,7 @@ from common import (
     print_script_overview,
     print_step,
     profile_dataframe,
+    resolve_canonical_column,
     setup_logger,
 )
 
@@ -18,10 +19,15 @@ def summarize_ids(df: pd.DataFrame) -> dict[str, int]:
         "rows": len(df),
         "columns": len(df.columns),
     }
-    if "subject_number" in df.columns:
-        out["subject_number_unique"] = int(df["subject_number"].nunique(dropna=True))
-    if "patient_record_number" in df.columns:
-        out["patient_record_number_unique"] = int(df["patient_record_number"].nunique(dropna=True))
+
+    for canonical in ["subject_number", "patient_record_number"]:
+        try:
+            col = resolve_canonical_column(df, canonical)
+            out[f"{canonical}_unique"] = int(df[col].nunique(dropna=True))
+            out[f"{canonical}_column"] = col
+        except KeyError:
+            continue
+
     return out
 
 
