@@ -163,3 +163,22 @@ def required_columns_check(df: pd.DataFrame, cols: Iterable[str], logger: loggin
     missing = [c for c in cols if c not in df.columns]
     if missing:
         logger.warning("%s missing required columns: %s", dataset, missing)
+
+
+def resolve_canonical_column(df: pd.DataFrame, canonical_name: str) -> str:
+    if canonical_name in df.columns:
+        return canonical_name
+
+    suffix_matches = [c for c in df.columns if c.endswith(f"__{canonical_name}")]
+    if len(suffix_matches) == 1:
+        return suffix_matches[0]
+
+    fuzzy_matches = [c for c in df.columns if canonical_name in c]
+    if len(fuzzy_matches) == 1:
+        return fuzzy_matches[0]
+
+    raise KeyError(
+        f"Could not uniquely identify canonical column '{canonical_name}'. "
+        f"Suffix matches (__{canonical_name}): {suffix_matches}; "
+        f"fuzzy matches containing '{canonical_name}': {fuzzy_matches}"
+    )
