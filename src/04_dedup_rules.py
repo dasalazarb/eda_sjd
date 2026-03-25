@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import pandas as pd
 
-from common import INTERMEDIATE_DIR, print_kv, resolve_canonical_column, save_parquet_and_csv, setup_logger
+from common import (
+    INTERMEDIATE_DIR,
+    print_kv,
+    print_script_overview,
+    print_step,
+    resolve_canonical_column,
+    save_parquet_and_csv,
+    setup_logger,
+)
 
 
 KEY_COLS = ["subject_number", "patient_record_number", "visit_datetime"]
@@ -35,12 +43,20 @@ def deduplicate_within_protocol(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
 def main() -> None:
     logger = setup_logger("04_dedup_rules")
 
+    print_script_overview(
+        "04_dedup_rules.py",
+        "Applies deterministic within-protocol deduplication and writes audit decisions.",
+    )
+
+    print_step(1, "Load enriched protocol datasets")
     df11 = pd.read_parquet(INTERMEDIATE_DIR / "11d_raw_enriched.parquet")
     df15 = pd.read_parquet(INTERMEDIATE_DIR / "15d_raw_enriched.parquet")
 
+    print_step(2, "Deduplicate rows within each protocol using key hierarchy")
     kept11, audit11 = deduplicate_within_protocol(df11)
     kept15, audit15 = deduplicate_within_protocol(df15)
 
+    print_step(3, "Persist deduplicated visits and conflict/audit log")
     dedup = pd.concat([kept11, kept15], ignore_index=True)
     audit = pd.concat([audit11, audit15], ignore_index=True)
 
