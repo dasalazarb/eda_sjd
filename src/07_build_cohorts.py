@@ -2,7 +2,34 @@ from __future__ import annotations
 
 import pandas as pd
 
-from common import ANALYTIC_DIR, REPORTS_DIR, print_kv, print_script_overview, print_step, save_parquet_and_csv, setup_logger
+from common import (
+    ANALYTIC_DIR,
+    REPORTS_DIR,
+    print_kv,
+    print_script_overview,
+    print_step,
+    resolve_canonical_column,
+    save_parquet_and_csv,
+    setup_logger,
+)
+
+
+def _ensure_category_prefixed_subject(df: pd.DataFrame, category: str) -> tuple[pd.DataFrame, str]:
+    """
+    Ensure the subject identifier column follows '{category}__subject_number'.
+
+    Returns the updated dataframe and the resolved canonical subject column name
+    before renaming (or the target name if it already exists).
+    """
+    out = df.copy()
+    target = f"{category}__subject_number"
+
+    if target in out.columns:
+        return out, target
+
+    source = resolve_canonical_column(out, "subject_number")
+    out = out.rename(columns={source: target})
+    return out, target
 
 
 def main() -> None:
@@ -17,14 +44,29 @@ def main() -> None:
     master = pd.read_parquet(ANALYTIC_DIR / "patient_master.parquet")
     visits = pd.read_parquet(ANALYTIC_DIR / "visits_long.parquet")
 
-    print_step(2, "Derive baseline, longitudinal, and time-to-event cohorts")
-    baseline = visits.sort_values(["subject_number", "visit_datetime"]).groupby("subject_number", as_index=False).first()
-    longitudinal = visits.groupby("subject_number").filter(lambda x: len(x) >= 2)
+    print_step(2, "Resolve canonical columns and derive cohort tables")
+    visit_subject_col = resolve_canonical_column(visits, "subject_number")
+    visit_datetime_col = resolve_canonical_column(visits, "visit_datetime")
+
+    baseline = (
+        visits.sort_values([visit_subject_col, visit_datetime_col])
+        .groupby(visit_subject_col, as_index=False)
+        .first()
+    )
+    longitudinal = visits.groupby(visit_subject_col).filter(lambda x: len(x) >= 2)
+
+    master_subject_col = resolve_canonical_column(master, "subject_number")
+    first_visit_col = resolve_canonical_column(master, "first_visit")
+    last_visit_col = resolve_canonical_column(master, "last_visit")
 
     time_to_event = master.copy()
     time_to_event["followup_days"] = (
-        (time_to_event["last_visit"] - time_to_event["first_visit"]).dt.total_seconds() / 86400
+        (time_to_event[last_visit_col] - time_to_event[first_visit_col]).dt.total_seconds() / 86400
     )
+
+    baseline, baseline_subject_col = _ensure_category_prefixed_subject(baseline, "baseline")
+    longitudinal, longitudinal_subject_col = _ensure_category_prefixed_subject(longitudinal, "longitudinal")
+    time_to_event, tte_subject_col = _ensure_category_prefixed_subject(time_to_event, "time_to_event")
 
     print_step(3, "Save cohort outputs and analysis readiness table")
     save_parquet_and_csv(baseline, ANALYTIC_DIR / "cohort_baseline", logger)
@@ -33,7 +75,10 @@ def main() -> None:
 
     readiness = pd.DataFrame(
         [
-            {"question": "unique_patients_after_dedup", "value": int(master["subject_number"].nunique(dropna=True))},
+            {
+                "question": "unique_patients_after_dedup",
+                "value": int(master[master_subject_col].nunique(dropna=True)),
+            },
             {
                 "question": "patients_with_cross_protocol_continuity",
                 "value": int((master.get("n_protocols", pd.Series(dtype=float)) >= 2).sum()),
@@ -53,6 +98,9 @@ def main() -> None:
             "baseline_n": len(baseline),
             "longitudinal_n_rows": len(longitudinal),
             "tte_n": len(time_to_event),
+            "baseline_subject_col": baseline_subject_col,
+            "longitudinal_subject_col": longitudinal_subject_col,
+            "time_to_event_subject_col": tte_subject_col,
         },
     )
 
