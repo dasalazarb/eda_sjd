@@ -32,6 +32,17 @@ def _ensure_category_prefixed_subject(df: pd.DataFrame, category: str) -> tuple[
     return out, target
 
 
+def _format_protocol_origin(series: pd.Series) -> str:
+    """Format protocol provenance as '11D', '15D', or '11D | 15D'."""
+    vals = {str(v).strip() for v in series.dropna() if str(v).strip()}
+    if not vals:
+        return pd.NA
+
+    ordered = [protocol for protocol in ("11D", "15D") if protocol in vals]
+    extras = sorted(v for v in vals if v not in {"11D", "15D"})
+    return " | ".join(ordered + extras)
+
+
 def main() -> None:
     logger = setup_logger("07_build_cohorts")
 
@@ -47,6 +58,7 @@ def main() -> None:
     print_step(2, "Resolve canonical columns and derive cohort tables")
     visit_subject_col = resolve_canonical_column(visits, "subject_number")
     visit_datetime_col = resolve_canonical_column(visits, "visit_datetime")
+    source_protocol_col = resolve_canonical_column(visits, "source_protocol")
 
     baseline = (
         visits.sort_values([visit_subject_col, visit_datetime_col])
@@ -63,6 +75,22 @@ def main() -> None:
     time_to_event["followup_days"] = (
         (time_to_event[last_visit_col] - time_to_event[first_visit_col]).dt.total_seconds() / 86400
     )
+    protocol_origin = (
+        visits.groupby(visit_subject_col, dropna=False)[source_protocol_col]
+        .apply(_format_protocol_origin)
+        .rename("protocol_origin")
+        .reset_index()
+    )
+    time_to_event = time_to_event.merge(
+        protocol_origin,
+        left_on=master_subject_col,
+        right_on=visit_subject_col,
+        how="left",
+    )
+    if visit_subject_col in time_to_event.columns and visit_subject_col != master_subject_col:
+        time_to_event = time_to_event.drop(columns=[visit_subject_col])
+    if "n_protocols" in time_to_event.columns:
+        time_to_event = time_to_event.drop(columns=["n_protocols"])
 
     baseline, baseline_subject_col = _ensure_category_prefixed_subject(baseline, "baseline")
     longitudinal, longitudinal_subject_col = _ensure_category_prefixed_subject(longitudinal, "longitudinal")
