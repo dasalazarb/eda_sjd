@@ -36,6 +36,7 @@ project/
     05_build_backbone.py
     06_postmerge_eda.py
     07_build_cohorts.py
+    08_visit_patterns.py
 ```
 
 ## Run order
@@ -48,6 +49,7 @@ python src/04_dedup_rules.py
 python src/05_build_backbone.py
 python src/06_postmerge_eda.py
 python src/07_build_cohorts.py
+python src/08_visit_patterns.py
 ```
 
 Every script:
@@ -95,6 +97,10 @@ Each script prints an English, step-by-step console narrative with numbered step
    - Derives baseline, longitudinal, and time-to-event cohorts.
    - Saves cohorts and `analysis_readiness.csv`.
    - Prints cohort-level summary counts.
+8. `08_visit_patterns.py`
+   - Maps visit distribution by `INTERVAL_NAME` and patient-level timeline order.
+   - Builds complementary visit-pattern visualizations (swimmer, violin by transition, KDE+hist in log scale, and patient×time heatmap).
+   - Saves both plot-ready data tables and rendered figures under `reports/visit_patterns/`.
 
 ## Operational definitions encoded in the pipeline
 
@@ -132,3 +138,8 @@ Reports:
 - `reports/eda_15d.csv`
 - `reports/eda_postmerge.csv`
 - `reports/analysis_readiness.csv`
+- `reports/visit_patterns/interval_name_map.csv`
+- `reports/visit_patterns/swimmer_plot.png`
+- `reports/visit_patterns/violin_transition_plot.png`
+- `reports/visit_patterns/kde_hist_gapdays_plot.png`
+- `reports/visit_patterns/heatmap_patient_time.png`
