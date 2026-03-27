@@ -104,7 +104,7 @@ Each script prints an English, step-by-step console narrative with numbered step
    - Saves both plot-ready data tables and rendered figures under `reports/visit_patterns/`.
 9. `09_interval_collapse_audit.py`
    - Audits repeated measurements inside `SUBJECT_NUMBER × INTERVAL_NAME` groups.
-   - Quantifies whether variables are mostly complementary (same value / fill missingness) or conflicting (different measured values).
+   - Quantifies whether variables are mostly complementary (e.g., `yes` + `NaN` -> `yes`) or conflicting (e.g., `yes` + `no` -> `yes | no`).
    - Exports temporal-window distribution reports and optionally saves a collapsed one-row-per-group table via `--collapse yes|no`.
 
 ## Operational definitions encoded in the pipeline
@@ -152,4 +152,5 @@ Reports:
 - `reports/interval_collapse_variable_audit.csv`
 - `reports/interval_collapse_window_stats.csv`
 - `reports/interval_collapse_window_summary.csv`
+- `reports/interval_collapse_conflict_examples.csv`
 - `data_analytic/visits_long_collapsed_by_interval.parquet` (optional, with `--collapse yes`)
