@@ -58,8 +58,27 @@ PHASE_LABELS: dict[str, str] = {
     "Phase 2: 5th Full Evaluation":                 "V6 (5th)",
 }
 
+# Canonical inter-phase transitions — ONLY these are shown in kde_by_interval
+# Same-phase transitions (V2→V2, etc.) are explicitly excluded
+CANONICAL_TRANSITIONS: dict[str, str] = {
+    "Natural History Protocol 478 Interval → Phase 1: Initial Full Evaluation":
+        "V1 (Nat.Hist.) → V2 (Initial)",
+    "(missing) → Phase 1: Initial Full Evaluation":
+        "V1 (missing) → V2 (Initial)",
+    "Phase 1: Initial Full Evaluation → Phase 1: Second Full Evaluation":
+        "V2 (Initial) → V3 (Second)",
+    "Phase 1: Second Full Evaluation → Phase 1: Final Full (Third Full) Evaluation":
+        "V3 (Second) → V4 (Final/3rd)",
+    "Phase 1: Final Full (Third Full) Evaluation → Phase 2: 4th Full Evaluation":
+        "V4 (Final/3rd) → V5 (4th)",
+    "Phase 2: 4th Full Evaluation → Phase 2: 5th Full Evaluation":
+        "V5 (4th) → V6 (5th)",
+}
+
 # Reference lines: label → days
 TIME_REFS: dict[str, int] = {
+    "1 wk":  7,
+    "1 mo":  30,
     "6 mo":  182,
     "2 yr":  730,
     "4 yr":  1460,
@@ -68,14 +87,16 @@ TIME_REFS: dict[str, int] = {
     "10 yr": 3650,
 }
 
-# Distinct visible colors — one per reference line
+# One distinct color per reference line
 REF_COLORS: list[str] = [
-    "#e67e22",  # orange    — 6 mo
-    "#2980b9",  # blue      — 2 yr
-    "#27ae60",  # green     — 4 yr
-    "#8e44ad",  # purple    — 6 yr
-    "#c0392b",  # red       — 8 yr
-    "#16a085",  # teal      — 10 yr
+    "#e67e22",  # 1 wk   — orange
+    "#f1c40f",  # 1 mo   — yellow
+    "#2ecc71",  # 6 mo   — light green
+    "#2980b9",  # 2 yr   — blue
+    "#27ae60",  # 4 yr   — green
+    "#8e44ad",  # 6 yr   — purple
+    "#c0392b",  # 8 yr   — red
+    "#16a085",  # 10 yr  — teal
 ]
 
 # ─────────────────────────────────────────────────────────────────────
@@ -136,9 +157,9 @@ def _build_transition_gaps(
     visit_date_col: str,
 ) -> pd.DataFrame:
     gap = seq.copy()
-    gap["prev_visit_date"]     = gap.groupby(subject_col)[visit_date_col].shift(1)
-    gap["prev_visit_order"]    = gap.groupby(subject_col)["visit_order"].shift(1)
-    gap["prev_interval_name"]  = gap.groupby(subject_col)["interval_name"].shift(1)
+    gap["prev_visit_date"]    = gap.groupby(subject_col)[visit_date_col].shift(1)
+    gap["prev_visit_order"]   = gap.groupby(subject_col)["visit_order"].shift(1)
+    gap["prev_interval_name"] = gap.groupby(subject_col)["interval_name"].shift(1)
     gap["gap_days"] = (gap[visit_date_col] - gap["prev_visit_date"]).dt.days
     gap = gap[gap["prev_visit_date"].notna()].copy()
     gap["transition_order"] = (
@@ -155,28 +176,34 @@ def _build_transition_gaps(
 def _add_vref_lines(
     ax: plt.Axes,
     xlim: int | None = None,
+    lw: float = 1.8,
+    alpha: float = 0.9,
+    label_ypos_frac: float = 0.97,
 ) -> list:
-    """Draw vertical colored reference lines; return legend handles."""
+    """Vertical colored reference lines. Returns legend handles."""
     handles = []
     for (label, days), color in zip(TIME_REFS.items(), REF_COLORS):
         if xlim is not None and days > xlim:
             continue
-        ax.axvline(days, color=color, lw=1.8, ls="--", alpha=0.9, zorder=0)
-        ax.text(days + 18, ax.get_ylim()[1] * 0.97, label,
-                fontsize=8, color=color, va="top", fontweight="bold")
+        ax.axvline(days, color=color, lw=lw, ls="--", alpha=alpha, zorder=0)
+        ymax = ax.get_ylim()[1]
+        ax.text(
+            days + 18, ymax * label_ypos_frac, label,
+            fontsize=8, color=color, va="top", fontweight="bold",
+        )
         handles.append(
-            mlines.Line2D([], [], color=color, lw=1.8, ls="--", label=label)
+            mlines.Line2D([], [], color=color, lw=lw, ls="--", alpha=alpha, label=label)
         )
     return handles
 
 
 def _add_href_lines(ax: plt.Axes) -> list:
-    """Draw horizontal colored reference lines; return legend handles."""
+    """Thin, translucent horizontal reference lines. Returns legend handles."""
     handles = []
     for (label, days), color in zip(TIME_REFS.items(), REF_COLORS):
-        ax.axhline(days, color=color, lw=1.6, ls="--", alpha=0.9, zorder=0)
+        ax.axhline(days, color=color, lw=0.9, ls="--", alpha=0.45, zorder=0)
         handles.append(
-            mlines.Line2D([], [], color=color, lw=1.6, ls="--", label=label)
+            mlines.Line2D([], [], color=color, lw=0.9, ls="--", alpha=0.7, label=label)
         )
     return handles
 
@@ -190,7 +217,7 @@ def _legend_below(
     title: str | None = None,
     y_offset: float = -0.18,
 ) -> None:
-    """Place legend centered below the x-axis."""
+    """Legend centered below the x-axis."""
     kw: dict = dict(
         handles=handles,
         loc="upper center",
@@ -218,6 +245,12 @@ def _plot_swimmer(
     output_path: Path,
     xlim_days: int = 3650,
 ) -> None:
+    """
+    Each row = one patient, sorted by total number of visits (descending).
+    Color = visit order (purple=early visits, yellow=late visits).
+    X-axis = days from the patient's very first record.
+    Patients beyond xlim_days are noted in text but not plotted beyond the limit.
+    """
     patient_summary = (
         seq.groupby(subject_col, as_index=False)
         .agg(max_day=("day_from_first", "max"), n_visits=("visit_order", "max"))
@@ -225,14 +258,17 @@ def _plot_swimmer(
         .reset_index(drop=True)
     )
     patient_summary["patient_rank"] = np.arange(len(patient_summary))
-    swim = seq.merge(patient_summary[[subject_col, "patient_rank"]], on=subject_col, how="left")
+    swim = seq.merge(
+        patient_summary[[subject_col, "patient_rank"]], on=subject_col, how="left"
+    )
 
     fig, ax = plt.subplots(figsize=(14, 8))
     fig.subplots_adjust(bottom=0.18)
 
     ax.hlines(
         patient_summary["patient_rank"],
-        xmin=0, xmax=patient_summary["max_day"].clip(upper=xlim_days),
+        xmin=0,
+        xmax=patient_summary["max_day"].clip(upper=xlim_days),
         color="#aab4be", linewidth=0.6, zorder=1,
     )
     scatter = ax.scatter(
@@ -242,23 +278,31 @@ def _plot_swimmer(
         s=14, alpha=0.85, zorder=2,
     )
     cbar = fig.colorbar(scatter, ax=ax, pad=0.01)
-    cbar.set_label("Visit order", fontsize=9)
+    cbar.set_label(
+        "Visit order\n(1 = first visit, higher = later visit per patient)",
+        fontsize=8,
+    )
 
     n_out = (patient_summary["max_day"] > xlim_days).sum()
     if n_out > 0:
-        ax.text(xlim_days * 0.99, patient_summary["patient_rank"].max() * 0.97,
-                f"{n_out} patients exceed {xlim_days} days →",
-                ha="right", va="top", fontsize=8, color="#555")
+        ax.text(
+            xlim_days * 0.99, patient_summary["patient_rank"].max() * 0.97,
+            f"{n_out} patients exceed {xlim_days} days →",
+            ha="right", va="top", fontsize=8, color="#555",
+        )
 
     ax.set_xlim(0, xlim_days)
     ref_handles = _add_vref_lines(ax, xlim=xlim_days)
 
-    ax.set_title("Swimmer plot — visit timeline per patient (baseline = first record)", fontsize=12)
+    ax.set_title(
+        "Swimmer plot — visit timeline per patient\n(baseline = first record)",
+        fontsize=12,
+    )
     ax.set_xlabel("Days from first record", labelpad=45)
     ax.set_ylabel(f"Patients (n={patient_summary.shape[0]}), sorted by N visits")
     ax.grid(axis="x", linestyle=":", alpha=0.3)
+    _legend_below(ax, handles=ref_handles, ncol=8, title="Time references")
 
-    _legend_below(ax, handles=ref_handles, ncol=6, title="Time references")
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
@@ -275,8 +319,13 @@ def _plot_swimmer_phase1_baseline(
     xlim_days: int = 3650,
 ) -> None:
     """
-    Day 0 = first occurrence of Phase 1: Initial Full Evaluation per patient.
-    Pre-baseline visits (V1: Natural History / missing) are excluded.
+    Same as Swimmer 1 but day 0 = first occurrence of
+    'Phase 1: Initial Full Evaluation' per patient.
+    Patients without that phase are excluded.
+    Pre-baseline records (V1: Natural History / missing) are excluded.
+
+    Visit order color: 1 = first visit after Phase 1 baseline,
+    higher numbers = later visits in that patient's follow-up.
     """
     phase1 = "Phase 1: Initial Full Evaluation"
 
@@ -300,14 +349,17 @@ def _plot_swimmer_phase1_baseline(
         .reset_index(drop=True)
     )
     patient_summary["patient_rank"] = np.arange(len(patient_summary))
-    swim = swim.merge(patient_summary[[subject_col, "patient_rank"]], on=subject_col, how="left")
+    swim = swim.merge(
+        patient_summary[[subject_col, "patient_rank"]], on=subject_col, how="left"
+    )
 
     fig, ax = plt.subplots(figsize=(14, 8))
     fig.subplots_adjust(bottom=0.18)
 
     ax.hlines(
         patient_summary["patient_rank"],
-        xmin=0, xmax=patient_summary["max_day"].clip(upper=xlim_days),
+        xmin=0,
+        xmax=patient_summary["max_day"].clip(upper=xlim_days),
         color="#aab4be", linewidth=0.6, zorder=1,
     )
     scatter = ax.scatter(
@@ -317,13 +369,18 @@ def _plot_swimmer_phase1_baseline(
         s=14, alpha=0.85, zorder=2,
     )
     cbar = fig.colorbar(scatter, ax=ax, pad=0.01)
-    cbar.set_label("Visit order", fontsize=9)
+    cbar.set_label(
+        "Visit order\n(1 = first visit, higher = later visit per patient)",
+        fontsize=8,
+    )
 
     n_out = (patient_summary["max_day"] > xlim_days).sum()
     if n_out > 0:
-        ax.text(xlim_days * 0.99, patient_summary["patient_rank"].max() * 0.97,
-                f"{n_out} patients exceed {xlim_days} days →",
-                ha="right", va="top", fontsize=8, color="#555")
+        ax.text(
+            xlim_days * 0.99, patient_summary["patient_rank"].max() * 0.97,
+            f"{n_out} patients exceed {xlim_days} days →",
+            ha="right", va="top", fontsize=8, color="#555",
+        )
 
     ax.set_xlim(0, xlim_days)
     ref_handles = _add_vref_lines(ax, xlim=xlim_days)
@@ -336,8 +393,8 @@ def _plot_swimmer_phase1_baseline(
     ax.set_xlabel("Days from Phase 1: Initial Full Evaluation", labelpad=45)
     ax.set_ylabel(f"Patients (n={patient_summary.shape[0]}), sorted by N visits")
     ax.grid(axis="x", linestyle=":", alpha=0.3)
+    _legend_below(ax, handles=ref_handles, ncol=8, title="Time references")
 
-    _legend_below(ax, handles=ref_handles, ncol=6, title="Time references")
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
@@ -347,9 +404,13 @@ def _plot_swimmer_phase1_baseline(
 # ─────────────────────────────────────────────────────────────────────
 
 def _plot_violin(gaps: pd.DataFrame, output_path: Path) -> None:
+    """
+    Violin per transition on log Y-axis.
+    Shows the first 8 transitions in chronological order.
+    Reference lines are thin and translucent so the violin shapes dominate.
+    """
     violin_data = gaps[gaps["gap_days"].notna() & (gaps["gap_days"] > 0)].copy()
 
-    # First 8 transitions in chronological order
     all_trans = sorted(
         violin_data["transition_order"].unique(),
         key=lambda x: int(x.split("→")[1][1:]),
@@ -361,18 +422,23 @@ def _plot_violin(gaps: pd.DataFrame, output_path: Path) -> None:
     fig.subplots_adjust(bottom=0.25)
 
     sns.violinplot(
-        data=violin_data, x="transition_order", y="gap_days",
-        order=top_trans, inner="quartile", cut=0, ax=ax, color="#97d5c9",
+        data=violin_data,
+        x="transition_order", y="gap_days",
+        order=top_trans, inner="quartile", cut=0,
+        ax=ax, color="#97d5c9",
     )
     ax.set_yscale("log")
     ax.set_ylim(bottom=1)
 
+    # Thin, toned-down horizontal reference lines
     ref_handles = _add_href_lines(ax)
 
     for i, t in enumerate(top_trans):
         sub = violin_data[violin_data["transition_order"] == t]["gap_days"]
-        ax.text(i, 1.3, f"n={len(sub)}\nmd={int(sub.median())}d",
-                ha="center", va="bottom", fontsize=7, color="#333")
+        ax.text(
+            i, 1.3, f"n={len(sub)}\nmd={int(sub.median())}d",
+            ha="center", va="bottom", fontsize=7, color="#333",
+        )
 
     ax.set_title("Gap distribution between visits by transition (log scale)", fontsize=12)
     ax.set_xlabel("Transition", labelpad=55)
@@ -380,7 +446,7 @@ def _plot_violin(gaps: pd.DataFrame, output_path: Path) -> None:
     ax.tick_params(axis="x", rotation=30)
     ax.grid(axis="y", linestyle=":", alpha=0.3)
 
-    _legend_below(ax, handles=ref_handles, ncol=6, title="Time references")
+    _legend_below(ax, handles=ref_handles, ncol=8, title="Time references")
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
@@ -390,6 +456,15 @@ def _plot_violin(gaps: pd.DataFrame, output_path: Path) -> None:
 # ─────────────────────────────────────────────────────────────────────
 
 def _plot_kde_hist(gaps: pd.DataFrame, output_path: Path) -> None:
+    """
+    Histogram with explicit log-spaced bins + KDE estimated in log10 space.
+
+    KDE (Kernel Density Estimation): a smoothed continuous curve that
+    estimates the probability distribution of the data. Each observation
+    contributes a small bell-shaped Gaussian kernel; their sum forms
+    the line. More robust than a histogram because it does not depend
+    on bin choice.
+    """
     dist = gaps[gaps["gap_days"].notna() & (gaps["gap_days"] > 0)].copy()
     vals = dist["gap_days"]
     log_bins = np.logspace(np.log10(vals.min()), np.log10(vals.max()), 55)
@@ -397,11 +472,13 @@ def _plot_kde_hist(gaps: pd.DataFrame, output_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(12, 6))
     fig.subplots_adjust(bottom=0.30)
 
-    ax.hist(vals, bins=log_bins, color="#d17c58", alpha=0.55,
-            edgecolor="white", linewidth=0.3)
+    ax.hist(
+        vals, bins=log_bins, color="#d17c58", alpha=0.55,
+        edgecolor="white", linewidth=0.3,
+    )
     ax.set_xscale("log")
 
-    # KDE in log10 space
+    # KDE in log10 space → projected back to original axis
     log_vals = np.log10(vals)
     kde = gaussian_kde(log_vals, bw_method=0.25)
     xr = np.linspace(log_vals.min(), log_vals.max(), 500)
@@ -415,9 +492,11 @@ def _plot_kde_hist(gaps: pd.DataFrame, output_path: Path) -> None:
     for p, c in pct_colors.items():
         v = np.percentile(vals, p)
         ax.axvline(v, color=c, lw=1.8, ls=":")
-        ax.text(v * 1.06, ax.get_ylim()[1] * 0.65,
-                f"P{p}\n{int(v)}d", fontsize=7.5, color=c,
-                va="top", fontweight="bold")
+        ax.text(
+            v * 1.06, ax.get_ylim()[1] * 0.65,
+            f"P{p}\n{int(v)}d",
+            fontsize=7.5, color=c, va="top", fontweight="bold",
+        )
         pct_handles.append(
             mlines.Line2D([], [], color=c, lw=1.8, ls=":",
                           label=f"P{p} = {int(v)} days")
@@ -428,8 +507,10 @@ def _plot_kde_hist(gaps: pd.DataFrame, output_path: Path) -> None:
     for (label, days), color in zip(TIME_REFS.items(), REF_COLORS):
         if vals.min() < days < vals.max():
             ax.axvline(days, color=color, lw=1.8, ls="--", alpha=0.9)
-            ax.text(days * 1.05, ax.get_ylim()[1] * 0.93, label,
-                    fontsize=8, color=color, va="top", fontweight="bold")
+            ax.text(
+                days * 1.05, ax.get_ylim()[1] * 0.93,
+                label, fontsize=8, color=color, va="top", fontweight="bold",
+            )
             ref_handles.append(
                 mlines.Line2D([], [], color=color, lw=1.8, ls="--", label=label)
             )
@@ -441,79 +522,107 @@ def _plot_kde_hist(gaps: pd.DataFrame, output_path: Path) -> None:
 
     h_hist = mpatches.Patch(color="#d17c58", alpha=0.6, label="Histogram")
     h_kde  = mlines.Line2D([], [], color="#7c3d20", lw=2, label="KDE (log-space)")
-    _legend_below(ax, handles=[h_hist, h_kde] + pct_handles + ref_handles,
-                  ncol=4, title="Legend")
+    _legend_below(
+        ax,
+        handles=[h_hist, h_kde] + pct_handles + ref_handles,
+        ncol=4,
+        title="Legend",
+    )
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Plot 5 — KDE by interval type
+# Plot 5 — KDE by canonical inter-phase transition
 # ─────────────────────────────────────────────────────────────────────
 
 def _plot_kde_by_interval(gaps: pd.DataFrame, output_path: Path) -> None:
-    dist = gaps[gaps["gap_days"].notna() & (gaps["gap_days"] > 0)].copy()
-    dist = dist[~dist["transition_interval"].str.startswith("(missing)→")].copy()
-    dist = dist[~dist["transition_interval"].str.startswith("nan→")].copy()
+    """
+    One KDE curve per canonical inter-phase transition:
+        V1→V2, V2→V3, V3→V4, V4→V5, V5→V6.
 
-    phases = [
-        (ph, sub) for ph, sub in dist.groupby("transition_interval") if len(sub) >= 10
-    ]
-    if len(phases) < 2:
-        print("  [!] Not enough groups for kde_by_interval — skipping.")
+    Same-phase transitions (e.g. V2→V2, two records of the same phase
+    on consecutive days) are explicitly excluded by filtering against
+    CANONICAL_TRANSITIONS.
+    """
+    dist = gaps[gaps["gap_days"].notna() & (gaps["gap_days"] > 0)].copy()
+
+    # Keep ONLY defined canonical inter-phase pairs
+    dist = dist[dist["transition_interval"].isin(CANONICAL_TRANSITIONS.keys())].copy()
+
+    if dist.empty:
+        print("  [!] No canonical inter-phase transitions found — skipping kde_by_interval.")
         return
 
-    phases = sorted(phases, key=lambda x: len(x[1]), reverse=True)[:8]
+    # Plot in canonical order
+    present = [t for t in CANONICAL_TRANSITIONS.keys()
+               if t in dist["transition_interval"].unique()]
 
-    def short(s: str, n: int = 44) -> str:
-        return s if len(s) <= n else s[:n] + "…"
+    palette = sns.color_palette("tab10", len(present))
 
     fig, ax = plt.subplots(figsize=(12, 6))
-    fig.subplots_adjust(bottom=0.42)
+    fig.subplots_adjust(bottom=0.38)
 
-    palette = sns.color_palette("tab10", len(phases))
     line_handles = []
-    for (ph, sub), color in zip(phases, palette):
-        log_sub = np.log10(sub["gap_days"].clip(lower=0.5))
+    for trans, color in zip(present, palette):
+        sub = dist[dist["transition_interval"] == trans]["gap_days"]
+        if len(sub) < 5:
+            continue
+        log_sub = np.log10(sub.clip(lower=0.5))
         xr = np.linspace(log_sub.min(), log_sub.max(), 400)
         kde = gaussian_kde(log_sub, bw_method=0.3)
-        ax.plot(10**xr, kde(xr), lw=2, color=color)
+        label = CANONICAL_TRANSITIONS[trans]
+        ax.plot(10**xr, kde(xr), lw=2.2, color=color)
         line_handles.append(
-            mlines.Line2D([], [], color=color, lw=2,
-                          label=f"{short(ph)} (n={len(sub)})")
+            mlines.Line2D([], [], color=color, lw=2.2,
+                          label=f"{label}  (n={len(sub)})")
         )
 
     ax.set_xscale("log")
 
+    # Thin, translucent vertical reference lines
     ref_handles = []
     for (label, days), color in zip(TIME_REFS.items(), REF_COLORS):
-        ax.axvline(days, color=color, lw=1.8, ls="--", alpha=0.9, zorder=0)
+        ax.axvline(days, color=color, lw=1.0, ls="--", alpha=0.55, zorder=0)
         ref_handles.append(
-            mlines.Line2D([], [], color=color, lw=1.8, ls="--", label=label)
+            mlines.Line2D([], [], color=color, lw=1.0, ls="--",
+                          alpha=0.7, label=label)
         )
 
-    ax.set_xlabel("Days between visits (log scale)", labelpad=110)
+    ax.set_xlabel("Days between visits (log scale)", labelpad=10)
     ax.set_ylabel("KDE density")
-    ax.set_title("Gap distribution by evaluation type transition", fontsize=12)
-    ax.grid(axis="x", linestyle=":", alpha=0.3)
-
-    _legend_below(ax, handles=line_handles, ncol=2,
-                  title="Transition type", y_offset=-0.52)
-    # Small legend for time refs in corner
-    ax.legend(
-        handles=ref_handles, loc="upper right",
-        fontsize=7, title="Time refs", title_fontsize=7.5,
-        frameon=True, framealpha=0.85,
+    ax.set_title(
+        "Gap distribution by canonical inter-phase transition\n"
+        "(V1→V2, V2→V3, V3→V4, V4→V5, V5→V6)",
+        fontsize=12,
     )
-    # Re-apply the main legend (legend() call above overwrites it)
+    ax.grid(axis="x", linestyle=":", alpha=0.25)
+
+    # Time refs: small legend inside upper-right corner
+    ax.legend(
+        handles=ref_handles,
+        loc="upper right",
+        fontsize=7,
+        title="Time refs",
+        title_fontsize=7.5,
+        frameon=True,
+        framealpha=0.85,
+        ncol=2,
+    )
+
+    # Transition lines: below x-axis via figure legend
     fig.legend(
         handles=line_handles,
         loc="lower center",
         bbox_to_anchor=(0.5, 0.0),
-        ncol=2, fontsize=8,
-        title="Transition type", title_fontsize=8.5,
-        frameon=True, framealpha=0.9,
+        ncol=2,
+        fontsize=8,
+        title="Canonical transition",
+        title_fontsize=8.5,
+        frameon=True,
+        framealpha=0.9,
     )
+
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
@@ -527,6 +636,11 @@ def _plot_heatmap(
     subject_col: str,
     output_path: Path,
 ) -> pd.DataFrame:
+    """
+    Heatmap: patients (rows) × 30-day bins since baseline (columns).
+    Columns beyond last recorded activity are trimmed.
+    Reference lines at 6 mo, 2, 4, 6, 8, 10 years.
+    """
     patient_rank = (
         seq.groupby(subject_col, as_index=False)["visit_order"]
         .max().rename(columns={"visit_order": "n_visits"})
@@ -535,7 +649,9 @@ def _plot_heatmap(
     )
     patient_rank["patient_rank"] = np.arange(len(patient_rank))
 
-    heat_data = seq.merge(patient_rank[[subject_col, "patient_rank"]], on=subject_col, how="left")
+    heat_data = seq.merge(
+        patient_rank[[subject_col, "patient_rank"]], on=subject_col, how="left"
+    )
     heat_data["time_bin_30d"] = (heat_data["day_from_first"] // 30).astype(int)
 
     matrix = (
@@ -564,19 +680,24 @@ def _plot_heatmap(
         if bin_num in col_list:
             col_pos = col_list.index(bin_num) + 0.5
             ax.axvline(col_pos, color=color, lw=2.0, ls="--", alpha=0.9)
-            ax.text(col_pos + 0.3, matrix.shape[0] * 0.03,
-                    label, fontsize=8.5, color=color,
-                    va="bottom", fontweight="bold")
+            ax.text(
+                col_pos + 0.3, matrix.shape[0] * 0.03,
+                label, fontsize=8.5, color=color,
+                va="bottom", fontweight="bold",
+            )
             ref_handles.append(
                 mlines.Line2D([], [], color=color, lw=2.0, ls="--", label=label)
             )
 
-    ax.set_title("Patient activity heatmap (30-day bins from baseline)", fontsize=12)
+    ax.set_title(
+        "Patient activity heatmap (30-day bins from baseline)", fontsize=12
+    )
     ax.set_xlabel("Time bin (30 days from first record)", labelpad=45)
     ax.set_ylabel(f"Patients (n={matrix.shape[0]}), sorted by N visits")
     ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=6)
 
-    _legend_below(ax, handles=ref_handles, ncol=6, title="Time references")
+    _legend_below(ax, handles=ref_handles, ncol=8, title="Time references")
+
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
@@ -595,9 +716,12 @@ def _plot_optional_position(
     output_path: Path,
 ) -> None:
     """
-    For each optional visit, find which canonical phase was last seen
-    for that patient. Shows where optionals tend to appear in the sequence.
-    Always uses the full dataset regardless of INCLUDE_OPTIONAL.
+    For each optional visit, identify which canonical phase was the last
+    one seen for that patient at or before that date. Shows a strip plot:
+        x = last canonical phase context
+        y = optional evaluation type (labeled on y-axis; no color legend needed)
+
+    Always runs on the full dataset regardless of INCLUDE_OPTIONAL.
     """
     all_seq = visits[[subject_col, visit_date_col, interval_col]].copy()
     all_seq[visit_date_col] = pd.to_datetime(all_seq[visit_date_col], errors="coerce")
@@ -615,13 +739,19 @@ def _plot_optional_position(
 
     results = []
     for _, row in opts.iterrows():
-        pid, opt_date, opt_name = row[subject_col], row[visit_date_col], row["interval_name"]
-        before = canon[(canon[subject_col] == pid) & (canon[visit_date_col] <= opt_date)]
+        pid      = row[subject_col]
+        opt_date = row[visit_date_col]
+        opt_name = row["interval_name"]
+
+        before = canon[
+            (canon[subject_col] == pid) & (canon[visit_date_col] <= opt_date)
+        ]
         if before.empty:
             phase_ctx = "Before V2 (Initial)"
         else:
             last = before.sort_values(visit_date_col).iloc[-1]
             phase_ctx = PHASE_LABELS.get(last["interval_name"], last["interval_name"])
+
         results.append({"optional_type": opt_name, "phase_context": phase_ctx})
 
     result_df = pd.DataFrame(results)
@@ -629,34 +759,37 @@ def _plot_optional_position(
     phase_order_labels = ["Before V2 (Initial)"] + [
         PHASE_LABELS[p] for p in PHASE_ORDER if p in PHASE_LABELS
     ]
-    present_contexts = [p for p in phase_order_labels if p in result_df["phase_context"].values]
-
-    fig, ax = plt.subplots(figsize=(11, 5))
-    fig.subplots_adjust(bottom=0.35)
+    present_ctx = [p for p in phase_order_labels
+                   if p in result_df["phase_context"].values]
+    opt_order   = [o for o in OPTIONAL_PHASES
+                   if o in result_df["optional_type"].values]
 
     palette = sns.color_palette("Set2", len(OPTIONAL_PHASES))
-    opt_order = [o for o in OPTIONAL_PHASES if o in result_df["optional_type"].values]
+    opt_color_map = {opt: palette[i] for i, opt in enumerate(OPTIONAL_PHASES)}
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    fig.subplots_adjust(bottom=0.28)
 
     sns.stripplot(
         data=result_df,
-        x="phase_context", y="optional_type",
-        order=present_contexts, hue="optional_type",
-        hue_order=opt_order, palette=palette,
-        jitter=0.25, size=6, alpha=0.75, ax=ax, legend=False,
+        x="phase_context",
+        y="optional_type",
+        order=present_ctx,
+        hue="optional_type",
+        hue_order=opt_order,
+        palette=[opt_color_map[o] for o in opt_order],
+        jitter=0.25,
+        size=7,
+        alpha=0.75,
+        ax=ax,
+        legend=False,   # y-axis labels each row — no color legend needed
     )
-
-    handles = [
-        mpatches.Patch(color=palette[i], label=opt)
-        for i, opt in enumerate(opt_order)
-    ]
-    _legend_below(ax, handles=handles, ncol=4,
-                  title="Optional evaluation type")
 
     ax.set_title(
         "Optional evaluations: position relative to canonical phase sequence",
         fontsize=12,
     )
-    ax.set_xlabel("Last canonical phase before optional visit", labelpad=60)
+    ax.set_xlabel("Last canonical phase before optional visit", labelpad=12)
     ax.set_ylabel("Optional evaluation type")
     ax.tick_params(axis="x", rotation=25)
     ax.grid(axis="x", linestyle=":", alpha=0.3)
@@ -674,8 +807,8 @@ def main() -> None:
 
     print_script_overview(
         "08_visit_patterns.py",
-        "Analyzes patient visit dynamics and exports plot datasets + figures. "
-        f"INCLUDE_OPTIONAL={INCLUDE_OPTIONAL}",
+        "Analyzes patient visit dynamics and exports plot datasets + figures.\n"
+        f"  INCLUDE_OPTIONAL = {INCLUDE_OPTIONAL}",
     )
 
     print_step(1, "Load visits_long and resolve canonical columns")
@@ -691,7 +824,10 @@ def main() -> None:
     )
     interval_map = (
         seq.groupby("interval_name", dropna=False, as_index=False)
-        .agg(n_visits=("interval_name", "size"), n_patients=(subject_col, "nunique"))
+        .agg(
+            n_visits=("interval_name", "size"),
+            n_patients=(subject_col, "nunique"),
+        )
         .sort_values("n_visits", ascending=False)
     )
 
@@ -701,24 +837,28 @@ def main() -> None:
     print_step(4, "Save plot-ready datasets")
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     interval_map.to_csv(PLOTS_DIR / "interval_name_map.csv", index=False)
-    seq[[subject_col, "visit_order", "interval_name",
-         visit_date_col, "day_from_first"]].to_csv(
-        PLOTS_DIR / "plot_data_swimmer.csv", index=False
-    )
-    gaps[[subject_col, "transition_order", "transition_interval",
-          "gap_days"]].to_csv(PLOTS_DIR / "plot_data_violin.csv", index=False)
-    gaps[[subject_col, "gap_days", "transition_order"]].to_csv(
-        PLOTS_DIR / "plot_data_kde_hist.csv", index=False
-    )
+    seq[
+        [subject_col, "visit_order", "interval_name", visit_date_col, "day_from_first"]
+    ].to_csv(PLOTS_DIR / "plot_data_swimmer.csv", index=False)
+    gaps[
+        [subject_col, "transition_order", "transition_interval", "gap_days"]
+    ].to_csv(PLOTS_DIR / "plot_data_violin.csv", index=False)
+    gaps[
+        [subject_col, "gap_days", "transition_order"]
+    ].to_csv(PLOTS_DIR / "plot_data_kde_hist.csv", index=False)
 
     print_step(5, "Render plots")
 
-    _plot_swimmer(seq, subject_col,
-                  PLOTS_DIR / "swimmer_all_records.png", xlim_days=3650)
+    _plot_swimmer(
+        seq, subject_col,
+        PLOTS_DIR / "swimmer_all_records.png",
+        xlim_days=3650,
+    )
 
     _plot_swimmer_phase1_baseline(
         seq, subject_col, visit_date_col,
-        PLOTS_DIR / "swimmer_phase1_baseline.png", xlim_days=3650,
+        PLOTS_DIR / "swimmer_phase1_baseline.png",
+        xlim_days=3650,
     )
 
     _plot_violin(gaps, PLOTS_DIR / "violin_transition_plot.png")
@@ -730,7 +870,7 @@ def main() -> None:
     hm = _plot_heatmap(seq, subject_col, PLOTS_DIR / "heatmap_patient_time.png")
     hm.to_csv(PLOTS_DIR / "plot_data_heatmap_matrix.csv", index=False)
 
-    # Always runs on full data regardless of INCLUDE_OPTIONAL
+    # Always uses full data regardless of INCLUDE_OPTIONAL
     _plot_optional_position(
         visits, subject_col, visit_date_col, interval_col,
         PLOTS_DIR / "optional_eval_position.png",
@@ -739,15 +879,15 @@ def main() -> None:
     print_kv(
         "Visit patterns summary",
         {
-            "n_patients":        int(seq[subject_col].nunique(dropna=True)),
-            "n_visits":          int(len(seq)),
-            "n_transitions":     int(len(gaps)),
-            "n_interval_names":  int(interval_map["interval_name"].nunique(dropna=False)),
-            "gap_days_median":   int(gaps["gap_days"].median()),
-            "gap_days_p25":      int(gaps["gap_days"].quantile(0.25)),
-            "gap_days_p75":      int(gaps["gap_days"].quantile(0.75)),
-            "include_optional":  INCLUDE_OPTIONAL,
-            "output_dir":        str(PLOTS_DIR),
+            "n_patients":       int(seq[subject_col].nunique(dropna=True)),
+            "n_visits":         int(len(seq)),
+            "n_transitions":    int(len(gaps)),
+            "n_interval_names": int(interval_map["interval_name"].nunique(dropna=False)),
+            "gap_days_median":  int(gaps["gap_days"].median()),
+            "gap_days_p25":     int(gaps["gap_days"].quantile(0.25)),
+            "gap_days_p75":     int(gaps["gap_days"].quantile(0.75)),
+            "include_optional": INCLUDE_OPTIONAL,
+            "output_dir":       str(PLOTS_DIR),
         },
     )
     logger.info("Saved visit pattern outputs in %s", PLOTS_DIR)
