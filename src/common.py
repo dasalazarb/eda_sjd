@@ -220,6 +220,24 @@ def _concat_aligned_by_column_name(existing_df: pd.DataFrame, new_df: pd.DataFra
     return pd.concat([left, right], ignore_index=True)
 
 
+def merge_sheet_dicts(
+    base: dict[str, pd.DataFrame],
+    incoming: dict[str, pd.DataFrame],
+) -> dict[str, pd.DataFrame]:
+    """Merge sheet DataFrames without overwriting same-name sheets in-memory.
+
+    This is specially useful when consolidated sheet names repeat
+    (e.g., data_summary, missing) for multiple datasets within the same script run.
+    """
+    merged = dict(base)
+    for sheet_name, df in incoming.items():
+        if sheet_name in merged:
+            merged[sheet_name] = _concat_aligned_by_column_name(merged[sheet_name], df)
+        else:
+            merged[sheet_name] = df.copy()
+    return merged
+
+
 def upsert_eda_sheets_xlsx(
     workbook_path: Path | str = EDA_UNIFIED_REPORT_PATH,
     sheets_dict: dict[str, pd.DataFrame] | None = None,

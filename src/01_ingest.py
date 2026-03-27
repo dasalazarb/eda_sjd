@@ -16,6 +16,7 @@ from common import (
     print_script_overview,
     print_step,
     replace_empty_with_nan,
+    merge_sheet_dicts,
     save_parquet_and_csv,
     setup_logger,
     standardize_columns,
@@ -102,10 +103,16 @@ def main() -> None:
     )
     print_step(4, "Build baseline/input and clean/output EDA and append sheets to unified workbook")
     sheets = {}
-    sheets.update(build_targeted_eda_sheets(input11_baseline, "01_11D_input", "01_11D_input", consolidated=True))
-    sheets.update(build_targeted_eda_sheets(df11, "01_11D_output", "01_11D_output", consolidated=True))
-    sheets.update(build_targeted_eda_sheets(input15_baseline, "01_15D_input", "01_15D_input", consolidated=True))
-    sheets.update(build_targeted_eda_sheets(df15, "01_15D_output", "01_15D_output", consolidated=True))
+    sheets = merge_sheet_dicts(
+        sheets,
+        build_targeted_eda_sheets(input11_baseline, "01_11D_input", "01_11D_input", consolidated=True),
+    )
+    sheets = merge_sheet_dicts(sheets, build_targeted_eda_sheets(df11, "01_11D_output", "01_11D_output", consolidated=True))
+    sheets = merge_sheet_dicts(
+        sheets,
+        build_targeted_eda_sheets(input15_baseline, "01_15D_input", "01_15D_input", consolidated=True),
+    )
+    sheets = merge_sheet_dicts(sheets, build_targeted_eda_sheets(df15, "01_15D_output", "01_15D_output", consolidated=True))
     workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
     logger.info("Updated unified EDA workbook: %s", workbook)
 

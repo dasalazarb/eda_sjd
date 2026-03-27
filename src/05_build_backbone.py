@@ -7,6 +7,7 @@ from common import (
     EDA_UNIFIED_REPORT_PATH,
     INTERMEDIATE_DIR,
     build_targeted_eda_sheets,
+    merge_sheet_dicts,
     print_kv,
     print_script_overview,
     print_step,
@@ -78,10 +79,14 @@ def main() -> None:
     )
     print_step(4, "Append targeted EDA for patient_master and visits to unified workbook")
     sheets = {}
-    sheets.update(
-        build_targeted_eda_sheets(master, "05_patient_master_output", "05_patient_master_output", consolidated=True)
+    sheets = merge_sheet_dicts(
+        sheets,
+        build_targeted_eda_sheets(master, "05_patient_master_output", "05_patient_master_output", consolidated=True),
     )
-    sheets.update(build_targeted_eda_sheets(visits, "05_visits_long_output", "05_visits_long_output", consolidated=True))
+    sheets = merge_sheet_dicts(
+        sheets,
+        build_targeted_eda_sheets(visits, "05_visits_long_output", "05_visits_long_output", consolidated=True),
+    )
     workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
     logger.info("Updated unified EDA workbook: %s", workbook)
 
