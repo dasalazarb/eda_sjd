@@ -164,7 +164,14 @@ La salida unificada de EDA vive en:
 
 ### Esquema global de hojas consolidadas
 
-El workbook usa un conjunto fijo de hojas globales (no una hoja por `dataset_base` + sufijo):
+Para evitar confusión operativa, este artefacto sigue estas reglas explícitas:
+
+1. Existe **un único workbook consolidado**: `reports/eda_unificado.xlsx`.
+2. Las hojas usan **nombres globales sin prefijos por dataset** (por ejemplo `data_summary`, `missing`, `cat_dist`, `date_stats`, `visit_dist`).
+3. Cada ejecución del pipeline **apila filas** en la hoja global que corresponde al tipo de métrica.
+4. El origen de cada fila se registra en la columna **`dataset`**.
+
+El workbook usa un conjunto fijo de hojas globales:
 
 - `data_summary`
 - `missing`
@@ -173,6 +180,11 @@ El workbook usa un conjunto fijo de hojas globales (no una hoja por `dataset_bas
 - `visit_dist`
 
 En estas hojas, cada fila corresponde al perfil de un dataset/etapa específico y se consolida en una única tabla por tipo de métrica.
+
+### Antes vs después (nombres de hoja)
+
+- **Antes (incorrecto para la operación actual):** `11d_data_summary`, `15d_missing`
+- **Después (convención vigente):** `data_summary`, `missing`
 
 ### Reglas de cobertura
 
