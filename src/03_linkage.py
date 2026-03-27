@@ -9,6 +9,7 @@ from common import (
     EDA_UNIFIED_REPORT_PATH,
     INTERMEDIATE_DIR,
     build_targeted_eda_sheets,
+    merge_sheet_dicts,
     print_kv,
     print_script_overview,
     print_step,
@@ -127,16 +128,18 @@ def main() -> None:
     print_kv("Episode candidates", {"n_candidates": len(ep)})
     print_step(4, "Append targeted EDA for overlap/episode outputs to unified workbook")
     sheets = {}
-    sheets.update(
-        build_targeted_eda_sheets(ov, "03_overlap_subjects_output", "03_overlap_subjects_output", consolidated=True)
+    sheets = merge_sheet_dicts(
+        sheets,
+        build_targeted_eda_sheets(ov, "03_overlap_subjects_output", "03_overlap_subjects_output", consolidated=True),
     )
-    sheets.update(
+    sheets = merge_sheet_dicts(
+        sheets,
         build_targeted_eda_sheets(
             ep,
             "03_episode_candidates_output",
             "03_episode_candidates_output",
             consolidated=True,
-        )
+        ),
     )
     workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
     logger.info("Updated unified EDA workbook: %s", workbook)

@@ -7,6 +7,7 @@ from common import (
     EDA_UNIFIED_REPORT_PATH,
     REPORTS_DIR,
     build_targeted_eda_sheets,
+    merge_sheet_dicts,
     print_kv,
     print_script_overview,
     print_step,
@@ -63,10 +64,14 @@ def main() -> None:
     logger.info("Saved reports/eda_postmerge.csv")
     print_step(5, "Append targeted EDA for post-merge datasets to unified workbook")
     sheets = {}
-    sheets.update(
+    sheets = merge_sheet_dicts(
+        sheets,
         build_targeted_eda_sheets(master, "06_patient_master_output", "06_patient_master_output", consolidated=True)
     )
-    sheets.update(build_targeted_eda_sheets(visits, "06_visits_long_output", "06_visits_long_output", consolidated=True))
+    sheets = merge_sheet_dicts(
+        sheets,
+        build_targeted_eda_sheets(visits, "06_visits_long_output", "06_visits_long_output", consolidated=True),
+    )
     workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
     logger.info("Updated unified EDA workbook: %s", workbook)
 
