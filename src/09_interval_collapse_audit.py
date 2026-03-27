@@ -1,0 +1,217 @@
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+
+import pandas as pd
+
+from common import (
+    ANALYTIC_DIR,
+    REPORTS_DIR,
+    print_kv,
+    print_script_overview,
+    print_step,
+    resolve_canonical_column,
+    setup_logger,
+)
+
+
+@dataclass(frozen=True)
+class CollapseConfig:
+    collapse: bool
+
+
+def _normalize_yes_no(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"yes", "y", "true", "1"}:
+        return True
+    if normalized in {"no", "n", "false", "0"}:
+        return False
+    raise argparse.ArgumentTypeError("collapse must be one of: yes/no, true/false, 1/0")
+
+
+def _parse_args() -> CollapseConfig:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Audits repeated measures inside SUBJECT_NUMBER x INTERVAL_NAME and "
+            "optionally collapses them into one row per patient-interval."
+        )
+    )
+    parser.add_argument(
+        "--collapse",
+        default="no",
+        type=_normalize_yes_no,
+        help="Set to yes/no to save a collapsed table (default: no).",
+    )
+    args = parser.parse_args()
+    return CollapseConfig(collapse=bool(args.collapse))
+
+
+def _resolve_columns(visits: pd.DataFrame) -> tuple[str, str, str]:
+    subject_col = resolve_canonical_column(visits, "subject_number")
+    interval_col = resolve_canonical_column(visits, "interval_name")
+
+    try:
+        visit_date_col = resolve_canonical_column(visits, "visit_date")
+    except KeyError:
+        visit_datetime_col = resolve_canonical_column(visits, "visit_datetime")
+        visits["visit_date"] = pd.to_datetime(visits[visit_datetime_col], errors="coerce").dt.normalize()
+        visit_date_col = "visit_date"
+
+    return subject_col, interval_col, visit_date_col
+
+
+def _collapse_column(series: pd.Series):
+    non_missing = series.dropna()
+    if non_missing.empty:
+        return pd.NA
+
+    if pd.api.types.is_numeric_dtype(non_missing):
+        return non_missing.max()
+
+    unique_values = pd.unique(non_missing)
+    if len(unique_values) == 1:
+        return unique_values[0]
+
+    # Deterministic fallback for conflicting non-numeric values.
+    return sorted(map(str, unique_values))[0]
+
+
+def _build_variable_audit(
+    visits: pd.DataFrame,
+    group_cols: list[str],
+    excluded_cols: set[str],
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    group_size = visits.groupby(group_cols).size().rename("n_rows_group")
+
+    for col in visits.columns:
+        if col in excluded_cols:
+            continue
+
+        non_missing_count = visits.groupby(group_cols)[col].apply(lambda s: s.notna().sum())
+        distinct_non_missing = visits.groupby(group_cols)[col].apply(lambda s: s.dropna().nunique())
+
+        repeated_mask = group_size > 1
+        affected_groups = int((repeated_mask & (non_missing_count > 0)).sum())
+        conflict_groups = int((repeated_mask & (distinct_non_missing > 1)).sum())
+        complementary_groups = int((repeated_mask & (non_missing_count > 0) & (distinct_non_missing <= 1)).sum())
+
+        rows.append(
+            {
+                "variable": col,
+                "groups_with_repeated_rows": int(repeated_mask.sum()),
+                "affected_groups": affected_groups,
+                "complementary_groups": complementary_groups,
+                "conflict_groups": conflict_groups,
+                "pct_conflict_among_affected": round(
+                    (100 * conflict_groups / affected_groups) if affected_groups else 0.0,
+                    2,
+                ),
+                "pct_complementary_among_affected": round(
+                    (100 * complementary_groups / affected_groups) if affected_groups else 0.0,
+                    2,
+                ),
+            }
+        )
+
+    audit = pd.DataFrame(rows).sort_values(
+        ["conflict_groups", "complementary_groups", "affected_groups"],
+        ascending=False,
+    )
+    return audit
+
+
+def main() -> None:
+    config = _parse_args()
+    logger = setup_logger("09_interval_collapse_audit")
+
+    print_script_overview(
+        "09_interval_collapse_audit.py",
+        "Audits repeated measurements by interval and optionally collapses to one row per patient-interval.",
+    )
+
+    print_step(1, "Load visits_long")
+    visits = pd.read_parquet(ANALYTIC_DIR / "visits_long.parquet")
+
+    print_step(2, "Resolve canonical columns and prepare grouping keys")
+    subject_col, interval_col, visit_date_col = _resolve_columns(visits)
+    visits[interval_col] = visits[interval_col].astype("string").fillna("(missing)").str.strip()
+    visits[visit_date_col] = pd.to_datetime(visits[visit_date_col], errors="coerce")
+
+    group_cols = [subject_col, interval_col]
+    repeated_groups = visits.groupby(group_cols).size().rename("n_rows").reset_index()
+    repeated_groups = repeated_groups[repeated_groups["n_rows"] > 1].copy()
+
+    print_step(3, "Measure temporal window distribution inside patient-interval groups")
+    window_stats = (
+        visits.groupby(group_cols, as_index=False)
+        .agg(
+            n_rows_group=(subject_col, "size"),
+            min_date=(visit_date_col, "min"),
+            max_date=(visit_date_col, "max"),
+        )
+    )
+    window_stats["window_days"] = (window_stats["max_date"] - window_stats["min_date"]).dt.days
+
+    repeated_window = window_stats[window_stats["n_rows_group"] > 1].copy()
+    repeated_window_summary = pd.DataFrame(
+        [
+            {
+                "metric": "repeated_groups",
+                "value": int(len(repeated_window)),
+            },
+            {
+                "metric": "window_days_p50",
+                "value": float(repeated_window["window_days"].median()) if not repeated_window.empty else 0.0,
+            },
+            {
+                "metric": "window_days_p90",
+                "value": float(repeated_window["window_days"].quantile(0.9)) if not repeated_window.empty else 0.0,
+            },
+            {
+                "metric": "window_days_max",
+                "value": float(repeated_window["window_days"].max()) if not repeated_window.empty else 0.0,
+            },
+        ]
+    )
+
+    print_step(4, "Audit complementarity vs conflicts per variable")
+    excluded_cols = {subject_col, interval_col}
+    variable_audit = _build_variable_audit(visits, group_cols, excluded_cols)
+
+    print_step(5, "Export reports")
+    repeated_groups.to_csv(REPORTS_DIR / "interval_collapse_repeated_groups.csv", index=False)
+    window_stats.to_csv(REPORTS_DIR / "interval_collapse_window_stats.csv", index=False)
+    repeated_window_summary.to_csv(REPORTS_DIR / "interval_collapse_window_summary.csv", index=False)
+    variable_audit.to_csv(REPORTS_DIR / "interval_collapse_variable_audit.csv", index=False)
+
+    if config.collapse:
+        print_step(6, "Collapse to one row per patient-interval and save")
+        sort_cols = [subject_col, interval_col, visit_date_col]
+        sort_cols = [c for c in sort_cols if c in visits.columns]
+        sorted_visits = visits.sort_values(sort_cols)
+
+        aggregated = {
+            col: _collapse_column(sorted_visits[col])
+            for col in sorted_visits.columns
+            if col not in group_cols
+        }
+        collapsed = sorted_visits.groupby(group_cols, as_index=False).agg(aggregated)
+        collapsed.to_parquet(ANALYTIC_DIR / "visits_long_collapsed_by_interval.parquet", index=False)
+        collapsed.to_csv(ANALYTIC_DIR / "visits_long_collapsed_by_interval.csv", index=False)
+        logger.info("Saved collapsed visits to data_analytic/visits_long_collapsed_by_interval.{parquet,csv}")
+
+    metrics = {
+        "rows_original": len(visits),
+        "groups_subject_interval": visits.groupby(group_cols).ngroups,
+        "groups_with_repeated_rows": len(repeated_groups),
+        "collapse_requested": config.collapse,
+    }
+    print_kv("Interval collapse audit", metrics)
+
+    logger.info("Saved reports: interval_collapse_{repeated_groups,window_stats,window_summary,variable_audit}.csv")
+
+
+if __name__ == "__main__":
+    main()
