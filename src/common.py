@@ -592,8 +592,22 @@ def build_input_baseline_summary(df: pd.DataFrame, dataset_name: str) -> pd.Data
     )
 
 
-def build_targeted_eda_sheets(df: pd.DataFrame, dataset_name: str, sheet_prefix: str) -> dict[str, pd.DataFrame]:
+def build_targeted_eda_sheets(
+    df: pd.DataFrame,
+    dataset_name: str,
+    sheet_prefix: str,
+    consolidated: bool = False,
+) -> dict[str, pd.DataFrame]:
     report = build_targeted_eda_report(df=df, dataset_name=dataset_name, include_missing_variants=True)
+    if consolidated:
+        global_sheet_map = {
+            "summary": "data_summary",
+            "cat_dist": "cat_dist",
+            "missing": "missing",
+            "date_stats": "date_stats",
+            "visit_dist": "visit_dist",
+        }
+        return {global_sheet_map.get(key, key): val for key, val in report.items()}
     return {f"{sheet_prefix}_{key}": val for key, val in report.items()}
 
 
