@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import warnings
 from pathlib import Path
 from typing import Iterable
 
@@ -177,13 +178,15 @@ def _make_unique_sheet_names(sheet_names: Iterable[str]) -> dict[str, str]:
     return mapping
 
 
-CONSOLIDATED_EDA_SHEETS = {
-    "data_summary",
-    "cat_dist",
-    "missing",
-    "date_stats",
-    "visit_dist",
+TARGETED_EDA_REPORT_TO_SHEET_MAP = {
+    "summary": "data_summary",
+    "missing": "missing",
+    "cat_dist": "cat_dist",
+    "visit_dist": "visit_dist",
+    "date_stats": "date_stats",
 }
+
+CONSOLIDATED_EDA_SHEETS = set(TARGETED_EDA_REPORT_TO_SHEET_MAP.values())
 
 
 def _normalize_columns_for_concat(df: pd.DataFrame) -> pd.DataFrame:
@@ -637,14 +640,17 @@ def build_targeted_eda_sheets(
 ) -> dict[str, pd.DataFrame]:
     report = build_targeted_eda_report(df=df, dataset_name=dataset_name, include_missing_variants=True)
     if consolidated:
-        global_sheet_map = {
-            "summary": "data_summary",
-            "cat_dist": "cat_dist",
-            "missing": "missing",
-            "date_stats": "date_stats",
-            "visit_dist": "visit_dist",
+        if sheet_prefix.strip():
+            warnings.warn(
+                "sheet_prefix is deprecated when consolidated=True and will be ignored.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return {
+            sheet_name: report[report_key]
+            for report_key, sheet_name in TARGETED_EDA_REPORT_TO_SHEET_MAP.items()
+            if report_key in report
         }
-        return {global_sheet_map.get(key, key): val for key, val in report.items()}
     return {f"{sheet_prefix}_{key}": val for key, val in report.items()}
 
 
