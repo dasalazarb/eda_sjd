@@ -281,6 +281,23 @@ def _safe_resolve_column(df: pd.DataFrame, canonical_name: str) -> str | None:
         return None
 
 
+def _normalize_categorical_series(
+    series: pd.Series,
+    include_missing_variants: bool,
+    normalize_case: str = "lower",
+) -> pd.Series:
+    values = series.astype("string").str.strip()
+    if normalize_case == "lower":
+        values = values.str.lower()
+    elif normalize_case == "upper":
+        values = values.str.upper()
+
+    missing_mask = _normalize_text_missing_mask(series, include_missing_variants)
+    normalized = values.mask(missing_mask, "(missing)")
+    normalized = normalized.fillna("(missing)").replace("", "(missing)")
+    return normalized
+
+
 def build_targeted_eda_report(
     df: pd.DataFrame,
     dataset_name: str,
@@ -334,9 +351,9 @@ def build_targeted_eda_report(
         ]
     )
 
-    # 2) DOB and age_at_visit metrics
+    # 2) DOB, visit_date and age_at_visit metrics
     metric_rows: list[dict[str, object]] = []
-    for var in ["dob", "age_at_visit"]:
+    for var in ["dob", "visit_date", "age_at_visit"]:
         col = resolved_cols[var]
         if not col:
             metric_rows.append(
@@ -350,7 +367,8 @@ def build_targeted_eda_report(
                     "mean": pd.NA,
                     "median": pd.NA,
                     "std": pd.NA,
-                    "unknown_unparseable_values": pd.NA,
+                    "non_parseable_count": pd.NA,
+                    "non_parseable_values": pd.NA,
                 }
             )
             continue
@@ -363,13 +381,13 @@ def build_targeted_eda_report(
             raw_text = raw.astype("string")
             missing_mask = raw.isna()
 
-        if var == "dob":
+        if var in {"dob", "visit_date"}:
             parsed = pd.to_datetime(raw, errors="coerce")
         else:
             parsed = pd.to_numeric(raw, errors="coerce")
 
-        unknown_mask = (~missing_mask) & parsed.isna()
-        unknown_values = sorted({str(v) for v in raw_text[unknown_mask].dropna().unique().tolist()})
+        non_parseable_mask = (~missing_mask) & parsed.isna()
+        non_parseable_values = sorted({str(v) for v in raw_text[non_parseable_mask].dropna().unique().tolist()})
         valid = parsed.dropna()
 
         metric_rows.append(
@@ -378,12 +396,13 @@ def build_targeted_eda_report(
                 "variable": var,
                 "resolved_column": col,
                 "missing_count": int(missing_mask.sum()),
-                "min": valid.min() if not valid.empty else pd.NaT if var == "dob" else pd.NA,
-                "max": valid.max() if not valid.empty else pd.NaT if var == "dob" else pd.NA,
-                "mean": valid.mean() if not valid.empty else pd.NaT if var == "dob" else pd.NA,
-                "median": valid.median() if not valid.empty else pd.NaT if var == "dob" else pd.NA,
-                "std": valid.std() if not valid.empty else pd.NaT if var == "dob" else pd.NA,
-                "unknown_unparseable_values": json.dumps(unknown_values, ensure_ascii=False),
+                "min": valid.min() if not valid.empty else pd.NaT if var in {"dob", "visit_date"} else pd.NA,
+                "max": valid.max() if not valid.empty else pd.NaT if var in {"dob", "visit_date"} else pd.NA,
+                "mean": valid.mean() if (var == "age_at_visit" and not valid.empty) else pd.NA,
+                "median": valid.median() if (var == "age_at_visit" and not valid.empty) else pd.NA,
+                "std": valid.std() if (var == "age_at_visit" and not valid.empty) else pd.NA,
+                "non_parseable_count": int(non_parseable_mask.sum()),
+                "non_parseable_values": json.dumps(non_parseable_values, ensure_ascii=False),
             }
         )
     report["dob_age_metrics"] = pd.DataFrame(metric_rows)
@@ -394,8 +413,12 @@ def build_targeted_eda_report(
         col = resolved_cols[var]
         if not col:
             continue
-        series = working[col].astype("string").str.strip()
-        counts = series.fillna("(missing)").replace("", "(missing)").value_counts(dropna=False)
+        series = _normalize_categorical_series(
+            working[col],
+            include_missing_variants=include_missing_variants,
+            normalize_case="lower",
+        )
+        counts = series.value_counts(dropna=False)
         total = max(int(counts.sum()), 1)
         for value, count in counts.items():
             demo_rows.append(
@@ -411,16 +434,12 @@ def build_targeted_eda_report(
 
     interval_col = resolved_cols["interval_name"]
     if interval_col:
-        interval_counts = (
-            working[interval_col]
-            .astype("string")
-            .str.strip()
-            .fillna("(missing)")
-            .replace("", "(missing)")
-            .value_counts(dropna=False)
-            .rename_axis("interval_name")
-            .reset_index(name="count")
+        interval_series = _normalize_categorical_series(
+            working[interval_col],
+            include_missing_variants=include_missing_variants,
+            normalize_case="lower",
         )
+        interval_counts = interval_series.value_counts(dropna=False).rename_axis("interval_name").reset_index(name="count")
         interval_counts.insert(0, "dataset", dataset_name)
         report["distribution_interval"] = interval_counts
     else:
@@ -432,12 +451,15 @@ def build_targeted_eda_report(
         by_interval_date = (
             pd.DataFrame(
                 {
-                    "interval_name": working[interval_col].astype("string").str.strip(),
+                    "interval_name": _normalize_categorical_series(
+                        working[interval_col],
+                        include_missing_variants=include_missing_variants,
+                        normalize_case="lower",
+                    ),
                     "visit_date": visit_dates,
                 }
             )
             .assign(
-                interval_name=lambda d: d["interval_name"].fillna("(missing)").replace("", "(missing)"),
                 visit_date=lambda d: d["visit_date"].astype("string").fillna("(unparseable/missing)"),
             )
             .value_counts(["interval_name", "visit_date"])
