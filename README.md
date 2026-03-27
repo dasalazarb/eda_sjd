@@ -50,6 +50,7 @@ python src/05_build_backbone.py
 python src/06_postmerge_eda.py
 python src/07_build_cohorts.py
 python src/08_visit_patterns.py
+python src/09_interval_collapse_audit.py --collapse no
 ```
 
 Every script:
@@ -101,6 +102,10 @@ Each script prints an English, step-by-step console narrative with numbered step
    - Maps visit distribution by `INTERVAL_NAME` and patient-level timeline order.
    - Builds complementary visit-pattern visualizations (swimmer, violin by transition, KDE+hist in log scale, and patient×time heatmap).
    - Saves both plot-ready data tables and rendered figures under `reports/visit_patterns/`.
+9. `09_interval_collapse_audit.py`
+   - Audits repeated measurements inside `SUBJECT_NUMBER × INTERVAL_NAME` groups.
+   - Quantifies whether variables are mostly complementary (e.g., `yes` + `NaN` -> `yes`) or conflicting (e.g., `yes` + `no` -> `yes | no`).
+   - Exports temporal-window distribution reports and optionally saves a collapsed one-row-per-group table via `--collapse yes|no`.
 
 ## Operational definitions encoded in the pipeline
 
@@ -143,3 +148,9 @@ Reports:
 - `reports/visit_patterns/violin_transition_plot.png`
 - `reports/visit_patterns/kde_hist_gapdays_plot.png`
 - `reports/visit_patterns/heatmap_patient_time.png`
+- `reports/interval_collapse_repeated_groups.csv`
+- `reports/interval_collapse_variable_audit.csv`
+- `reports/interval_collapse_window_stats.csv`
+- `reports/interval_collapse_window_summary.csv`
+- `reports/interval_collapse_conflict_examples.csv`
+- `data_analytic/visits_long_collapsed_by_interval.parquet` (optional, with `--collapse yes`)
