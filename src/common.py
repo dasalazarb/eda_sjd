@@ -306,14 +306,12 @@ def build_targeted_eda_report(
     """
     Build a compact EDA package with targeted outputs for core patient/visit variables.
 
-    Returns a dictionary of DataFrames with the following keys:
-    - summary_general
-    - dob_age_metrics
-    - distribution_demographics
-    - distribution_interval
-    - distribution_visit_date_by_interval
-    - distribution_visits_per_subject
-    - robust_missing
+    Returns a dictionary of DataFrames with standardized suffix keys:
+    - summary
+    - missing
+    - cat_dist
+    - date_stats
+    - visit_dist
     """
 
     report: dict[str, pd.DataFrame] = {}
@@ -335,7 +333,7 @@ def build_targeted_eda_report(
     # 1) General summary
     patient_col = resolved_cols["patient_record_number"]
     subject_col = resolved_cols["subject_number"]
-    report["summary_general"] = pd.DataFrame(
+    report["summary"] = pd.DataFrame(
         [
             {
                 "dataset": dataset_name,
@@ -405,10 +403,10 @@ def build_targeted_eda_report(
                 "non_parseable_values": json.dumps(non_parseable_values, ensure_ascii=False),
             }
         )
-    report["dob_age_metrics"] = pd.DataFrame(metric_rows)
+    report["date_stats"] = pd.DataFrame(metric_rows)
 
     # 3) Distributions
-    demo_rows: list[dict[str, object]] = []
+    cat_rows: list[dict[str, object]] = []
     for var in ["race", "ethnicity", "sex"]:
         col = resolved_cols[var]
         if not col:
@@ -421,7 +419,7 @@ def build_targeted_eda_report(
         counts = series.value_counts(dropna=False)
         total = max(int(counts.sum()), 1)
         for value, count in counts.items():
-            demo_rows.append(
+            cat_rows.append(
                 {
                     "dataset": dataset_name,
                     "variable": var,
@@ -430,8 +428,6 @@ def build_targeted_eda_report(
                     "pct": round(100 * count / total, 2),
                 }
             )
-    report["distribution_demographics"] = pd.DataFrame(demo_rows)
-
     interval_col = resolved_cols["interval_name"]
     if interval_col:
         interval_series = _normalize_categorical_series(
@@ -439,13 +435,23 @@ def build_targeted_eda_report(
             include_missing_variants=include_missing_variants,
             normalize_case="lower",
         )
-        interval_counts = interval_series.value_counts(dropna=False).rename_axis("interval_name").reset_index(name="count")
-        interval_counts.insert(0, "dataset", dataset_name)
-        report["distribution_interval"] = interval_counts
-    else:
-        report["distribution_interval"] = pd.DataFrame(columns=["dataset", "interval_name", "count"])
+        interval_counts = interval_series.value_counts(dropna=False)
+        total = max(int(interval_counts.sum()), 1)
+        for value, count in interval_counts.items():
+            cat_rows.append(
+                {
+                    "dataset": dataset_name,
+                    "variable": "interval_name",
+                    "value": value,
+                    "count": int(count),
+                    "pct": round(100 * count / total, 2),
+                }
+            )
+
+    report["cat_dist"] = pd.DataFrame(cat_rows)
 
     visit_date_col = resolved_cols["visit_date"]
+    visit_dist_frames: list[pd.DataFrame] = []
     if interval_col and visit_date_col:
         visit_dates = pd.to_datetime(working[visit_date_col], errors="coerce").dt.date
         by_interval_date = (
@@ -468,11 +474,11 @@ def build_targeted_eda_report(
             .sort_values(["interval_name", "visit_date"])
         )
         by_interval_date.insert(0, "dataset", dataset_name)
-        report["distribution_visit_date_by_interval"] = by_interval_date
-    else:
-        report["distribution_visit_date_by_interval"] = pd.DataFrame(
-            columns=["dataset", "interval_name", "visit_date", "count"]
+        by_interval_date = by_interval_date.rename(
+            columns={"interval_name": "group_value", "visit_date": "subgroup_value", "count": "n"}
         )
+        by_interval_date.insert(1, "distribution_type", "visit_date_by_interval")
+        visit_dist_frames.append(by_interval_date[["dataset", "distribution_type", "group_value", "subgroup_value", "n"]])
 
     if subject_col:
         visits_per_subject = (
@@ -490,9 +496,20 @@ def build_targeted_eda_report(
             .sort_values("n_visits")
         )
         distribution_visits.insert(0, "dataset", dataset_name)
-        report["distribution_visits_per_subject"] = distribution_visits
-    else:
-        report["distribution_visits_per_subject"] = pd.DataFrame(columns=["dataset", "n_visits", "n_subjects"])
+        distribution_visits = distribution_visits.rename(
+            columns={"n_visits": "group_value", "n_subjects": "n"}
+        )
+        distribution_visits.insert(1, "distribution_type", "subjects_by_n_visits")
+        distribution_visits["subgroup_value"] = pd.NA
+        visit_dist_frames.append(
+            distribution_visits[["dataset", "distribution_type", "group_value", "subgroup_value", "n"]]
+        )
+
+    report["visit_dist"] = (
+        pd.concat(visit_dist_frames, ignore_index=True)
+        if visit_dist_frames
+        else pd.DataFrame(columns=["dataset", "distribution_type", "group_value", "subgroup_value", "n"])
+    )
 
     # 4) Robust missingness for target variables
     missing_rows: list[dict[str, object]] = []
@@ -531,7 +548,7 @@ def build_targeted_eda_report(
             }
         )
 
-    report["robust_missing"] = pd.DataFrame(missing_rows)
+    report["missing"] = pd.DataFrame(missing_rows)
     return report
 
 
@@ -576,12 +593,7 @@ def build_input_baseline_summary(df: pd.DataFrame, dataset_name: str) -> pd.Data
 
 def build_targeted_eda_sheets(df: pd.DataFrame, dataset_name: str, sheet_prefix: str) -> dict[str, pd.DataFrame]:
     report = build_targeted_eda_report(df=df, dataset_name=dataset_name, include_missing_variants=True)
-    status = build_target_columns_status(df=df, dataset_name=dataset_name)
-    sheets: dict[str, pd.DataFrame] = {
-        f"{sheet_prefix}_target_columns_status": status,
-    }
-    sheets.update({f"{sheet_prefix}_{key}": val for key, val in report.items()})
-    return sheets
+    return {f"{sheet_prefix}_{key}": val for key, val in report.items()}
 
 
 def print_kv(title: str, kv: dict[str, object]) -> None:
