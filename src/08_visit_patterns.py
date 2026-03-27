@@ -894,7 +894,11 @@ def main() -> None:
         },
     )
     print_step(6, "Append targeted EDA for transformed visits dataset to unified workbook")
-    sheets = build_targeted_eda_sheets(seq, "08_visits_transformed_patterns", "08_visits_transformed")
+    sheets = build_targeted_eda_sheets(
+        seq,
+        "08_visits_transformed_patterns_output",
+        "08_visits_transformed_patterns_output",
+    )
     workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
     logger.info("Updated unified EDA workbook: %s", workbook)
     logger.info("Saved visit pattern outputs in %s", PLOTS_DIR)

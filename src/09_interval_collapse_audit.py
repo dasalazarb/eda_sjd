@@ -289,9 +289,15 @@ def main() -> None:
     print_kv("Interval collapse audit", metrics)
     print_step(7, "Append targeted EDA for visits/collapsed outputs to unified workbook")
     sheets = {}
-    sheets.update(build_targeted_eda_sheets(visits, "09_visits_long", "09_visits_long"))
+    sheets.update(build_targeted_eda_sheets(visits, "09_visits_long_output", "09_visits_long_output"))
     if collapsed is not None:
-        sheets.update(build_targeted_eda_sheets(collapsed, "09_collapsed_by_interval", "09_collapsed_by_interval"))
+        sheets.update(
+            build_targeted_eda_sheets(
+                collapsed,
+                "09_collapsed_by_interval_output",
+                "09_collapsed_by_interval_output",
+            )
+        )
     workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
     logger.info("Updated unified EDA workbook: %s", workbook)
 
