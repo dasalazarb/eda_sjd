@@ -177,6 +177,32 @@ def _make_unique_sheet_names(sheet_names: Iterable[str]) -> dict[str, str]:
     return mapping
 
 
+CONSOLIDATED_EDA_SHEETS = {
+    "data_summary",
+    "cat_dist",
+    "missing",
+    "date_stats",
+    "visit_dist",
+}
+
+
+def _normalize_columns_for_concat(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    normalized_cols = pd.Index([str(col).strip() for col in out.columns])
+    out.columns = _make_unique_columns(normalized_cols)
+    return out
+
+
+def _concat_aligned_by_column_name(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
+    left = _normalize_columns_for_concat(existing_df)
+    right = _normalize_columns_for_concat(new_df)
+
+    aligned_columns = list(dict.fromkeys([*left.columns.tolist(), *right.columns.tolist()]))
+    left = left.reindex(columns=aligned_columns)
+    right = right.reindex(columns=aligned_columns)
+    return pd.concat([left, right], ignore_index=True)
+
+
 def upsert_eda_sheets_xlsx(
     workbook_path: Path | str = EDA_UNIFIED_REPORT_PATH,
     sheets_dict: dict[str, pd.DataFrame] | None = None,
@@ -189,6 +215,11 @@ def upsert_eda_sheets_xlsx(
         return workbook
 
     normalized_names = _make_unique_sheet_names(sheets_dict.keys())
+    existing_sheet_names: set[str] = set()
+    if workbook.exists():
+        with pd.ExcelFile(workbook, engine="openpyxl") as excel_file:
+            existing_sheet_names = set(excel_file.sheet_names)
+
     writer_mode = "a" if workbook.exists() else "w"
     writer_kwargs: dict[str, object] = {"engine": "openpyxl", "mode": writer_mode}
     if writer_mode == "a":
@@ -197,6 +228,12 @@ def upsert_eda_sheets_xlsx(
     with pd.ExcelWriter(workbook, **writer_kwargs) as writer:
         for original_name, df in sheets_dict.items():
             sheet_name = normalized_names[str(original_name)]
+            if sheet_name in CONSOLIDATED_EDA_SHEETS and sheet_name in existing_sheet_names:
+                existing_df = pd.read_excel(workbook, sheet_name=sheet_name, engine="openpyxl")
+                combined_df = _concat_aligned_by_column_name(existing_df, df)
+                combined_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                continue
+
             df.to_excel(writer, sheet_name=sheet_name, index=False)
 
     return workbook
