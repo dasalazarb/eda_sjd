@@ -610,18 +610,33 @@ def required_columns_check(df: pd.DataFrame, cols: Iterable[str], logger: loggin
 
 
 def resolve_canonical_column(df: pd.DataFrame, canonical_name: str) -> str:
+    canonical_name = str(canonical_name).strip()
+    canonical_lower = canonical_name.lower()
+    normalized_canonical = re.sub(r"[^a-z0-9]+", "", canonical_lower)
+
+    # Fast path: exact match (original and lowercase).
     if canonical_name in df.columns:
         return canonical_name
 
+    lowercase_map = {str(col).lower(): str(col) for col in df.columns.astype(str)}
+    if canonical_lower in lowercase_map:
+        return lowercase_map[canonical_lower]
+
     score_map: dict[str, int] = {}
     for col in df.columns.astype(str):
-        if col.endswith(f"__{canonical_name}"):
+        col_lower = col.lower()
+        col_normalized = re.sub(r"[^a-z0-9]+", "", col_lower)
+
+        # Strong matches for "category__target_var" pattern (case-insensitive).
+        if re.search(rf"(^|__)({re.escape(canonical_lower)})$", col_lower):
             score_map[col] = max(score_map.get(col, 0), 90)
-        if col.endswith(f"_{canonical_name}"):
+        if re.search(rf"(^|_)({re.escape(canonical_lower)})$", col_lower):
             score_map[col] = max(score_map.get(col, 0), 80)
-        if col.endswith(canonical_name):
+        if col_lower.endswith(canonical_lower):
             score_map[col] = max(score_map.get(col, 0), 70)
-        if canonical_name in col:
+        if col_normalized.endswith(normalized_canonical):
+            score_map[col] = max(score_map.get(col, 0), 65)
+        if canonical_lower in col_lower:
             score_map[col] = max(score_map.get(col, 0), 10)
 
     if not score_map:
