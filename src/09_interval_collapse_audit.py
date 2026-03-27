@@ -43,9 +43,9 @@ def _parse_args() -> CollapseConfig:
     )
     parser.add_argument(
         "--collapse",
-        default="no",
+        default="yes",
         type=_normalize_yes_no,
-        help="Set to yes/no to save a collapsed table (default: no).",
+        help="Set to yes/no to save a collapsed table (default: yes).",
     )
     args = parser.parse_args()
     return CollapseConfig(collapse=bool(args.collapse))
