@@ -14,6 +14,7 @@ RAW_DIR = ROOT / "data_raw"
 INTERMEDIATE_DIR = ROOT / "data_intermediate"
 ANALYTIC_DIR = ROOT / "data_analytic"
 REPORTS_DIR = ROOT / "reports"
+EDA_UNIFIED_REPORT_PATH = REPORTS_DIR / "eda_unificado.xlsx"
 LOGS_DIR = ROOT / "logs"
 LOG_FILE = LOGS_DIR / "pipeline.log"
 
@@ -142,6 +143,63 @@ def save_parquet_and_csv(df: pd.DataFrame, base_path: Path, logger: logging.Logg
     df.to_parquet(base_path.with_suffix(".parquet"), index=False)
     df.to_csv(base_path.with_suffix(".csv"), index=False)
     logger.info("Saved %s.{parquet,csv} rows=%d cols=%d", base_path, len(df), len(df.columns))
+
+
+def _normalize_excel_sheet_name(sheet_name: str) -> str:
+    clean = re.sub(r"[\[\]:*?/\\]+", "_", str(sheet_name).strip())
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if not clean:
+        clean = "sheet"
+    return clean[:31]
+
+
+def _make_unique_sheet_names(sheet_names: Iterable[str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    seen: dict[str, int] = {}
+
+    for original_name in sheet_names:
+        base = _normalize_excel_sheet_name(original_name)
+        idx = seen.get(base, 0)
+        if idx == 0 and base not in mapping.values():
+            unique = base
+        else:
+            while True:
+                idx += 1
+                suffix = f"_{idx}"
+                trim_len = max(1, 31 - len(suffix))
+                candidate = f"{base[:trim_len]}{suffix}"
+                if candidate not in mapping.values():
+                    unique = candidate
+                    break
+        seen[base] = idx
+        mapping[str(original_name)] = unique
+
+    return mapping
+
+
+def upsert_eda_sheets_xlsx(
+    workbook_path: Path | str = EDA_UNIFIED_REPORT_PATH,
+    sheets_dict: dict[str, pd.DataFrame] | None = None,
+) -> Path:
+    ensure_dirs()
+    workbook = Path(workbook_path)
+    workbook.parent.mkdir(parents=True, exist_ok=True)
+
+    if not sheets_dict:
+        return workbook
+
+    normalized_names = _make_unique_sheet_names(sheets_dict.keys())
+    writer_mode = "a" if workbook.exists() else "w"
+    writer_kwargs: dict[str, object] = {"engine": "openpyxl", "mode": writer_mode}
+    if writer_mode == "a":
+        writer_kwargs["if_sheet_exists"] = "replace"
+
+    with pd.ExcelWriter(workbook, **writer_kwargs) as writer:
+        for original_name, df in sheets_dict.items():
+            sheet_name = normalized_names[str(original_name)]
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    return workbook
 
 
 
