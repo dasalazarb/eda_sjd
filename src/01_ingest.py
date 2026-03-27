@@ -9,9 +9,9 @@ from common import (
     RAW_DIR,
     INTERMEDIATE_DIR,
     build_group_prefixed_columns,
+    build_targeted_eda_sheets,
     drop_sensitive_name_columns,
     parse_datetime_columns,
-    profile_dataframe,
     print_kv,
     print_script_overview,
     print_step,
@@ -102,10 +102,10 @@ def main() -> None:
     )
     print_step(4, "Build baseline/input and clean/output EDA and append sheets to unified workbook")
     sheets = {}
-    sheets["01_11D_input_baseline"] = profile_dataframe(input11_baseline, "01_11D_input_baseline")
-    sheets["01_11D_output_clean"] = profile_dataframe(df11, "01_11D_output_clean")
-    sheets["01_15D_input_baseline"] = profile_dataframe(input15_baseline, "01_15D_input_baseline")
-    sheets["01_15D_output_clean"] = profile_dataframe(df15, "01_15D_output_clean")
+    sheets.update(build_targeted_eda_sheets(input11_baseline, "01_11D_input", "01_11D_input"))
+    sheets.update(build_targeted_eda_sheets(df11, "01_11D_output", "01_11D_output"))
+    sheets.update(build_targeted_eda_sheets(input15_baseline, "01_15D_input", "01_15D_input"))
+    sheets.update(build_targeted_eda_sheets(df15, "01_15D_output", "01_15D_output"))
     workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
     logger.info("Updated unified EDA workbook: %s", workbook)
 

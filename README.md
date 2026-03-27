@@ -143,6 +143,7 @@ Reports:
 - `reports/eda_15d.csv`
 - `reports/eda_postmerge.csv`
 - `reports/analysis_readiness.csv`
+- `reports/eda_unificado.xlsx` (workbook consolidado de EDA por dataset y etapa)
 - `reports/visit_patterns/interval_name_map.csv`
 - `reports/visit_patterns/swimmer_plot.png`
 - `reports/visit_patterns/violin_transition_plot.png`
@@ -154,3 +155,43 @@ Reports:
 - `reports/interval_collapse_window_summary.csv`
 - `reports/interval_collapse_conflict_examples.csv`
 - `data_analytic/visits_long_collapsed_by_interval.parquet` (optional, with `--collapse yes`)
+
+## EDA unificada (`reports/eda_unificado.xlsx`)
+
+La salida unificada de EDA vive en:
+
+- `reports/eda_unificado.xlsx`
+
+### Convención uniforme de nombres de hoja
+
+Cada hoja sigue el patrón:
+
+- `<dataset_base>_<sufijo_eda>`
+
+Donde `dataset_base` representa etapa+dataset con convención homogénea. Ejemplos:
+
+- `01_11D_input`
+- `01_11D_output`
+- `01_15D_input`
+- `01_15D_output`
+- `03_overlap_subjects`
+- `05_patient_master`
+- `07_cohort_baseline`
+
+### Hojas derivadas por dataset
+
+Para **cada** `dataset_base`, el pipeline escribe múltiples hojas con los siguientes sufijos:
+
+- `_summary`
+- `_missing`
+- `_cat_dist`
+- `_date_stats`
+- `_visit_dist`
+
+Ejemplo completo para `05_patient_master`:
+
+- `05_patient_master_summary`
+- `05_patient_master_missing`
+- `05_patient_master_cat_dist`
+- `05_patient_master_date_stats`
+- `05_patient_master_visit_dist`

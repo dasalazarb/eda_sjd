@@ -136,9 +136,9 @@ def main() -> None:
     )
     print_step(4, "Append targeted EDA for cohort outputs to unified workbook")
     sheets = {}
-    sheets.update(build_targeted_eda_sheets(baseline, "07_baseline", "07_baseline"))
-    sheets.update(build_targeted_eda_sheets(longitudinal, "07_longitudinal", "07_longitudinal"))
-    sheets.update(build_targeted_eda_sheets(time_to_event, "07_time_to_event", "07_time_to_event"))
+    sheets.update(build_targeted_eda_sheets(baseline, "07_cohort_baseline", "07_cohort_baseline"))
+    sheets.update(build_targeted_eda_sheets(longitudinal, "07_cohort_longitudinal", "07_cohort_longitudinal"))
+    sheets.update(build_targeted_eda_sheets(time_to_event, "07_cohort_time_to_event", "07_cohort_time_to_event"))
     workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
     logger.info("Updated unified EDA workbook: %s", workbook)
 
