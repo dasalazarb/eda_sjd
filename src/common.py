@@ -186,7 +186,15 @@ TARGETED_EDA_REPORT_TO_SHEET_MAP = {
     "date_stats": "date_stats",
 }
 
-CONSOLIDATED_EDA_SHEETS = set(TARGETED_EDA_REPORT_TO_SHEET_MAP.values())
+# Hojas globales que se consolidan entre corridas (append lógico vía concat).
+# Se incluyen explícitamente para dejar claro el alcance esperado.
+CONSOLIDATED_EDA_SHEETS = {
+    "data_summary",
+    "missing",
+    "cat_dist",
+    "visit_dist",
+    "date_stats",
+}
 
 
 def _normalize_columns_for_concat(df: pd.DataFrame) -> pd.DataFrame:
@@ -197,6 +205,12 @@ def _normalize_columns_for_concat(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _concat_aligned_by_column_name(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
+    """Concatena alineando por nombre de columna.
+
+    Cuando una corrida trae columnas nuevas o faltantes frente a corridas previas,
+    se reindexan ambos DataFrames a la unión de columnas. Pandas completa celdas
+    ausentes con NaN automáticamente.
+    """
     left = _normalize_columns_for_concat(existing_df)
     right = _normalize_columns_for_concat(new_df)
 
@@ -237,6 +251,8 @@ def upsert_eda_sheets_xlsx(
                 combined_df.to_excel(writer, sheet_name=sheet_name, index=False)
                 continue
 
+            # Para hojas no consolidadas se mantiene el comportamiento actual:
+            # escritura normal (replace en modo append).
             df.to_excel(writer, sheet_name=sheet_name, index=False)
 
     return workbook
