@@ -3,13 +3,16 @@ from __future__ import annotations
 import pandas as pd
 
 from common import (
+    EDA_UNIFIED_REPORT_PATH,
     INTERMEDIATE_DIR,
+    build_targeted_eda_sheets,
     print_kv,
     print_script_overview,
     print_step,
     resolve_canonical_column,
     save_parquet_and_csv,
     setup_logger,
+    upsert_eda_sheets_xlsx,
 )
 
 
@@ -150,6 +153,12 @@ def main() -> None:
             "conflicting_duplicates": int((audit["comparison_type"] == "conflicting_duplicate").sum()),
         },
     )
+    print_step(4, "Append targeted EDA for dedup (+partial audit) to unified workbook")
+    sheets = {}
+    sheets.update(build_targeted_eda_sheets(dedup, "04_deduped_visits", "04_deduped_visits"))
+    sheets.update(build_targeted_eda_sheets(audit, "04_conflict_log_partial", "04_conflict_log_partial"))
+    workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
+    logger.info("Updated unified EDA workbook: %s", workbook)
 
 
 if __name__ == "__main__":

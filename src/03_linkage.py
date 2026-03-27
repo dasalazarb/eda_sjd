@@ -6,13 +6,16 @@ import numpy as np
 import pandas as pd
 
 from common import (
+    EDA_UNIFIED_REPORT_PATH,
     INTERMEDIATE_DIR,
+    build_targeted_eda_sheets,
     print_kv,
     print_script_overview,
     print_step,
     resolve_canonical_column,
     save_parquet_and_csv,
     setup_logger,
+    upsert_eda_sheets_xlsx,
 )
 
 LINKAGE_KEYS = ["subject_number", "patient_record_number", "visit_date", "time_24_hour"]
@@ -122,6 +125,12 @@ def main() -> None:
 
     print_kv("Overlap summary", ov["overlap_type"].value_counts(dropna=False).to_dict())
     print_kv("Episode candidates", {"n_candidates": len(ep)})
+    print_step(4, "Append targeted EDA for overlap/episode outputs to unified workbook")
+    sheets = {}
+    sheets.update(build_targeted_eda_sheets(ov, "03_overlap_subjects", "03_overlap_subjects"))
+    sheets.update(build_targeted_eda_sheets(ep, "03_episode_candidates", "03_episode_candidates"))
+    workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
+    logger.info("Updated unified EDA workbook: %s", workbook)
 
 
 if __name__ == "__main__":

@@ -8,13 +8,16 @@ from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
 
 from common import (
     ANALYTIC_DIR,
+    EDA_UNIFIED_REPORT_PATH,
     MISSING_TOKENS,
     REPORTS_DIR,
+    build_targeted_eda_sheets,
     print_kv,
     print_script_overview,
     print_step,
     resolve_canonical_column,
     setup_logger,
+    upsert_eda_sheets_xlsx,
 )
 
 MISSING_TOKEN_UPPER = {str(token).upper() for token in MISSING_TOKENS}
@@ -274,6 +277,8 @@ def main() -> None:
         collapsed.to_parquet(ANALYTIC_DIR / "visits_long_collapsed_by_interval.parquet", index=False)
         collapsed.to_csv(ANALYTIC_DIR / "visits_long_collapsed_by_interval.csv", index=False)
         logger.info("Saved collapsed visits to data_analytic/visits_long_collapsed_by_interval.{parquet,csv}")
+    else:
+        collapsed = None
 
     metrics = {
         "rows_original": len(visits),
@@ -282,6 +287,13 @@ def main() -> None:
         "collapse_requested": config.collapse,
     }
     print_kv("Interval collapse audit", metrics)
+    print_step(7, "Append targeted EDA for visits/collapsed outputs to unified workbook")
+    sheets = {}
+    sheets.update(build_targeted_eda_sheets(visits, "09_visits_long", "09_visits_long"))
+    if collapsed is not None:
+        sheets.update(build_targeted_eda_sheets(collapsed, "09_collapsed_by_interval", "09_collapsed_by_interval"))
+    workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
+    logger.info("Updated unified EDA workbook: %s", workbook)
 
     logger.info(
         "Saved reports: interval_collapse_{repeated_groups,window_stats,window_summary,variable_audit,conflict_examples}.csv"

@@ -5,8 +5,11 @@ from pathlib import Path
 import pandas as pd
 
 from common import (
+    EDA_UNIFIED_REPORT_PATH,
     RAW_DIR,
     INTERMEDIATE_DIR,
+    build_input_baseline_summary,
+    build_targeted_eda_sheets,
     build_group_prefixed_columns,
     drop_sensitive_name_columns,
     parse_datetime_columns,
@@ -17,6 +20,7 @@ from common import (
     save_parquet_and_csv,
     setup_logger,
     standardize_columns,
+    upsert_eda_sheets_xlsx,
 )
 
 
@@ -79,6 +83,8 @@ def main() -> None:
     f15 = resolve_raw_path(["CTDB Data Download 15D.xlsx", "CTDB Data Download 15D.xslx", "CTDB_Data_Download_15D.xlsx"])
 
     print_step(1, "Read 11D and 15D raw files with two-row grouped headers")
+    input11 = pd.read_excel(f11, header=None)
+    input15 = pd.read_excel(f15, header=None)
     df11 = ingest_one(f11, "11D", logger)
     df15 = ingest_one(f15, "15D", logger)
 
@@ -96,6 +102,14 @@ def main() -> None:
             "15D_cols": len(df15.columns),
         },
     )
+    print_step(4, "Build targeted EDA and append sheets to unified workbook")
+    sheets = {}
+    sheets.update(build_targeted_eda_sheets(df11, "01_df11_clean", "01_df11_clean"))
+    sheets.update(build_targeted_eda_sheets(df15, "01_df15_clean", "01_df15_clean"))
+    sheets["01_input_11d_baseline"] = build_input_baseline_summary(input11, "01_input_11d_baseline")
+    sheets["01_input_15d_baseline"] = build_input_baseline_summary(input15, "01_input_15d_baseline")
+    workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
+    logger.info("Updated unified EDA workbook: %s", workbook)
 
 
 if __name__ == "__main__":

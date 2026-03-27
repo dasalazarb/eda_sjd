@@ -4,12 +4,15 @@ import pandas as pd
 
 from common import (
     ANALYTIC_DIR,
+    EDA_UNIFIED_REPORT_PATH,
     REPORTS_DIR,
+    build_targeted_eda_sheets,
     print_kv,
     print_script_overview,
     print_step,
     resolve_canonical_column,
     setup_logger,
+    upsert_eda_sheets_xlsx,
 )
 
 
@@ -58,6 +61,12 @@ def main() -> None:
 
     print_kv("Post-merge EDA", dict(zip(report["metric"], report["value"])))
     logger.info("Saved reports/eda_postmerge.csv")
+    print_step(5, "Append targeted EDA for post-merge datasets to unified workbook")
+    sheets = {}
+    sheets.update(build_targeted_eda_sheets(master, "06_patient_master", "06_patient_master"))
+    sheets.update(build_targeted_eda_sheets(visits, "06_visits_long", "06_visits_long"))
+    workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
+    logger.info("Updated unified EDA workbook: %s", workbook)
 
 
 if __name__ == "__main__":
