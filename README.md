@@ -41,6 +41,14 @@ project/
 
 ## Run order
 
+Quick full run (recommended):
+
+```bash
+python src/00_super_main.py
+```
+
+Manual step-by-step run:
+
 ```bash
 python src/01_ingest.py
 python src/02_profile_individual.py
