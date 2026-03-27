@@ -12,12 +12,15 @@ from scipy.stats import gaussian_kde
 
 from common import (
     ANALYTIC_DIR,
+    EDA_UNIFIED_REPORT_PATH,
     REPORTS_DIR,
+    build_targeted_eda_sheets,
     print_kv,
     print_script_overview,
     print_step,
     resolve_canonical_column,
     setup_logger,
+    upsert_eda_sheets_xlsx,
 )
 
 PLOTS_DIR = REPORTS_DIR / "visit_patterns"
@@ -890,6 +893,10 @@ def main() -> None:
             "output_dir":       str(PLOTS_DIR),
         },
     )
+    print_step(6, "Append targeted EDA for transformed visits dataset to unified workbook")
+    sheets = build_targeted_eda_sheets(seq, "08_visits_transformed_patterns", "08_visits_transformed")
+    workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
+    logger.info("Updated unified EDA workbook: %s", workbook)
     logger.info("Saved visit pattern outputs in %s", PLOTS_DIR)
 
 

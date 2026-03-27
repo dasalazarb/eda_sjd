@@ -4,13 +4,16 @@ import pandas as pd
 
 from common import (
     ANALYTIC_DIR,
+    EDA_UNIFIED_REPORT_PATH,
     INTERMEDIATE_DIR,
+    build_targeted_eda_sheets,
     print_kv,
     print_script_overview,
     print_step,
     resolve_canonical_column,
     save_parquet_and_csv,
     setup_logger,
+    upsert_eda_sheets_xlsx,
 )
 
 
@@ -73,6 +76,12 @@ def main() -> None:
             "n_visits": len(visits),
         },
     )
+    print_step(4, "Append targeted EDA for patient_master and visits to unified workbook")
+    sheets = {}
+    sheets.update(build_targeted_eda_sheets(master, "05_patient_master", "05_patient_master"))
+    sheets.update(build_targeted_eda_sheets(visits, "05_visits_long", "05_visits_long"))
+    workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
+    logger.info("Updated unified EDA workbook: %s", workbook)
 
 
 if __name__ == "__main__":

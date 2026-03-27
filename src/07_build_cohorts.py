@@ -4,13 +4,16 @@ import pandas as pd
 
 from common import (
     ANALYTIC_DIR,
+    EDA_UNIFIED_REPORT_PATH,
     REPORTS_DIR,
+    build_targeted_eda_sheets,
     print_kv,
     print_script_overview,
     print_step,
     resolve_canonical_column,
     save_parquet_and_csv,
     setup_logger,
+    upsert_eda_sheets_xlsx,
 )
 
 
@@ -131,6 +134,13 @@ def main() -> None:
             "time_to_event_subject_col": tte_subject_col,
         },
     )
+    print_step(4, "Append targeted EDA for cohort outputs to unified workbook")
+    sheets = {}
+    sheets.update(build_targeted_eda_sheets(baseline, "07_baseline", "07_baseline"))
+    sheets.update(build_targeted_eda_sheets(longitudinal, "07_longitudinal", "07_longitudinal"))
+    sheets.update(build_targeted_eda_sheets(time_to_event, "07_time_to_event", "07_time_to_event"))
+    workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
+    logger.info("Updated unified EDA workbook: %s", workbook)
 
 
 if __name__ == "__main__":

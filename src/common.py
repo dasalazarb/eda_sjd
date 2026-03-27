@@ -513,6 +513,55 @@ def build_targeted_eda_report(
     return report
 
 
+def build_target_columns_status(df: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
+    target_vars = [
+        "patient_record_number",
+        "subject_number",
+        "dob",
+        "age_at_visit",
+        "race",
+        "ethnicity",
+        "sex",
+        "interval_name",
+        "visit_date",
+    ]
+    rows: list[dict[str, object]] = []
+    for var in target_vars:
+        resolved = _safe_resolve_column(df, var)
+        rows.append(
+            {
+                "dataset": dataset_name,
+                "variable": var,
+                "resolved_column": resolved if resolved else pd.NA,
+                "status": "ok" if resolved else "columna ausente",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_input_baseline_summary(df: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "dataset": dataset_name,
+                "n_rows": int(len(df)),
+                "n_columns": int(df.shape[1]),
+                "column_names": json.dumps([str(c) for c in df.columns.tolist()], ensure_ascii=False),
+            }
+        ]
+    )
+
+
+def build_targeted_eda_sheets(df: pd.DataFrame, dataset_name: str, sheet_prefix: str) -> dict[str, pd.DataFrame]:
+    report = build_targeted_eda_report(df=df, dataset_name=dataset_name, include_missing_variants=True)
+    status = build_target_columns_status(df=df, dataset_name=dataset_name)
+    sheets: dict[str, pd.DataFrame] = {
+        f"{sheet_prefix}_target_columns_status": status,
+    }
+    sheets.update({f"{sheet_prefix}_{key}": val for key, val in report.items()})
+    return sheets
+
+
 def print_kv(title: str, kv: dict[str, object]) -> None:
     print(f"\n=== {title} ===")
     for k, v in kv.items():
