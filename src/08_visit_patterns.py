@@ -898,6 +898,7 @@ def main() -> None:
         seq,
         "08_visits_transformed_patterns_output",
         "08_visits_transformed_patterns_output",
+        consolidated=True,
     )
     workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
     logger.info("Updated unified EDA workbook: %s", workbook)
