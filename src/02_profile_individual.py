@@ -3,17 +3,14 @@ from __future__ import annotations
 import pandas as pd
 
 from common import (
-    EDA_UNIFIED_REPORT_PATH,
     INTERMEDIATE_DIR,
     REPORTS_DIR,
-    build_targeted_eda_sheets,
     print_kv,
     print_script_overview,
     print_step,
     profile_dataframe,
     resolve_canonical_column,
     setup_logger,
-    upsert_eda_sheets_xlsx,
 )
 
 
@@ -56,12 +53,8 @@ def main() -> None:
 
     print_kv("EDA 11D dimensions", summarize_ids(df11))
     print_kv("EDA 15D dimensions", summarize_ids(df15))
-    print_step(4, "Append targeted EDA + input summaries to unified workbook")
-    sheets = {}
-    sheets.update(build_targeted_eda_sheets(df11, "02_11D_input", "02_11D_input"))
-    sheets.update(build_targeted_eda_sheets(df15, "02_15D_input", "02_15D_input"))
-    workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
-    logger.info("Updated unified EDA workbook: %s", workbook)
+    print_step(4, "Skip unified workbook EDA for this stage (no output dataframe generated)")
+    logger.info("Skipped unified EDA workbook update for 02_profile_individual (input-only stage)")
 
     logger.info("Saved reports/eda_11d.csv and reports/eda_15d.csv")
 

@@ -155,8 +155,8 @@ def main() -> None:
     )
     print_step(4, "Append targeted EDA for dedup (+partial audit) to unified workbook")
     sheets = {}
-    sheets.update(build_targeted_eda_sheets(dedup, "04_deduped_visits", "04_deduped_visits"))
-    sheets.update(build_targeted_eda_sheets(audit, "04_conflict_log_partial", "04_conflict_log_partial"))
+    sheets.update(build_targeted_eda_sheets(dedup, "04_deduped_visits_output", "04_deduped_visits_output"))
+    sheets.update(build_targeted_eda_sheets(audit, "04_conflict_log_output", "04_conflict_log_output"))
     workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
     logger.info("Updated unified EDA workbook: %s", workbook)
 
