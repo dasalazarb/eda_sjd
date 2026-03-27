@@ -505,9 +505,10 @@ def build_targeted_eda_report(
             distribution_visits[["dataset", "distribution_type", "group_value", "subgroup_value", "n"]]
         )
 
+    non_empty_visit_dist_frames = [frame for frame in visit_dist_frames if not frame.empty]
     report["visit_dist"] = (
-        pd.concat(visit_dist_frames, ignore_index=True)
-        if visit_dist_frames
+        pd.concat(non_empty_visit_dist_frames, ignore_index=True)
+        if non_empty_visit_dist_frames
         else pd.DataFrame(columns=["dataset", "distribution_type", "group_value", "subgroup_value", "n"])
     )
 
