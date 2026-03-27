@@ -207,6 +207,254 @@ def profile_dataframe(df: pd.DataFrame, name: str) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def _normalize_text_missing_mask(series: pd.Series, include_missing_variants: bool) -> pd.Series:
+    normalized = series.astype("string").str.strip()
+    missing_mask = normalized.isna() | (normalized == "")
+    if include_missing_variants:
+        token_set = {str(token).strip().upper() for token in MISSING_TOKENS}
+        missing_mask = missing_mask | normalized.str.upper().isin(token_set)
+    return missing_mask
+
+
+def _safe_resolve_column(df: pd.DataFrame, canonical_name: str) -> str | None:
+    try:
+        return resolve_canonical_column(df, canonical_name)
+    except KeyError:
+        return None
+
+
+def build_targeted_eda_report(
+    df: pd.DataFrame,
+    dataset_name: str,
+    include_missing_variants: bool = True,
+) -> dict[str, pd.DataFrame]:
+    """
+    Build a compact EDA package with targeted outputs for core patient/visit variables.
+
+    Returns a dictionary of DataFrames with the following keys:
+    - summary_general
+    - dob_age_metrics
+    - distribution_demographics
+    - distribution_interval
+    - distribution_visit_date_by_interval
+    - distribution_visits_per_subject
+    - robust_missing
+    """
+
+    report: dict[str, pd.DataFrame] = {}
+    working = df.copy()
+
+    target_vars = [
+        "patient_record_number",
+        "subject_number",
+        "dob",
+        "age_at_visit",
+        "race",
+        "ethnicity",
+        "sex",
+        "interval_name",
+        "visit_date",
+    ]
+    resolved_cols = {var: _safe_resolve_column(working, var) for var in target_vars}
+
+    # 1) General summary
+    patient_col = resolved_cols["patient_record_number"]
+    subject_col = resolved_cols["subject_number"]
+    report["summary_general"] = pd.DataFrame(
+        [
+            {
+                "dataset": dataset_name,
+                "n_rows": int(len(working)),
+                "n_columns": int(working.shape[1]),
+                "n_unique_patient_record_number": int(working[patient_col].nunique(dropna=True))
+                if patient_col
+                else pd.NA,
+                "n_unique_subject_number": int(working[subject_col].nunique(dropna=True))
+                if subject_col
+                else pd.NA,
+            }
+        ]
+    )
+
+    # 2) DOB and age_at_visit metrics
+    metric_rows: list[dict[str, object]] = []
+    for var in ["dob", "age_at_visit"]:
+        col = resolved_cols[var]
+        if not col:
+            metric_rows.append(
+                {
+                    "dataset": dataset_name,
+                    "variable": var,
+                    "resolved_column": pd.NA,
+                    "missing_count": pd.NA,
+                    "min": pd.NA,
+                    "max": pd.NA,
+                    "mean": pd.NA,
+                    "median": pd.NA,
+                    "std": pd.NA,
+                    "unknown_unparseable_values": pd.NA,
+                }
+            )
+            continue
+
+        raw = working[col]
+        if pd.api.types.is_object_dtype(raw) or pd.api.types.is_string_dtype(raw):
+            raw_text = raw.astype("string").str.strip()
+            missing_mask = _normalize_text_missing_mask(raw, include_missing_variants)
+        else:
+            raw_text = raw.astype("string")
+            missing_mask = raw.isna()
+
+        if var == "dob":
+            parsed = pd.to_datetime(raw, errors="coerce")
+        else:
+            parsed = pd.to_numeric(raw, errors="coerce")
+
+        unknown_mask = (~missing_mask) & parsed.isna()
+        unknown_values = sorted({str(v) for v in raw_text[unknown_mask].dropna().unique().tolist()})
+        valid = parsed.dropna()
+
+        metric_rows.append(
+            {
+                "dataset": dataset_name,
+                "variable": var,
+                "resolved_column": col,
+                "missing_count": int(missing_mask.sum()),
+                "min": valid.min() if not valid.empty else pd.NaT if var == "dob" else pd.NA,
+                "max": valid.max() if not valid.empty else pd.NaT if var == "dob" else pd.NA,
+                "mean": valid.mean() if not valid.empty else pd.NaT if var == "dob" else pd.NA,
+                "median": valid.median() if not valid.empty else pd.NaT if var == "dob" else pd.NA,
+                "std": valid.std() if not valid.empty else pd.NaT if var == "dob" else pd.NA,
+                "unknown_unparseable_values": json.dumps(unknown_values, ensure_ascii=False),
+            }
+        )
+    report["dob_age_metrics"] = pd.DataFrame(metric_rows)
+
+    # 3) Distributions
+    demo_rows: list[dict[str, object]] = []
+    for var in ["race", "ethnicity", "sex"]:
+        col = resolved_cols[var]
+        if not col:
+            continue
+        series = working[col].astype("string").str.strip()
+        counts = series.fillna("(missing)").replace("", "(missing)").value_counts(dropna=False)
+        total = max(int(counts.sum()), 1)
+        for value, count in counts.items():
+            demo_rows.append(
+                {
+                    "dataset": dataset_name,
+                    "variable": var,
+                    "value": value,
+                    "count": int(count),
+                    "pct": round(100 * count / total, 2),
+                }
+            )
+    report["distribution_demographics"] = pd.DataFrame(demo_rows)
+
+    interval_col = resolved_cols["interval_name"]
+    if interval_col:
+        interval_counts = (
+            working[interval_col]
+            .astype("string")
+            .str.strip()
+            .fillna("(missing)")
+            .replace("", "(missing)")
+            .value_counts(dropna=False)
+            .rename_axis("interval_name")
+            .reset_index(name="count")
+        )
+        interval_counts.insert(0, "dataset", dataset_name)
+        report["distribution_interval"] = interval_counts
+    else:
+        report["distribution_interval"] = pd.DataFrame(columns=["dataset", "interval_name", "count"])
+
+    visit_date_col = resolved_cols["visit_date"]
+    if interval_col and visit_date_col:
+        visit_dates = pd.to_datetime(working[visit_date_col], errors="coerce").dt.date
+        by_interval_date = (
+            pd.DataFrame(
+                {
+                    "interval_name": working[interval_col].astype("string").str.strip(),
+                    "visit_date": visit_dates,
+                }
+            )
+            .assign(
+                interval_name=lambda d: d["interval_name"].fillna("(missing)").replace("", "(missing)"),
+                visit_date=lambda d: d["visit_date"].astype("string").fillna("(unparseable/missing)"),
+            )
+            .value_counts(["interval_name", "visit_date"])
+            .rename("count")
+            .reset_index()
+            .sort_values(["interval_name", "visit_date"])
+        )
+        by_interval_date.insert(0, "dataset", dataset_name)
+        report["distribution_visit_date_by_interval"] = by_interval_date
+    else:
+        report["distribution_visit_date_by_interval"] = pd.DataFrame(
+            columns=["dataset", "interval_name", "visit_date", "count"]
+        )
+
+    if subject_col:
+        visits_per_subject = (
+            working.groupby(subject_col, dropna=False)
+            .size()
+            .rename("n_visits")
+            .reset_index()
+            .assign(subject_number=lambda d: d[subject_col].astype("string").fillna("(missing)").str.strip())
+        )
+        distribution_visits = (
+            visits_per_subject.groupby("n_visits")
+            .size()
+            .rename("n_subjects")
+            .reset_index()
+            .sort_values("n_visits")
+        )
+        distribution_visits.insert(0, "dataset", dataset_name)
+        report["distribution_visits_per_subject"] = distribution_visits
+    else:
+        report["distribution_visits_per_subject"] = pd.DataFrame(columns=["dataset", "n_visits", "n_subjects"])
+
+    # 4) Robust missingness for target variables
+    missing_rows: list[dict[str, object]] = []
+    for var in target_vars:
+        col = resolved_cols[var]
+        if not col:
+            missing_rows.append(
+                {
+                    "dataset": dataset_name,
+                    "variable": var,
+                    "resolved_column": pd.NA,
+                    "missing_count": pd.NA,
+                    "missing_pct": pd.NA,
+                    "problematic_values": pd.NA,
+                }
+            )
+            continue
+
+        s = working[col]
+        if pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s):
+            text = s.astype("string").str.strip()
+            missing_mask = _normalize_text_missing_mask(s, include_missing_variants)
+            problematic = sorted({str(v) for v in text[missing_mask & text.notna()].unique().tolist()})
+        else:
+            missing_mask = s.isna()
+            problematic = []
+
+        missing_rows.append(
+            {
+                "dataset": dataset_name,
+                "variable": var,
+                "resolved_column": col,
+                "missing_count": int(missing_mask.sum()),
+                "missing_pct": round(float(missing_mask.mean() * 100), 2),
+                "problematic_values": json.dumps(problematic, ensure_ascii=False),
+            }
+        )
+
+    report["robust_missing"] = pd.DataFrame(missing_rows)
+    return report
+
+
 def print_kv(title: str, kv: dict[str, object]) -> None:
     print(f"\n=== {title} ===")
     for k, v in kv.items():
