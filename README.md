@@ -162,36 +162,20 @@ La salida unificada de EDA vive en:
 
 - `reports/eda_unificado.xlsx`
 
-### Convención uniforme de nombres de hoja
+### Esquema global de hojas consolidadas
 
-Cada hoja sigue el patrón:
+El workbook usa un conjunto fijo de hojas globales (no una hoja por `dataset_base` + sufijo):
 
-- `<dataset_base>_<sufijo_eda>`
+- `data_summary`
+- `missing`
+- `cat_dist`
+- `date_stats`
+- `visit_dist`
 
-Donde `dataset_base` representa etapa+dataset con convención homogénea. Ejemplos:
+En estas hojas, cada fila corresponde al perfil de un dataset/etapa específico y se consolida en una única tabla por tipo de métrica.
 
-- `01_11D_input`
-- `01_11D_output`
-- `01_15D_input`
-- `01_15D_output`
-- `03_overlap_subjects`
-- `05_patient_master`
-- `07_cohort_baseline`
+### Reglas de cobertura
 
-### Hojas derivadas por dataset
-
-Para **cada** `dataset_base`, el pipeline escribe múltiples hojas con los siguientes sufijos:
-
-- `_summary`
-- `_missing`
-- `_cat_dist`
-- `_date_stats`
-- `_visit_dist`
-
-Ejemplo completo para `05_patient_master`:
-
-- `05_patient_master_summary`
-- `05_patient_master_missing`
-- `05_patient_master_cat_dist`
-- `05_patient_master_date_stats`
-- `05_patient_master_visit_dist`
+- `01_`: incluye **input + output**.
+- `02_+`: incluye **solo output**.
+- La columna `dataset` identifica la procedencia de cada fila dentro de las hojas consolidadas.
