@@ -8,11 +8,10 @@ from common import (
     EDA_UNIFIED_REPORT_PATH,
     RAW_DIR,
     INTERMEDIATE_DIR,
-    build_input_baseline_summary,
-    build_targeted_eda_sheets,
     build_group_prefixed_columns,
     drop_sensitive_name_columns,
     parse_datetime_columns,
+    profile_dataframe,
     print_kv,
     print_script_overview,
     print_step,
@@ -24,7 +23,7 @@ from common import (
 )
 
 
-def ingest_one(path: Path, source_protocol: str, logger) -> pd.DataFrame:
+def ingest_one(path: Path, source_protocol: str, logger) -> tuple[pd.DataFrame, pd.DataFrame]:
     logger.info("Reading file: %s", path)
     raw = pd.read_excel(path, header=None)
     if len(raw) < 2:
@@ -33,6 +32,7 @@ def ingest_one(path: Path, source_protocol: str, logger) -> pd.DataFrame:
     grouped_columns = build_group_prefixed_columns(raw.iloc[0], raw.iloc[1])
     df = raw.iloc[2:].reset_index(drop=True).copy()
     df.columns = grouped_columns
+    input_baseline = df.copy()
     n_groups = int(raw.iloc[0].ffill().nunique(dropna=True))
     logger.info(
         "Header preprocessing complete for %s | dropped_header_rows=2 | detected_groups=%d | columns=%d",
@@ -59,7 +59,7 @@ def ingest_one(path: Path, source_protocol: str, logger) -> pd.DataFrame:
     df["source_file"] = path.name
     df["row_id_raw"] = [f"{source_protocol}_{i:07d}" for i in range(len(df))]
 
-    return df
+    return df, input_baseline
 
 
 def resolve_raw_path(candidates: list[str]) -> Path:
@@ -83,10 +83,8 @@ def main() -> None:
     f15 = resolve_raw_path(["CTDB Data Download 15D.xlsx", "CTDB Data Download 15D.xslx", "CTDB_Data_Download_15D.xlsx"])
 
     print_step(1, "Read 11D and 15D raw files with two-row grouped headers")
-    input11 = pd.read_excel(f11, header=None)
-    input15 = pd.read_excel(f15, header=None)
-    df11 = ingest_one(f11, "11D", logger)
-    df15 = ingest_one(f15, "15D", logger)
+    df11, input11_baseline = ingest_one(f11, "11D", logger)
+    df15, input15_baseline = ingest_one(f15, "15D", logger)
 
     print_step(2, "Save cleaned raw outputs to data_intermediate")
     save_parquet_and_csv(df11, INTERMEDIATE_DIR / "11d_raw_enriched", logger)
@@ -102,12 +100,12 @@ def main() -> None:
             "15D_cols": len(df15.columns),
         },
     )
-    print_step(4, "Build targeted EDA and append sheets to unified workbook")
+    print_step(4, "Build baseline/input and clean/output EDA and append sheets to unified workbook")
     sheets = {}
-    sheets.update(build_targeted_eda_sheets(df11, "01_df11_clean", "01_df11_clean"))
-    sheets.update(build_targeted_eda_sheets(df15, "01_df15_clean", "01_df15_clean"))
-    sheets["01_input_11d_baseline"] = build_input_baseline_summary(input11, "01_input_11d_baseline")
-    sheets["01_input_15d_baseline"] = build_input_baseline_summary(input15, "01_input_15d_baseline")
+    sheets["01_11D_input_baseline"] = profile_dataframe(input11_baseline, "01_11D_input_baseline")
+    sheets["01_11D_output_clean"] = profile_dataframe(df11, "01_11D_output_clean")
+    sheets["01_15D_input_baseline"] = profile_dataframe(input15_baseline, "01_15D_input_baseline")
+    sheets["01_15D_output_clean"] = profile_dataframe(df15, "01_15D_output_clean")
     workbook = upsert_eda_sheets_xlsx(EDA_UNIFIED_REPORT_PATH, sheets)
     logger.info("Updated unified EDA workbook: %s", workbook)
 
