@@ -60,18 +60,18 @@ def main() -> None:
     visits = pd.read_parquet(ANALYTIC_DIR / "visits_long.parquet")
 
     print_step(2, "Resolve canonical columns and derive cohort tables")
-    visit_subject_col = resolve_canonical_column(visits, "subject_number")
+    visit_patient_col = resolve_canonical_column(visits, "patient_record_number")
     visit_datetime_col = resolve_canonical_column(visits, "visit_datetime")
     source_protocol_col = resolve_canonical_column(visits, "source_protocol")
 
     baseline = (
-        visits.sort_values([visit_subject_col, visit_datetime_col])
-        .groupby(visit_subject_col, as_index=False)
+        visits.sort_values([visit_patient_col, visit_datetime_col])
+        .groupby(visit_patient_col, as_index=False)
         .first()
     )
-    longitudinal = visits.groupby(visit_subject_col).filter(lambda x: len(x) >= 2)
+    longitudinal = visits.groupby(visit_patient_col).filter(lambda x: len(x) >= 2)
 
-    master_subject_col = resolve_canonical_column(master, "subject_number")
+    master_patient_col = resolve_canonical_column(master, "patient_record_number")
     first_visit_col = resolve_canonical_column(master, "first_visit")
     last_visit_col = resolve_canonical_column(master, "last_visit")
 
@@ -80,19 +80,19 @@ def main() -> None:
         (time_to_event[last_visit_col] - time_to_event[first_visit_col]).dt.total_seconds() / 86400
     )
     protocol_origin = (
-        visits.groupby(visit_subject_col, dropna=False)[source_protocol_col]
+        visits.groupby(visit_patient_col, dropna=False)[source_protocol_col]
         .apply(_format_protocol_origin)
         .rename("protocol_origin")
         .reset_index()
     )
     time_to_event = time_to_event.merge(
         protocol_origin,
-        left_on=master_subject_col,
-        right_on=visit_subject_col,
+        left_on=master_patient_col,
+        right_on=visit_patient_col,
         how="left",
     )
-    if visit_subject_col in time_to_event.columns and visit_subject_col != master_subject_col:
-        time_to_event = time_to_event.drop(columns=[visit_subject_col])
+    if visit_patient_col in time_to_event.columns and visit_patient_col != master_patient_col:
+        time_to_event = time_to_event.drop(columns=[visit_patient_col])
     if "n_protocols" in time_to_event.columns:
         time_to_event = time_to_event.drop(columns=["n_protocols"])
 
@@ -109,7 +109,7 @@ def main() -> None:
         [
             {
                 "question": "unique_patients_after_dedup",
-                "value": int(master[master_subject_col].nunique(dropna=True)),
+                "value": int(master[master_patient_col].nunique(dropna=True)),
             },
             {
                 "question": "patients_with_cross_protocol_continuity",
