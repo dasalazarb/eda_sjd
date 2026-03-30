@@ -48,18 +48,18 @@ def _resolve_columns(df: pd.DataFrame, canonical_names: Iterable[str]) -> dict[s
 
 
 def overlap_table(df11: pd.DataFrame, df15: pd.DataFrame) -> pd.DataFrame:
-    subject11 = _resolve_columns(df11, ["subject_number"]).get("subject_number")
-    subject15 = _resolve_columns(df15, ["subject_number"]).get("subject_number")
-    if not subject11 or not subject15:
-        return pd.DataFrame(columns=["subject_number", "in_11d", "in_15d", "overlap_type"])
+    patient11 = _resolve_columns(df11, ["patient_record_number"]).get("patient_record_number")
+    patient15 = _resolve_columns(df15, ["patient_record_number"]).get("patient_record_number")
+    if not patient11 or not patient15:
+        return pd.DataFrame(columns=["patient_record_number", "in_11d", "in_15d", "overlap_type"])
 
-    a = set(_normalize_identifier(df11[subject11]).dropna().unique())
-    b = set(_normalize_identifier(df15[subject15]).dropna().unique())
+    a = set(_normalize_identifier(df11[patient11]).dropna().unique())
+    b = set(_normalize_identifier(df15[patient15]).dropna().unique())
 
     union = sorted(a | b)
-    out = pd.DataFrame({"subject_number": union})
-    out["in_11d"] = out["subject_number"].isin(a)
-    out["in_15d"] = out["subject_number"].isin(b)
+    out = pd.DataFrame({"patient_record_number": union})
+    out["in_11d"] = out["patient_record_number"].isin(a)
+    out["in_15d"] = out["patient_record_number"].isin(b)
     out["overlap_type"] = np.select(
         [
             out["in_11d"] & out["in_15d"],
