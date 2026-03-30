@@ -41,7 +41,7 @@ def _normalize_yes_no(value: str) -> bool:
 def _parse_args() -> CollapseConfig:
     parser = argparse.ArgumentParser(
         description=(
-            "Audits repeated measures inside SUBJECT_NUMBER x INTERVAL_NAME and "
+            "Audits repeated measures inside PATIENT_RECORD_NUMBER x INTERVAL_NAME and "
             "optionally collapses them into one row per patient-interval."
         )
     )
@@ -56,7 +56,7 @@ def _parse_args() -> CollapseConfig:
 
 
 def _resolve_columns(visits: pd.DataFrame) -> tuple[str, str, str]:
-    subject_col = resolve_canonical_column(visits, "subject_number")
+    subject_col = resolve_canonical_column(visits, "patient_record_number")
     interval_col = resolve_canonical_column(visits, "interval_name")
 
     try:
