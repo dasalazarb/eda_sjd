@@ -108,6 +108,11 @@ def deduplicate_within_protocol(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
     kept = ranked.drop(columns=["duplicate_group_size"])
 
     audit = ranked[["row_id_raw"]].copy()
+    try:
+        patient_record_col = resolve_canonical_column(ranked, "patient_record_number")
+        audit["patient_record_number"] = ranked[patient_record_col]
+    except KeyError:
+        audit["patient_record_number"] = pd.NA
     audit["decision"] = ranked["dup_rank"].map(lambda x: "kept_as_is" if x == 1 else "kept_with_shifted_datetime")
     audit["reason"] = ranked["dup_rank"].map(lambda x: "first_by_sort_order" if x == 1 else "duplicate_key_shifted_time")
     audit["duplicate_group_id"] = ranked["duplicate_group_id"]
