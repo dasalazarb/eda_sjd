@@ -816,7 +816,7 @@ def main() -> None:
 
     print_step(1, "Load visits_long and resolve canonical columns")
     visits = pd.read_parquet(ANALYTIC_DIR / "visits_long.parquet")
-    subject_col    = resolve_canonical_column(visits, "subject_number")
+    subject_col    = resolve_canonical_column(visits, "patient_record_number")
     visit_date_col = _resolve_visit_date(visits)
     interval_col   = resolve_canonical_column(visits, "interval_name")
 
