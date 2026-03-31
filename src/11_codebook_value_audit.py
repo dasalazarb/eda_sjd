@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -170,6 +171,61 @@ def _parse_option_tokens(raw_options: object) -> set[str]:
     return tokens
 
 
+def _parse_option_variants(raw_options: object) -> list[str]:
+    if _is_blank(raw_options):
+        return []
+
+    variants: list[str] = []
+    for chunk in re.split(r"[|;\n]+", str(raw_options)):
+        option = re.sub(r"\s{2,}", " ", chunk).strip()
+        if option and _normalize_token(option) not in BLANK_TOKENS:
+            variants.append(option)
+    return variants
+
+
+def _phrase_signature(value: object) -> str:
+    if _is_blank(value):
+        return ""
+    text = str(value).lower()
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\b(or|of|the|a|an)\b", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _match_display_option(value: str, raw_options: object) -> tuple[bool, str | None, str]:
+    options = _parse_option_variants(raw_options)
+    if not options:
+        return False, None, "no_options"
+
+    value_norm = _normalize_token(value)
+    option_tokens = _parse_option_tokens(raw_options)
+    if value_norm in option_tokens:
+        return True, value, "exact_token"
+
+    signature_to_options: dict[str, list[str]] = {}
+    for option in options:
+        signature = _phrase_signature(option)
+        if signature:
+            signature_to_options.setdefault(signature, []).append(option)
+
+    value_signature = _phrase_signature(value)
+    if value_signature and value_signature in signature_to_options:
+        candidates = signature_to_options[value_signature]
+        corrected = min(candidates, key=len)
+        return True, corrected, "signature_match"
+
+    option_signatures = [sig for sig in signature_to_options.keys() if sig]
+    if value_signature and option_signatures:
+        best = difflib.get_close_matches(value_signature, option_signatures, n=1, cutoff=0.9)
+        if best:
+            corrected = min(signature_to_options[best[0]], key=len)
+            return True, corrected, "fuzzy_signature"
+
+    return False, None, "no_match"
+
+
 def _coerce_float(value: object) -> float | None:
     if _is_blank(value):
         return None
@@ -250,14 +306,15 @@ def _audit_matches(codebook_expanded: pd.DataFrame, collapsed: pd.DataFrame) -> 
         if not normalized_observed:
             normalized_observed = ["(sin_valor)"]
 
-        option_tokens = _parse_option_tokens(cb["final_display_options"])
         range_text = cb["final_answer_range"]
         option_is_blank = _is_blank(cb["final_display_options"])
         range_is_blank = _is_blank(range_text)
 
         for value in normalized_observed:
-            value_norm = _normalize_token(value)
-            option_match = value_norm in option_tokens if option_tokens else False
+            option_match, corrected_display_option, option_match_method = _match_display_option(
+                value,
+                cb["final_display_options"],
+            )
             range_match = _matches_range(value, range_text)
 
             if option_is_blank and range_is_blank:
@@ -289,6 +346,8 @@ def _audit_matches(codebook_expanded: pd.DataFrame, collapsed: pd.DataFrame) -> 
                     "final_display_options": cb["final_display_options"],
                     "final_answer_range": cb["final_answer_range"],
                     "option_match": option_match,
+                    "corrected_display_option": corrected_display_option,
+                    "option_match_method": option_match_method,
                     "range_match": range_match,
                     "status": status,
                     "evaluation": detail,
