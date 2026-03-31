@@ -43,10 +43,10 @@ def _parse_args() -> AuditConfig:
     parser.add_argument(
         "--collapsed-path",
         type=Path,
-        default=ANALYTIC_DIR / "visits_long_collapsed_by_interval.xlsx",
+        default=ANALYTIC_DIR / "visits_long_collapsed_by_interval.parquet",
         help=(
             "Path to collapsed visits table (.xlsx/.csv/.parquet). "
-            "Default: data_analytic/visits_long_collapsed_by_interval.xlsx"
+            "Default: data_analytic/visits_long_collapsed_by_interval.parquet"
         ),
     )
     parser.add_argument(
