@@ -88,7 +88,7 @@ def _split_variants(value: object) -> list[str]:
 def _canonical_key(question_name: str, form_name: str) -> str:
     q = _normalize_token(question_name)
     f = _normalize_token(form_name)
-    return f"{q}__{f}"
+    return f"{f}__{q}"
 
 
 def _load_table(path: Path, sheet_name: str | None = None) -> pd.DataFrame:
