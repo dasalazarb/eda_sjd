@@ -67,7 +67,7 @@ def _parse_args() -> AuditConfig:
 def _normalize_token(value: object) -> str:
     if pd.isna(value):
         return ""
-    text = str(value).strip().lower()
+    text = re.sub(r"\s{2,}", " ", str(value)).strip().lower()
     text = re.sub(r"\s+", "_", text)
     return text
 
@@ -81,7 +81,7 @@ def _split_variants(value: object) -> list[str]:
     if _is_blank(value):
         return []
     raw = str(value)
-    parts = [part.strip() for part in SEPARATOR_PATTERN.split(raw)]
+    parts = [re.sub(r"\s{2,}", " ", part).strip() for part in SEPARATOR_PATTERN.split(raw)]
     return [part for part in parts if _normalize_token(part) not in BLANK_TOKENS]
 
 
