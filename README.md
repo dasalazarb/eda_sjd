@@ -59,6 +59,9 @@ python src/06_postmerge_eda.py
 python src/07_build_cohorts.py
 python src/08_visit_patterns.py
 python src/09_interval_collapse_audit.py --collapse no
+python src/11_codebook_value_audit.py \
+  --codebook-path codebook_final_harmonized_once_quince.xlsx \
+  --collapsed-path data_analytic/visits_long_collapsed_by_interval.xlsx
 ```
 
 Every script:
@@ -114,6 +117,10 @@ Each script prints an English, step-by-step console narrative with numbered step
    - Audits repeated measurements inside `SUBJECT_NUMBER × INTERVAL_NAME` groups.
    - Quantifies whether variables are mostly complementary (e.g., `yes` + `NaN` -> `yes`) or conflicting (e.g., `yes` + `no` -> `yes | no`).
    - Exports temporal-window distribution reports and optionally saves a collapsed one-row-per-group table via `--collapse yes|no`.
+10. `11_codebook_value_audit.py`
+   - Builds merge keys as `question_name__final_form_name` (lowercase and underscores), expanding `|` variants in both codebook and collapsed values.
+   - Audits each observed value against `final_display_options` and `final_answer_range`.
+   - Exports an Excel report with findings, summaries, and unmatched key diagnostics.
 
 ## Operational definitions encoded in the pipeline
 
@@ -163,6 +170,7 @@ Reports:
 - `reports/interval_collapse_window_summary.csv`
 - `reports/interval_collapse_conflict_examples.csv`
 - `data_analytic/visits_long_collapsed_by_interval.parquet` (optional, with `--collapse yes`)
+- `reports/codebook_value_audit.xlsx`
 
 ## EDA unificada (`reports/eda_unificado.xlsx`)
 
