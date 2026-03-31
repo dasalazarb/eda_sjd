@@ -31,8 +31,8 @@ def _parse_args() -> AuditConfig:
     parser.add_argument(
         "--codebook-path",
         type=Path,
-        default=Path("codebook_final_harmonized_once_quince.xlsx"),
-        help="Path to codebook workbook (default: ./codebook_final_harmonized_once_quince.xlsx).",
+        default=Path("data_raw") / "codebook_final_harmonized_once_quince.xlsx",
+        help="Path to codebook workbook (default: data_raw/codebook_final_harmonized_once_quince.xlsx).",
     )
     parser.add_argument(
         "--codebook-sheet",
