@@ -79,6 +79,10 @@ def _normalize_token(value: object) -> str:
     if pd.isna(value):
         return ""
     text = re.sub(r"\s{2,}", " ", str(value)).strip().lower()
+    # Normalize numeric labels from spreadsheets (e.g., "1.0" -> "1")
+    # so integer code values compare consistently.
+    if re.fullmatch(r"[+-]?\d+\.0+", text):
+        text = text.split(".", 1)[0]
     text = re.sub(r"\s+", "_", text)
     return text
 
