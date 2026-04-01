@@ -79,17 +79,13 @@ def build_group_prefixed_columns(group_row: pd.Series, variable_row: pd.Series) 
 
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     def _normalize_column_name(col: object) -> str:
-        raw = str(col).strip().lower()
-        parts = raw.split("__")
-        normalized_parts: list[str] = []
+        raw = str(col).strip()
+        if "__" not in raw:
+            return raw
 
-        for idx, part in enumerate(parts, start=1):
-            clean = re.sub(r"[^0-9a-zA-Z]+", "_", part).strip("_")
-            if not clean:
-                clean = f"unnamed_part_{idx}"
-            normalized_parts.append(clean)
-
-        return "__".join(normalized_parts)
+        category, variable = raw.split("__", 1)
+        normalized_category = re.sub(r"\s+", " ", category.strip()).lower().replace(" ", "_")
+        return f"{normalized_category}__{variable}"
 
     cols = pd.Index([_normalize_column_name(col) for col in df.columns])
     out = df.copy()
