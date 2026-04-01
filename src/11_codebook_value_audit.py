@@ -237,9 +237,23 @@ def _parse_visit_year(value: object) -> int | None:
 
 
 def _value_from_row(row: pd.Series, *candidates: str) -> object:
+    # First try exact column names.
     for col in candidates:
         if col in row.index:
             return row[col]
+
+    # Then allow prefixed names such as "{categoria}__patient_record_number".
+    lower_index = {str(col).lower(): col for col in row.index}
+    for candidate in candidates:
+        c = str(candidate).lower()
+        if c in lower_index:
+            return row[lower_index[c]]
+
+        suffix = f"__{c}"
+        for lower_col, original_col in lower_index.items():
+            if lower_col.endswith(suffix):
+                return row[original_col]
+
     return ""
 
 
