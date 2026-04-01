@@ -11,6 +11,7 @@ import pandas as pd
 from common import ANALYTIC_DIR, REPORTS_DIR, print_kv, print_script_overview, print_step, setup_logger
 
 BLANK_TOKENS = {"", "nan", "none", "null", "na", "n/a"}
+DROP_VALUE_TOKENS = {"pt_declined_test", "nd", "not_done"}
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,13 @@ def _parse_answer_range(answer_range_raw: object) -> tuple[float | None, float |
     return min_val, max_val
 
 
+def _parse_visit_year(value: object) -> int | None:
+    dt = pd.to_datetime(value, errors="coerce")
+    if pd.isna(dt):
+        return None
+    return int(dt.year)
+
+
 def _audit_and_correct(
     codebook_prepared: pd.DataFrame, collapsed: pd.DataFrame
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -273,6 +281,25 @@ def _audit_and_correct(
                 value_text = str(raw_value).strip()
                 if not value_text:
                     continue
+                normalized = _normalize_token(value_text)
+
+                if normalized in DROP_VALUE_TOKENS:
+                    corrected.at[idx, source_column] = ""
+                    findings.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "final_value": "",
+                            "is_valid": True,
+                            "correction_applied": True,
+                            "match_method": "drop_token_to_blank",
+                            "DISPLAY": cb["DISPLAY"],
+                            "CODEVALUE": cb["CODEVALUE"],
+                        }
+                    )
+                    continue
 
                 if "|" in value_text:
                     pipe_conflicts.append(
@@ -301,7 +328,6 @@ def _audit_and_correct(
                     continue
 
                 if allowed_map:
-                    normalized = _normalize_token(value_text)
                     corrected_value = value_text
                     is_valid = normalized in allowed_map
                     correction_applied = False
@@ -349,62 +375,36 @@ def _audit_and_correct(
                     )
                     continue
 
-                if numeric_value < 0:
-                    range_findings.append(
-                        {
-                            "merge_key": variable_name,
-                            "source_column": source_column,
-                            "row_index": idx,
-                            "original_value": value_text,
-                            "answer_range": cb.get("ANSWER_RANGE", ""),
-                            "issue_type": "negative_value",
-                            "issue_detail": "Valor negativo detectado.",
-                        }
-                    )
+                out_of_range = (
+                    (min_allowed is not None and numeric_value < min_allowed)
+                    or (max_allowed is not None and numeric_value > max_allowed)
+                )
 
-                if min_allowed is not None and numeric_value < min_allowed:
-                    range_findings.append(
-                        {
-                            "merge_key": variable_name,
-                            "source_column": source_column,
-                            "row_index": idx,
-                            "original_value": value_text,
-                            "answer_range": cb.get("ANSWER_RANGE", ""),
-                            "issue_type": "below_min_range",
-                            "issue_detail": f"Valor {numeric_value} menor al mínimo permitido {min_allowed}.",
-                        }
-                    )
-                if max_allowed is not None and numeric_value > max_allowed:
-                    range_findings.append(
-                        {
-                            "merge_key": variable_name,
-                            "source_column": source_column,
-                            "row_index": idx,
-                            "original_value": value_text,
-                            "answer_range": cb.get("ANSWER_RANGE", ""),
-                            "issue_type": "above_max_range",
-                            "issue_detail": f"Valor {numeric_value} mayor al máximo permitido {max_allowed}.",
-                        }
-                    )
-
-                min_allowed, max_allowed = _parse_answer_range(cb.get("ANSWER_RANGE", ""))
-                if min_allowed is None and max_allowed is None:
-                    continue
-
-                numeric_value = _parse_numeric_value(value_text)
-                if numeric_value is None:
-                    range_findings.append(
-                        {
-                            "merge_key": variable_name,
-                            "source_column": source_column,
-                            "row_index": idx,
-                            "original_value": value_text,
-                            "answer_range": cb.get("ANSWER_RANGE", ""),
-                            "issue_type": "text_or_non_numeric",
-                            "issue_detail": "Valor no numérico para variable con ANSWER_RANGE.",
-                        }
-                    )
-                    continue
+                if (
+                    out_of_range
+                    and variable_name == "social_history__TOBACCO_HX_LAST"
+                    and re.fullmatch(r"\d{4}", value_text)
+                    and "VISIT_DATE" in collapsed.columns
+                ):
+                    visit_year = _parse_visit_year(collapsed.at[idx, "VISIT_DATE"])
+                    if visit_year is not None:
+                        corrected_numeric = visit_year - int(value_text)
+                        corrected.at[idx, source_column] = corrected_numeric
+                        range_findings.append(
+                            {
+                                "merge_key": variable_name,
+                                "source_column": source_column,
+                                "row_index": idx,
+                                "original_value": value_text,
+                                "answer_range": cb.get("ANSWER_RANGE", ""),
+                                "issue_type": "year_to_delta_corrected",
+                                "issue_detail": (
+                                    f"Valor de 4 dígitos corregido usando VISIT_DATE: "
+                                    f"{visit_year} - {value_text} = {corrected_numeric}."
+                                ),
+                            }
+                        )
+                        numeric_value = float(corrected_numeric)
 
                 if numeric_value < 0:
                     range_findings.append(
