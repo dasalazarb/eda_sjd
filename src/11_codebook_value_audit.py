@@ -236,6 +236,13 @@ def _parse_visit_year(value: object) -> int | None:
     return int(dt.year)
 
 
+def _value_from_row(row: pd.Series, *candidates: str) -> object:
+    for col in candidates:
+        if col in row.index:
+            return row[col]
+    return ""
+
+
 def _audit_and_correct(
     codebook_prepared: pd.DataFrame, collapsed: pd.DataFrame
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -302,11 +309,22 @@ def _audit_and_correct(
                     continue
 
                 if "|" in value_text:
+                    row = collapsed.loc[idx]
                     pipe_conflicts.append(
                         {
                             "merge_key": variable_name,
                             "source_column": source_column,
                             "row_index": idx,
+                            "patient_record_number": _value_from_row(
+                                row,
+                                "patient_record_number",
+                                "PATIENT_RECORD_NUMBER",
+                            ),
+                            "interval_name": _value_from_row(
+                                row,
+                                "interval_name",
+                                "INTERVAL_NAME",
+                            ),
                             "original_value": value_text,
                             "reason": "Contiene '|' y se deja sin corregir",
                         }
