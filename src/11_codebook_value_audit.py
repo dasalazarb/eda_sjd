@@ -253,11 +253,14 @@ def _audit_and_correct(
             continue
 
         allowed_map = _allowed_value_maps(cb["DISPLAY"], cb["CODEVALUE"])
-        if not allowed_map:
+        min_allowed, max_allowed = _parse_answer_range(cb.get("ANSWER_RANGE", ""))
+        has_range = min_allowed is not None or max_allowed is not None
+
+        if not allowed_map and not has_range:
             skipped_vars.append(
                 {
                     "merge_key": variable_name,
-                    "reason": "DISPLAY y CODEVALUE vacíos; variable omitida",
+                    "reason": "DISPLAY/CODEVALUE y ANSWER_RANGE vacíos o no parseables; variable omitida",
                 }
             )
             continue
@@ -297,35 +300,92 @@ def _audit_and_correct(
                     )
                     continue
 
-                normalized = _normalize_token(value_text)
-                corrected_value = value_text
-                is_valid = normalized in allowed_map
-                correction_applied = False
-                method = "exact" if is_valid else "no_match"
+                if allowed_map:
+                    normalized = _normalize_token(value_text)
+                    corrected_value = value_text
+                    is_valid = normalized in allowed_map
+                    correction_applied = False
+                    method = "exact" if is_valid else "no_match"
 
-                if not is_valid:
-                    fuzzy = _best_fuzzy_match(value_text, set(allowed_map.keys()), cutoff=0.9)
-                    if fuzzy is not None:
-                        corrected_value = allowed_map[fuzzy]
-                        is_valid = True
-                        correction_applied = True
-                        method = "fuzzy_corrected"
-                        corrected.at[idx, source_column] = corrected_value
+                    if not is_valid:
+                        fuzzy = _best_fuzzy_match(value_text, set(allowed_map.keys()), cutoff=0.9)
+                        if fuzzy is not None:
+                            corrected_value = allowed_map[fuzzy]
+                            is_valid = True
+                            correction_applied = True
+                            method = "fuzzy_corrected"
+                            corrected.at[idx, source_column] = corrected_value
 
-                findings.append(
-                    {
-                        "merge_key": variable_name,
-                        "source_column": source_column,
-                        "row_index": idx,
-                        "original_value": value_text,
-                        "final_value": corrected_value,
-                        "is_valid": is_valid,
-                        "correction_applied": correction_applied,
-                        "match_method": method,
-                        "DISPLAY": cb["DISPLAY"],
-                        "CODEVALUE": cb["CODEVALUE"],
-                    }
-                )
+                    findings.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "final_value": corrected_value,
+                            "is_valid": is_valid,
+                            "correction_applied": correction_applied,
+                            "match_method": method,
+                            "DISPLAY": cb["DISPLAY"],
+                            "CODEVALUE": cb["CODEVALUE"],
+                        }
+                    )
+
+                if not has_range:
+                    continue
+
+                numeric_value = _parse_numeric_value(value_text)
+                if numeric_value is None:
+                    range_findings.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "answer_range": cb.get("ANSWER_RANGE", ""),
+                            "issue_type": "text_or_non_numeric",
+                            "issue_detail": "Valor no numérico para variable con ANSWER_RANGE.",
+                        }
+                    )
+                    continue
+
+                if numeric_value < 0:
+                    range_findings.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "answer_range": cb.get("ANSWER_RANGE", ""),
+                            "issue_type": "negative_value",
+                            "issue_detail": "Valor negativo detectado.",
+                        }
+                    )
+
+                if min_allowed is not None and numeric_value < min_allowed:
+                    range_findings.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "answer_range": cb.get("ANSWER_RANGE", ""),
+                            "issue_type": "below_min_range",
+                            "issue_detail": f"Valor {numeric_value} menor al mínimo permitido {min_allowed}.",
+                        }
+                    )
+                if max_allowed is not None and numeric_value > max_allowed:
+                    range_findings.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "answer_range": cb.get("ANSWER_RANGE", ""),
+                            "issue_type": "above_max_range",
+                            "issue_detail": f"Valor {numeric_value} mayor al máximo permitido {max_allowed}.",
+                        }
+                    )
 
                 min_allowed, max_allowed = _parse_answer_range(cb.get("ANSWER_RANGE", ""))
                 if min_allowed is None and max_allowed is None:
@@ -389,26 +449,27 @@ def _audit_and_correct(
     pipe_df = pd.DataFrame(pipe_conflicts)
     range_df = pd.DataFrame(range_findings)
 
-    if findings_df.empty:
-        summary = pd.DataFrame([{"metric": "matched_variables", "value": 0}])
-        return findings_df, summary, pipe_df, corrected, range_df
-
     summary = pd.DataFrame(
         [
-            {"metric": "matched_variables", "value": int(findings_df["merge_key"].nunique())},
+            {
+                "metric": "matched_variables",
+                "value": int(findings_df["merge_key"].nunique()) if not findings_df.empty else 0,
+            },
             {"metric": "records_evaluated", "value": int(len(findings_df))},
-            {"metric": "valid_records", "value": int(findings_df["is_valid"].sum())},
+            {"metric": "valid_records", "value": int(findings_df["is_valid"].sum()) if not findings_df.empty else 0},
             {
                 "metric": "corrected_records",
-                "value": int((findings_df["correction_applied"] == True).sum()),
+                "value": int((findings_df["correction_applied"] == True).sum()) if not findings_df.empty else 0,
             },
             {
                 "metric": "pipe_conflicts",
-                "value": int((findings_df["match_method"] == "pipe_conflict").sum()),
+                "value": int((findings_df["match_method"] == "pipe_conflict").sum()) if not findings_df.empty else 0,
             },
             {
                 "metric": "uncorrected_invalid",
-                "value": int(((findings_df["is_valid"] == False) & (findings_df["match_method"] != "pipe_conflict")).sum()),
+                "value": int(((findings_df["is_valid"] == False) & (findings_df["match_method"] != "pipe_conflict")).sum())
+                if not findings_df.empty
+                else 0,
             },
             {"metric": "skipped_variables", "value": int(len(skipped_df))},
             {"metric": "answer_range_issues", "value": int(len(range_df))},
