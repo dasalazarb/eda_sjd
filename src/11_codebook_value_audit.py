@@ -103,7 +103,11 @@ def _is_blank(value: object) -> bool:
 def _split_by_delimiters(value: object) -> list[str]:
     if _is_blank(value):
         return []
-    parts = [part.strip() for part in re.split(r"[|;,\n]+", str(value))]
+    # Delimiters for multi-select labels in the codebook are pipe/semicolon/newline.
+    # Do not split by comma because many labels include explanatory commas
+    # (e.g., "for example, less sweet"), and splitting on commas creates
+    # invalid partial tokens that later appear as no_match.
+    parts = [part.strip() for part in re.split(r"[|;\n]+", str(value))]
     return [part for part in parts if _normalize_token(part) not in BLANK_TOKENS]
 
 
