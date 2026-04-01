@@ -32,14 +32,14 @@ def _parse_args() -> AuditConfig:
     parser.add_argument(
         "--codebook-path",
         type=Path,
-        default=Path("data_raw") / "codebook_final_harmonized_once_quince.xlsx",
-        help="Path to codebook workbook (default: data_raw/codebook_final_harmonized_once_quince.xlsx).",
+        default=Path("data_raw") / "Consolidated_Codebook_11D0172_15D0051.xlsx",
+        help="Path to codebook workbook (default: data_raw/Consolidated_Codebook_11D0172_15D0051.xlsx).",
     )
     parser.add_argument(
         "--codebook-sheet",
         type=str,
-        default="final_codebook",
-        help="Codebook sheet name (default: final_codebook).",
+        default="Consolidated_Codebook",
+        help="Codebook sheet name (default: Consolidated_Codebook).",
     )
     parser.add_argument(
         "--collapsed-path",
