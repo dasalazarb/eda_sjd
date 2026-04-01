@@ -129,6 +129,10 @@ def _save_table(df: pd.DataFrame, path: Path) -> None:
     raise ValueError(f"Unsupported format for output: {path}")
 
 
+def _csv_path_for(path: Path) -> Path:
+    return path.with_suffix(".csv")
+
+
 def _prepare_codebook(codebook: pd.DataFrame) -> pd.DataFrame:
     required_cols = {"FORM_NAME__QUESTION_NAME", "DISPLAY", "CODEVALUE"}
     missing = required_cols.difference(codebook.columns)
@@ -335,6 +339,8 @@ def main() -> None:
         unmatched_in_codebook.to_excel(writer, sheet_name="unmatched_codebook", index=False)
 
     _save_table(collapsed_corrected, config.corrected_output_path)
+    corrected_csv_path = _csv_path_for(config.corrected_output_path)
+    collapsed_corrected.to_csv(corrected_csv_path, index=False)
 
     metrics = {
         "rows_codebook": len(codebook),
@@ -345,10 +351,12 @@ def main() -> None:
         "pipe_conflicts": len(pipe_conflicts),
         "audit_output": str(config.output_path),
         "corrected_output": str(config.corrected_output_path),
+        "corrected_output_csv": str(corrected_csv_path),
     }
     print_kv("Codebook value audit", metrics)
     logger.info("Saved report: %s", config.output_path)
     logger.info("Saved corrected collapsed file: %s", config.corrected_output_path)
+    logger.info("Saved corrected collapsed CSV file: %s", corrected_csv_path)
 
 
 if __name__ == "__main__":
