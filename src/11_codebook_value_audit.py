@@ -87,6 +87,14 @@ def _normalize_token(value: object) -> str:
     return text
 
 
+def _strip_repeat_suffix(value: object) -> str:
+    text = str(value).strip()
+    match = re.search(r"_(\d+)$", text)
+    if match and int(match.group(1)) >= 2:
+        return text[: match.start()]
+    return text
+
+
 def _is_blank(value: object) -> bool:
     token = _normalize_token(value)
     return token in BLANK_TOKENS
@@ -142,17 +150,18 @@ def _prepare_codebook(codebook: pd.DataFrame) -> pd.DataFrame:
     selected = codebook[["FORM_NAME__QUESTION_NAME", "DISPLAY", "CODEVALUE"]].copy()
     selected["FORM_NAME__QUESTION_NAME"] = selected["FORM_NAME__QUESTION_NAME"].astype(str).str.strip()
     selected = selected[selected["FORM_NAME__QUESTION_NAME"] != ""]
+    selected["merge_key"] = selected["FORM_NAME__QUESTION_NAME"].map(_strip_repeat_suffix)
+    selected = selected[selected["merge_key"] != ""]
 
     # If merge key appears multiple times, combine all DISPLAY/CODEVALUE possibilities.
     agg = (
-        selected.groupby("FORM_NAME__QUESTION_NAME", as_index=False)
+        selected.groupby("merge_key", as_index=False)
         .agg(
             {
                 "DISPLAY": lambda s: " | ".join([str(v) for v in s if not _is_blank(v)]),
                 "CODEVALUE": lambda s: " | ".join([str(v) for v in s if not _is_blank(v)]),
             }
         )
-        .rename(columns={"FORM_NAME__QUESTION_NAME": "merge_key"})
     )
     return agg
 
@@ -190,11 +199,15 @@ def _audit_and_correct(codebook_prepared: pd.DataFrame, collapsed: pd.DataFrame)
     skipped_vars: list[dict[str, object]] = []
     pipe_conflicts: list[dict[str, object]] = []
 
-    collapsed_cols = set(collapsed.columns.astype(str).tolist())
+    column_map: dict[str, list[str]] = {}
+    for col in collapsed.columns.astype(str):
+        base_col = _strip_repeat_suffix(col)
+        column_map.setdefault(base_col, []).append(col)
 
     for _, cb in codebook_prepared.iterrows():
         variable_name = cb["merge_key"]
-        if variable_name not in collapsed_cols:
+        variable_columns = column_map.get(variable_name, [])
+        if not variable_columns:
             continue
 
         allowed_map = _allowed_value_maps(cb["DISPLAY"], cb["CODEVALUE"])
@@ -207,66 +220,70 @@ def _audit_and_correct(codebook_prepared: pd.DataFrame, collapsed: pd.DataFrame)
             )
             continue
 
-        for idx, raw_value in collapsed[variable_name].items():
-            if _is_blank(raw_value):
-                continue
+        for source_column in variable_columns:
+            for idx, raw_value in collapsed[source_column].items():
+                if _is_blank(raw_value):
+                    continue
 
-            value_text = str(raw_value).strip()
-            if not value_text:
-                continue
+                value_text = str(raw_value).strip()
+                if not value_text:
+                    continue
 
-            if "|" in value_text:
-                pipe_conflicts.append(
-                    {
-                        "merge_key": variable_name,
-                        "row_index": idx,
-                        "original_value": value_text,
-                        "reason": "Contiene '|' y se deja sin corregir",
-                    }
-                )
+                if "|" in value_text:
+                    pipe_conflicts.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "reason": "Contiene '|' y se deja sin corregir",
+                        }
+                    )
+                    findings.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "final_value": value_text,
+                            "is_valid": False,
+                            "correction_applied": False,
+                            "match_method": "pipe_conflict",
+                            "DISPLAY": cb["DISPLAY"],
+                            "CODEVALUE": cb["CODEVALUE"],
+                        }
+                    )
+                    continue
+
+                normalized = _normalize_token(value_text)
+                corrected_value = value_text
+                is_valid = normalized in allowed_map
+                correction_applied = False
+                method = "exact" if is_valid else "no_match"
+
+                if not is_valid:
+                    fuzzy = _best_fuzzy_match(value_text, set(allowed_map.keys()), cutoff=0.9)
+                    if fuzzy is not None:
+                        corrected_value = allowed_map[fuzzy]
+                        is_valid = True
+                        correction_applied = True
+                        method = "fuzzy_corrected"
+                        corrected.at[idx, source_column] = corrected_value
+
                 findings.append(
                     {
                         "merge_key": variable_name,
+                        "source_column": source_column,
                         "row_index": idx,
                         "original_value": value_text,
-                        "final_value": value_text,
-                        "is_valid": False,
-                        "correction_applied": False,
-                        "match_method": "pipe_conflict",
+                        "final_value": corrected_value,
+                        "is_valid": is_valid,
+                        "correction_applied": correction_applied,
+                        "match_method": method,
                         "DISPLAY": cb["DISPLAY"],
                         "CODEVALUE": cb["CODEVALUE"],
                     }
                 )
-                continue
-
-            normalized = _normalize_token(value_text)
-            corrected_value = value_text
-            is_valid = normalized in allowed_map
-            correction_applied = False
-            method = "exact" if is_valid else "no_match"
-
-            if not is_valid:
-                fuzzy = _best_fuzzy_match(value_text, set(allowed_map.keys()), cutoff=0.9)
-                if fuzzy is not None:
-                    corrected_value = allowed_map[fuzzy]
-                    is_valid = True
-                    correction_applied = True
-                    method = "fuzzy_corrected"
-                    corrected.at[idx, variable_name] = corrected_value
-
-            findings.append(
-                {
-                    "merge_key": variable_name,
-                    "row_index": idx,
-                    "original_value": value_text,
-                    "final_value": corrected_value,
-                    "is_valid": is_valid,
-                    "correction_applied": correction_applied,
-                    "match_method": method,
-                    "DISPLAY": cb["DISPLAY"],
-                    "CODEVALUE": cb["CODEVALUE"],
-                }
-            )
 
     findings_df = pd.DataFrame(findings)
     skipped_df = pd.DataFrame(skipped_vars)
@@ -320,13 +337,16 @@ def main() -> None:
     findings, summary, pipe_conflicts, collapsed_corrected = _audit_and_correct(codebook_prepared, collapsed)
 
     print_step(4, "Build unmatched-key diagnostics")
-    collapsed_keys = pd.DataFrame({"merge_key": collapsed.columns.astype(str)}).drop_duplicates()
+    collapsed_keys = pd.DataFrame({"source_column": collapsed.columns.astype(str)})
+    collapsed_keys["merge_key"] = collapsed_keys["source_column"].map(_strip_repeat_suffix)
+    collapsed_keys = collapsed_keys[["source_column", "merge_key"]].drop_duplicates()
     codebook_keys = codebook_prepared[["merge_key"]].drop_duplicates()
 
     unmatched_in_collapsed = collapsed_keys.merge(codebook_keys, on="merge_key", how="left", indicator=True)
     unmatched_in_collapsed = unmatched_in_collapsed[unmatched_in_collapsed["_merge"] == "left_only"].drop(columns=["_merge"])
 
-    unmatched_in_codebook = codebook_keys.merge(collapsed_keys, on="merge_key", how="left", indicator=True)
+    collapsed_base_keys = collapsed_keys[["merge_key"]].drop_duplicates()
+    unmatched_in_codebook = codebook_keys.merge(collapsed_base_keys, on="merge_key", how="left", indicator=True)
     unmatched_in_codebook = unmatched_in_codebook[unmatched_in_codebook["_merge"] == "left_only"].drop(columns=["_merge"])
 
     print_step(5, "Save audit workbook and corrected collapsed file")
