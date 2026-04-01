@@ -387,6 +387,63 @@ def _audit_and_correct(
                         }
                     )
 
+                min_allowed, max_allowed = _parse_answer_range(cb.get("ANSWER_RANGE", ""))
+                if min_allowed is None and max_allowed is None:
+                    continue
+
+                numeric_value = _parse_numeric_value(value_text)
+                if numeric_value is None:
+                    range_findings.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "answer_range": cb.get("ANSWER_RANGE", ""),
+                            "issue_type": "text_or_non_numeric",
+                            "issue_detail": "Valor no numérico para variable con ANSWER_RANGE.",
+                        }
+                    )
+                    continue
+
+                if numeric_value < 0:
+                    range_findings.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "answer_range": cb.get("ANSWER_RANGE", ""),
+                            "issue_type": "negative_value",
+                            "issue_detail": "Valor negativo detectado.",
+                        }
+                    )
+
+                if min_allowed is not None and numeric_value < min_allowed:
+                    range_findings.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "answer_range": cb.get("ANSWER_RANGE", ""),
+                            "issue_type": "below_min_range",
+                            "issue_detail": f"Valor {numeric_value} menor al mínimo permitido {min_allowed}.",
+                        }
+                    )
+                if max_allowed is not None and numeric_value > max_allowed:
+                    range_findings.append(
+                        {
+                            "merge_key": variable_name,
+                            "source_column": source_column,
+                            "row_index": idx,
+                            "original_value": value_text,
+                            "answer_range": cb.get("ANSWER_RANGE", ""),
+                            "issue_type": "above_max_range",
+                            "issue_detail": f"Valor {numeric_value} mayor al máximo permitido {max_allowed}.",
+                        }
+                    )
+
     findings_df = pd.DataFrame(findings)
     skipped_df = pd.DataFrame(skipped_vars)
     pipe_df = pd.DataFrame(pipe_conflicts)
