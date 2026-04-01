@@ -10,7 +10,6 @@ import pandas as pd
 
 from common import ANALYTIC_DIR, REPORTS_DIR, print_kv, print_script_overview, print_step, setup_logger
 
-SEPARATOR_PATTERN = re.compile(r"\s*\|\s*")
 BLANK_TOKENS = {"", "nan", "none", "null", "na", "n/a"}
 
 
@@ -20,13 +19,14 @@ class AuditConfig:
     codebook_sheet: str
     collapsed_path: Path
     output_path: Path
+    corrected_output_path: Path
 
 
 def _parse_args() -> AuditConfig:
     parser = argparse.ArgumentParser(
         description=(
-            "Audits values from visits_long_collapsed_by_interval against final_display_options "
-            "and final_answer_range from the harmonized codebook."
+            "Audits values from visits_long_collapsed_by_interval using the new codebook schema "
+            "(FORM_NAME__QUESTION_NAME, DISPLAY, CODEVALUE) and writes a corrected collapsed file."
         )
     )
     parser.add_argument(
@@ -56,12 +56,22 @@ def _parse_args() -> AuditConfig:
         default=REPORTS_DIR / "codebook_value_audit.xlsx",
         help="Output Excel report path (default: reports/codebook_value_audit.xlsx).",
     )
+    parser.add_argument(
+        "--corrected-output-path",
+        type=Path,
+        default=ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_corrected.parquet",
+        help=(
+            "Path to corrected collapsed table (.xlsx/.csv/.parquet). "
+            "Default: data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet"
+        ),
+    )
     args = parser.parse_args()
     return AuditConfig(
         codebook_path=args.codebook_path,
         codebook_sheet=args.codebook_sheet,
         collapsed_path=args.collapsed_path,
         output_path=args.output_path,
+        corrected_output_path=args.corrected_output_path,
     )
 
 
@@ -78,18 +88,11 @@ def _is_blank(value: object) -> bool:
     return token in BLANK_TOKENS
 
 
-def _split_variants(value: object) -> list[str]:
+def _split_by_delimiters(value: object) -> list[str]:
     if _is_blank(value):
         return []
-    raw = str(value)
-    parts = [re.sub(r"\s{2,}", " ", part).strip() for part in SEPARATOR_PATTERN.split(raw)]
+    parts = [part.strip() for part in re.split(r"[|;,\n]+", str(value))]
     return [part for part in parts if _normalize_token(part) not in BLANK_TOKENS]
-
-
-def _canonical_key(question_name: str, form_name: str) -> str:
-    q = _normalize_token(question_name)
-    f = _normalize_token(form_name)
-    return f"{f}__{q}"
 
 
 def _load_table(path: Path, sheet_name: str | None = None) -> pd.DataFrame:
@@ -107,298 +110,186 @@ def _load_table(path: Path, sheet_name: str | None = None) -> pd.DataFrame:
     raise ValueError(f"Unsupported format: {path}")
 
 
-def _expand_codebook(codebook: pd.DataFrame) -> pd.DataFrame:
-    required_cols = {
-        "QUESTION_NAME",
-        "final_form_names",
-        "final_display_options",
-        "final_answer_range",
-    }
+def _save_table(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = path.suffix.lower()
+    if suffix in {".xlsx", ".xlsm", ".xls"}:
+        df.to_excel(path, index=False)
+        return
+    if suffix == ".csv":
+        df.to_csv(path, index=False)
+        return
+    if suffix == ".parquet":
+        df.to_parquet(path, index=False)
+        return
+    raise ValueError(f"Unsupported format for output: {path}")
+
+
+def _prepare_codebook(codebook: pd.DataFrame) -> pd.DataFrame:
+    required_cols = {"FORM_NAME__QUESTION_NAME", "DISPLAY", "CODEVALUE"}
     missing = required_cols.difference(codebook.columns)
     if missing:
         raise KeyError(f"Missing required codebook columns: {sorted(missing)}")
 
-    rows: list[dict[str, object]] = []
-    for _, row in codebook.iterrows():
-        form_variants = _split_variants(row["final_form_names"])
-        if not form_variants:
-            form_variants = [""]
+    selected = codebook[["FORM_NAME__QUESTION_NAME", "DISPLAY", "CODEVALUE"]].copy()
+    selected["FORM_NAME__QUESTION_NAME"] = selected["FORM_NAME__QUESTION_NAME"].astype(str).str.strip()
+    selected = selected[selected["FORM_NAME__QUESTION_NAME"] != ""]
 
-        for form_name in form_variants:
-            out = row.to_dict()
-            out["final_form_name_variant"] = form_name
-            out["merge_key"] = _canonical_key(row["QUESTION_NAME"], form_name)
-            rows.append(out)
+    # If merge key appears multiple times, combine all DISPLAY/CODEVALUE possibilities.
+    agg = (
+        selected.groupby("FORM_NAME__QUESTION_NAME", as_index=False)
+        .agg(
+            {
+                "DISPLAY": lambda s: " | ".join([str(v) for v in s if not _is_blank(v)]),
+                "CODEVALUE": lambda s: " | ".join([str(v) for v in s if not _is_blank(v)]),
+            }
+        )
+        .rename(columns={"FORM_NAME__QUESTION_NAME": "merge_key"})
+    )
+    return agg
 
-    expanded = pd.DataFrame(rows)
-    return expanded.drop_duplicates(subset=["merge_key", "QUESTION_NAME", "final_form_name_variant"])
+
+def _allowed_value_maps(display_raw: object, codevalue_raw: object) -> dict[str, str]:
+    display_vals = _split_by_delimiters(display_raw)
+    code_vals = _split_by_delimiters(codevalue_raw)
+
+    allowed: dict[str, str] = {}
+    for token in display_vals:
+        allowed[_normalize_token(token)] = token.strip()
+    for token in code_vals:
+        n = _normalize_token(token)
+        if n not in allowed:
+            allowed[n] = token.strip()
+
+    return allowed
 
 
-def _parse_option_tokens(raw_options: object) -> set[str]:
-    if _is_blank(raw_options):
-        return set()
+def _best_fuzzy_match(observed: str, allowed_norms: set[str], cutoff: float = 0.9) -> str | None:
+    obs_norm = _normalize_token(observed)
+    if not obs_norm or not allowed_norms:
+        return None
+    match = difflib.get_close_matches(obs_norm, list(allowed_norms), n=1, cutoff=cutoff)
+    return match[0] if match else None
 
-    text = str(raw_options)
-    chunks = re.split(r"[|;,\n]+", text)
-    tokens: set[str] = set()
 
-    for chunk in chunks:
-        chunk = chunk.strip()
-        if not chunk:
+def _audit_and_correct(codebook_prepared: pd.DataFrame, collapsed: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if collapsed.empty:
+        empty = pd.DataFrame()
+        return empty, pd.DataFrame([{"metric": "matched_variables", "value": 0}]), empty, collapsed.copy()
+
+    corrected = collapsed.copy()
+    findings: list[dict[str, object]] = []
+    skipped_vars: list[dict[str, object]] = []
+    pipe_conflicts: list[dict[str, object]] = []
+
+    collapsed_cols = set(collapsed.columns.astype(str).tolist())
+
+    for _, cb in codebook_prepared.iterrows():
+        variable_name = cb["merge_key"]
+        if variable_name not in collapsed_cols:
             continue
 
-        normalized_chunk = _normalize_token(chunk)
-        if normalized_chunk:
-            tokens.add(normalized_chunk)
-
-        if ":" in chunk:
-            left, right = chunk.split(":", 1)
-            left_n = _normalize_token(left)
-            right_n = _normalize_token(right)
-            if left_n:
-                tokens.add(left_n)
-            if right_n:
-                tokens.add(right_n)
-        elif "=" in chunk:
-            left, right = chunk.split("=", 1)
-            left_n = _normalize_token(left)
-            right_n = _normalize_token(right)
-            if left_n:
-                tokens.add(left_n)
-            if right_n:
-                tokens.add(right_n)
-
-    return tokens
-
-
-def _parse_option_variants(raw_options: object) -> list[str]:
-    if _is_blank(raw_options):
-        return []
-
-    variants: list[str] = []
-    for chunk in re.split(r"[|;\n]+", str(raw_options)):
-        option = re.sub(r"\s{2,}", " ", chunk).strip()
-        if option and _normalize_token(option) not in BLANK_TOKENS:
-            variants.append(option)
-    return variants
-
-
-def _phrase_signature(value: object) -> str:
-    if _is_blank(value):
-        return ""
-    text = str(value).lower()
-    text = re.sub(r"\([^)]*\)", " ", text)
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    text = re.sub(r"\b(or|of|the|a|an)\b", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def _match_display_option(value: str, raw_options: object) -> tuple[bool, str | None, str]:
-    options = _parse_option_variants(raw_options)
-    if not options:
-        return False, None, "no_options"
-
-    value_norm = _normalize_token(value)
-    option_tokens = _parse_option_tokens(raw_options)
-    if value_norm in option_tokens:
-        return True, value, "exact_token"
-
-    signature_to_options: dict[str, list[str]] = {}
-    for option in options:
-        signature = _phrase_signature(option)
-        if signature:
-            signature_to_options.setdefault(signature, []).append(option)
-
-    value_signature = _phrase_signature(value)
-    if value_signature and value_signature in signature_to_options:
-        candidates = signature_to_options[value_signature]
-        corrected = min(candidates, key=len)
-        return True, corrected, "signature_match"
-
-    option_signatures = [sig for sig in signature_to_options.keys() if sig]
-    if value_signature and option_signatures:
-        best = difflib.get_close_matches(value_signature, option_signatures, n=1, cutoff=0.9)
-        if best:
-            corrected = min(signature_to_options[best[0]], key=len)
-            return True, corrected, "fuzzy_signature"
-
-    return False, None, "no_match"
-
-
-def _coerce_float(value: object) -> float | None:
-    if _is_blank(value):
-        return None
-
-    text = str(value).strip().replace(",", "")
-    if text.endswith("%"):
-        text = text[:-1].strip()
-
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _matches_range(value: object, range_text: object) -> bool:
-    if _is_blank(range_text):
-        return False
-
-    numeric_value = _coerce_float(value)
-    if numeric_value is None:
-        return False
-
-    expr = str(range_text).strip()
-    expr_no_space = re.sub(r"\s+", "", expr)
-
-    comparator = re.fullmatch(r"(<=|>=|<|>)(-?\d+(?:\.\d+)?)", expr_no_space)
-    if comparator:
-        op, threshold_raw = comparator.groups()
-        threshold = float(threshold_raw)
-        if op == "<":
-            return numeric_value < threshold
-        if op == "<=":
-            return numeric_value <= threshold
-        if op == ">":
-            return numeric_value > threshold
-        return numeric_value >= threshold
-
-    between = re.fullmatch(r"(-?\d+(?:\.\d+)?)\s*(?:-|to|a)\s*(-?\d+(?:\.\d+)?)", expr, flags=re.IGNORECASE)
-    if between:
-        low, high = between.groups()
-        low_v, high_v = float(low), float(high)
-        lo, hi = min(low_v, high_v), max(low_v, high_v)
-        return lo <= numeric_value <= hi
-
-    bracket = re.fullmatch(r"([\[(])\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*([\])])", expr)
-    if bracket:
-        left_br, low, high, right_br = bracket.groups()
-        low_v, high_v = float(low), float(high)
-        lower_ok = numeric_value >= low_v if left_br == "[" else numeric_value > low_v
-        upper_ok = numeric_value <= high_v if right_br == "]" else numeric_value < high_v
-        return lower_ok and upper_ok
-
-    equals_number = re.fullmatch(r"-?\d+(?:\.\d+)?", expr_no_space)
-    if equals_number:
-        return numeric_value == float(expr_no_space)
-
-    return False
-
-
-def _audit_matches(codebook_expanded: pd.DataFrame, collapsed: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if collapsed.empty:
-        return pd.DataFrame(), pd.DataFrame()
-
-    collapsed_cols = pd.DataFrame({"merge_key": collapsed.columns.astype(str)})
-    codebook_matchable = codebook_expanded.merge(collapsed_cols, on="merge_key", how="inner")
-
-    findings: list[dict[str, object]] = []
-
-    for _, cb in codebook_matchable.iterrows():
-        variable_name = cb["merge_key"]
-        observed_series = collapsed[variable_name]
-
-        observed_values: list[str] = []
-        for value in observed_series.dropna().tolist():
-            observed_values.extend(_split_variants(value) or [str(value).strip()])
-
-        normalized_observed = sorted({v for v in observed_values if _normalize_token(v) not in BLANK_TOKENS})
-        if not normalized_observed:
-            normalized_observed = ["(sin_valor)"]
-
-        range_text = cb["final_answer_range"]
-        option_is_blank = _is_blank(cb["final_display_options"])
-        range_is_blank = _is_blank(range_text)
-
-        for value in normalized_observed:
-            option_match, corrected_display_option, option_match_method = _match_display_option(
-                value,
-                cb["final_display_options"],
+        allowed_map = _allowed_value_maps(cb["DISPLAY"], cb["CODEVALUE"])
+        if not allowed_map:
+            skipped_vars.append(
+                {
+                    "merge_key": variable_name,
+                    "reason": "DISPLAY y CODEVALUE vacíos; variable omitida",
+                }
             )
-            range_match = _matches_range(value, range_text)
+            continue
 
-            if option_is_blank and range_is_blank:
-                status = "both_empty"
-                detail = "final_display_options y final_answer_range vacíos"
-            elif (not option_is_blank) and (not range_is_blank):
-                status = "both_present"
-                if option_match and range_match:
-                    detail = "coincide_con_ambas"
-                elif option_match:
-                    detail = "coincide_con_display_options"
-                elif range_match:
-                    detail = "coincide_con_answer_range"
-                else:
-                    detail = "sin_coincidencia"
-            elif not option_is_blank:
-                status = "display_only"
-                detail = "coincide_con_display_options" if option_match else "sin_coincidencia"
-            else:
-                status = "range_only"
-                detail = "coincide_con_answer_range" if range_match else "sin_coincidencia"
+        for idx, raw_value in collapsed[variable_name].items():
+            if _is_blank(raw_value):
+                continue
+
+            value_text = str(raw_value).strip()
+            if not value_text:
+                continue
+
+            if "|" in value_text:
+                pipe_conflicts.append(
+                    {
+                        "merge_key": variable_name,
+                        "row_index": idx,
+                        "original_value": value_text,
+                        "reason": "Contiene '|' y se deja sin corregir",
+                    }
+                )
+                findings.append(
+                    {
+                        "merge_key": variable_name,
+                        "row_index": idx,
+                        "original_value": value_text,
+                        "final_value": value_text,
+                        "is_valid": False,
+                        "correction_applied": False,
+                        "match_method": "pipe_conflict",
+                        "DISPLAY": cb["DISPLAY"],
+                        "CODEVALUE": cb["CODEVALUE"],
+                    }
+                )
+                continue
+
+            normalized = _normalize_token(value_text)
+            corrected_value = value_text
+            is_valid = normalized in allowed_map
+            correction_applied = False
+            method = "exact" if is_valid else "no_match"
+
+            if not is_valid:
+                fuzzy = _best_fuzzy_match(value_text, set(allowed_map.keys()), cutoff=0.9)
+                if fuzzy is not None:
+                    corrected_value = allowed_map[fuzzy]
+                    is_valid = True
+                    correction_applied = True
+                    method = "fuzzy_corrected"
+                    corrected.at[idx, variable_name] = corrected_value
 
             findings.append(
                 {
                     "merge_key": variable_name,
-                    "QUESTION_NAME": cb["QUESTION_NAME"],
-                    "final_form_name_variant": cb["final_form_name_variant"],
-                    "observed_value": value,
-                    "final_display_options": cb["final_display_options"],
-                    "final_answer_range": cb["final_answer_range"],
-                    "option_match": option_match,
-                    "corrected_display_option": corrected_display_option,
-                    "option_match_method": option_match_method,
-                    "range_match": range_match,
-                    "status": status,
-                    "evaluation": detail,
+                    "row_index": idx,
+                    "original_value": value_text,
+                    "final_value": corrected_value,
+                    "is_valid": is_valid,
+                    "correction_applied": correction_applied,
+                    "match_method": method,
+                    "DISPLAY": cb["DISPLAY"],
+                    "CODEVALUE": cb["CODEVALUE"],
                 }
             )
 
     findings_df = pd.DataFrame(findings)
+    skipped_df = pd.DataFrame(skipped_vars)
+    pipe_df = pd.DataFrame(pipe_conflicts)
 
     if findings_df.empty:
-        summary = pd.DataFrame(
-            [
-                {
-                    "metric": "matched_variables",
-                    "value": 0,
-                }
-            ]
-        )
-        return findings_df, summary
+        summary = pd.DataFrame([{"metric": "matched_variables", "value": 0}])
+        return findings_df, summary, pipe_df, corrected
 
-    summary_rows = [
-        {"metric": "matched_variables", "value": int(findings_df["merge_key"].nunique())},
-        {"metric": "records_evaluated", "value": int(len(findings_df))},
-        {"metric": "both_empty_records", "value": int((findings_df["status"] == "both_empty").sum())},
-        {
-            "metric": "both_present_records",
-            "value": int((findings_df["status"] == "both_present").sum()),
-        },
-        {
-            "metric": "display_only_records",
-            "value": int((findings_df["status"] == "display_only").sum()),
-        },
-        {
-            "metric": "range_only_records",
-            "value": int((findings_df["status"] == "range_only").sum()),
-        },
-        {
-            "metric": "option_matches",
-            "value": int(findings_df["option_match"].sum()),
-        },
-        {
-            "metric": "range_matches",
-            "value": int(findings_df["range_match"].sum()),
-        },
-        {
-            "metric": "no_matches",
-            "value": int((findings_df["evaluation"] == "sin_coincidencia").sum()),
-        },
-    ]
+    summary = pd.DataFrame(
+        [
+            {"metric": "matched_variables", "value": int(findings_df["merge_key"].nunique())},
+            {"metric": "records_evaluated", "value": int(len(findings_df))},
+            {"metric": "valid_records", "value": int(findings_df["is_valid"].sum())},
+            {
+                "metric": "corrected_records",
+                "value": int((findings_df["correction_applied"] == True).sum()),
+            },
+            {
+                "metric": "pipe_conflicts",
+                "value": int((findings_df["match_method"] == "pipe_conflict").sum()),
+            },
+            {
+                "metric": "uncorrected_invalid",
+                "value": int(((findings_df["is_valid"] == False) & (findings_df["match_method"] != "pipe_conflict")).sum()),
+            },
+            {"metric": "skipped_variables", "value": int(len(skipped_df))},
+        ]
+    )
 
-    summary = pd.DataFrame(summary_rows)
-    return findings_df, summary
+    return findings_df, summary, pipe_df, corrected
 
 
 def main() -> None:
@@ -407,47 +298,53 @@ def main() -> None:
 
     print_script_overview(
         "11_codebook_value_audit.py",
-        "Audits collapsed interval values against codebook display options and answer ranges.",
+        "Audits collapsed interval values against codebook DISPLAY/CODEVALUE and writes corrected output.",
     )
 
     print_step(1, "Load inputs")
     codebook = _load_table(config.codebook_path, sheet_name=config.codebook_sheet)
     collapsed = _load_table(config.collapsed_path)
 
-    print_step(2, "Expand codebook variants for QUESTION_NAME + final_form_names")
-    codebook_expanded = _expand_codebook(codebook)
+    print_step(2, "Prepare new codebook key FORM_NAME__QUESTION_NAME")
+    codebook_prepared = _prepare_codebook(codebook)
 
-    print_step(3, "Audit values against final_display_options and final_answer_range")
-    findings, summary = _audit_matches(codebook_expanded, collapsed)
+    print_step(3, "Audit values and apply fuzzy corrections when possible")
+    findings, summary, pipe_conflicts, collapsed_corrected = _audit_and_correct(codebook_prepared, collapsed)
 
     print_step(4, "Build unmatched-key diagnostics")
     collapsed_keys = pd.DataFrame({"merge_key": collapsed.columns.astype(str)}).drop_duplicates()
-    codebook_keys = codebook_expanded[["merge_key", "QUESTION_NAME", "final_form_name_variant"]].drop_duplicates()
+    codebook_keys = codebook_prepared[["merge_key"]].drop_duplicates()
 
     unmatched_in_collapsed = collapsed_keys.merge(codebook_keys, on="merge_key", how="left", indicator=True)
-    unmatched_in_collapsed = unmatched_in_collapsed[unmatched_in_collapsed["_merge"] == "left_only"].drop(
-        columns=["_merge", "QUESTION_NAME", "final_form_name_variant"]
-    )
+    unmatched_in_collapsed = unmatched_in_collapsed[unmatched_in_collapsed["_merge"] == "left_only"].drop(columns=["_merge"])
 
     unmatched_in_codebook = codebook_keys.merge(collapsed_keys, on="merge_key", how="left", indicator=True)
     unmatched_in_codebook = unmatched_in_codebook[unmatched_in_codebook["_merge"] == "left_only"].drop(columns=["_merge"])
 
+    print_step(5, "Save audit workbook and corrected collapsed file")
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(config.output_path, engine="openpyxl") as writer:
         findings.to_excel(writer, sheet_name="audit_findings", index=False)
         summary.to_excel(writer, sheet_name="summary", index=False)
+        pipe_conflicts.to_excel(writer, sheet_name="pipe_conflicts", index=False)
         unmatched_in_collapsed.to_excel(writer, sheet_name="unmatched_collapsed", index=False)
         unmatched_in_codebook.to_excel(writer, sheet_name="unmatched_codebook", index=False)
 
+    _save_table(collapsed_corrected, config.corrected_output_path)
+
     metrics = {
         "rows_codebook": len(codebook),
-        "rows_codebook_expanded": len(codebook_expanded),
+        "rows_codebook_prepared": len(codebook_prepared),
         "cols_collapsed": len(collapsed.columns),
         "records_evaluated": len(findings),
-        "output": str(config.output_path),
+        "records_corrected": int(findings["correction_applied"].sum()) if not findings.empty else 0,
+        "pipe_conflicts": len(pipe_conflicts),
+        "audit_output": str(config.output_path),
+        "corrected_output": str(config.corrected_output_path),
     }
     print_kv("Codebook value audit", metrics)
     logger.info("Saved report: %s", config.output_path)
+    logger.info("Saved corrected collapsed file: %s", config.corrected_output_path)
 
 
 if __name__ == "__main__":
