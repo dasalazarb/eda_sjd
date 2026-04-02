@@ -62,6 +62,8 @@ python src/09_interval_collapse_audit.py --collapse no
 python src/11_codebook_value_audit.py \
   --codebook-path codebook_final_harmonized_once_quince.xlsx \
   --collapsed-path data_analytic/visits_long_collapsed_by_interval.xlsx
+python src/13_longitudinal_plausibility_audit.py \
+  --input-path data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet
 ```
 
 Every script:
@@ -121,6 +123,11 @@ Each script prints an English, step-by-step console narrative with numbered step
    - Builds merge keys as `question_name__final_form_name` (lowercase and underscores), expanding `|` variants in both codebook and collapsed values.
    - Audits each observed value against `final_display_options` and `final_answer_range`.
    - Exports an Excel report with findings, summaries, and unmatched key diagnostics.
+11. `13_longitudinal_plausibility_audit.py`
+   - Computes per-variable longitudinal plausibility metrics over the collapsed/corrected visits table.
+   - Quantifies coverage, repeated observations (`>=1`, `>=2`, `>=3`), continuity across consecutive visits, temporal plausibility, and missingness bias by interval.
+   - Adds variable-type-specific metrics (numeric deltas and outliers, categorical changes/flips/contradictions, invariant discordance).
+   - Produces an ML-focused label per variable: `lista para longitudinal`, `usable solo cross-sectional`, `usable con cautela`, `no usable todavía`.
 
 ## Operational definitions encoded in the pipeline
 
@@ -171,6 +178,8 @@ Reports:
 - `reports/interval_collapse_conflict_examples.csv`
 - `data_analytic/visits_long_collapsed_by_interval.parquet` (optional, with `--collapse yes`)
 - `reports/codebook_value_audit.xlsx`
+- `reports/longitudinal_plausibility/longitudinal_variable_summary.csv`
+- `reports/longitudinal_plausibility/longitudinal_variable_label_counts.csv`
 
 ## EDA unificada (`reports/eda_unificado.xlsx`)
 
