@@ -85,7 +85,8 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
         category, variable = raw.split("__", 1)
         normalized_category = re.sub(r"\s+", " ", category.strip()).lower().replace(" ", "_")
-        return f"{normalized_category}__{variable}"
+        normalized_variable = variable.lower()
+        return f"{normalized_category}__{normalized_variable}"
 
     cols = pd.Index([_normalize_column_name(col) for col in df.columns])
     out = df.copy()
