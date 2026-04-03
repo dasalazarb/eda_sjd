@@ -113,8 +113,20 @@ def _non_missing_mask(series: pd.Series) -> pd.Series:
 
 
 def _variable_type(series: pd.Series, name: str) -> str:
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return "datetime"
+
+    if pd.api.types.is_bool_dtype(series):
+        return "boolean"
+
     if pd.api.types.is_numeric_dtype(series):
         return "numeric"
+
+    if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
+        parsed_dates = pd.to_datetime(series, errors="coerce")
+        parsed_ratio = float(parsed_dates.notna().mean()) if len(series) else 0.0
+        if parsed_ratio >= 0.85:
+            return "datetime"
 
     lower_name = name.lower()
     if any(tok in lower_name for tok in ["sex", "gender", "dob", "birth", "ethnicity", "race"]):
@@ -122,7 +134,7 @@ def _variable_type(series: pd.Series, name: str) -> str:
 
     cardinality = series[_non_missing_mask(series)].astype("string").nunique(dropna=True)
     if cardinality <= 2:
-        return "invariant"
+        return "boolean"
     return "categorical"
 
 
@@ -227,6 +239,42 @@ def _categorical_metrics(work: pd.DataFrame, subject_col: str, value_col: str) -
     }
 
 
+def _datetime_metrics(work: pd.DataFrame, subject_col: str, value_col: str) -> dict[str, object]:
+    tmp = work[[subject_col, "visit_index", value_col]].copy()
+    tmp["dt"] = pd.to_datetime(tmp[value_col], errors="coerce")
+    tmp = tmp.dropna(subset=["dt"]).sort_values([subject_col, "visit_index"], kind="stable")
+
+    tmp["dt_prev"] = tmp.groupby(subject_col)["dt"].shift(1)
+    delta_days = (tmp["dt"] - tmp["dt_prev"]).dt.total_seconds().abs() / 86400.0
+    delta_days = delta_days.dropna()
+
+    if delta_days.empty:
+        return {
+            "n_consecutive_pairs": 0,
+            "delta_abs_p50": np.nan,
+            "delta_abs_p95": np.nan,
+            "extreme_change_rate": np.nan,
+            "delta_outlier_rate": np.nan,
+            "consistency_score": np.nan,
+        }
+
+    p95 = float(delta_days.quantile(0.95))
+    q1, q3 = float(delta_days.quantile(0.25)), float(delta_days.quantile(0.75))
+    iqr = q3 - q1
+    high_thr = q3 + 3 * iqr
+    extreme_rate = float((delta_days > p95).mean())
+    outlier_rate = float((delta_days > high_thr).mean()) if iqr > 0 else 0.0
+
+    return {
+        "n_consecutive_pairs": int(len(delta_days)),
+        "delta_abs_p50": float(delta_days.quantile(0.5)),
+        "delta_abs_p95": p95,
+        "extreme_change_rate": round(100 * extreme_rate, 2),
+        "delta_outlier_rate": round(100 * outlier_rate, 2),
+        "consistency_score": round(100 * (1 - outlier_rate), 2),
+    }
+
+
 def _invariant_metrics(work: pd.DataFrame, subject_col: str, value_col: str) -> dict[str, object]:
     tmp = work[[subject_col, value_col]].copy()
     tmp = tmp[_non_missing_mask(tmp[value_col])].copy()
@@ -312,7 +360,9 @@ def run_audit(df: pd.DataFrame, min_obs_for_longitudinal: int = 2) -> pd.DataFra
         var_type = _variable_type(s, var)
         if var_type == "numeric":
             extra = _numeric_metrics(work[[subject_col, "visit_index", visit_time_col, var]].copy(), subject_col, var, visit_time_col)
-        elif var_type == "categorical":
+        elif var_type == "datetime":
+            extra = _datetime_metrics(work[[subject_col, "visit_index", var]].copy(), subject_col, var)
+        elif var_type in {"categorical", "boolean"}:
             extra = _categorical_metrics(work[[subject_col, "visit_index", var]].copy(), subject_col, var)
         else:
             extra = _invariant_metrics(work[[subject_col, var]].copy(), subject_col, var)
