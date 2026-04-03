@@ -116,16 +116,17 @@ def _variable_type(series: pd.Series, name: str) -> str:
     if pd.api.types.is_datetime64_any_dtype(series):
         return "datetime"
 
-    parsed_dates = pd.to_datetime(series, errors="coerce")
-    parsed_ratio = float(parsed_dates.notna().mean()) if len(series) else 0.0
-    if parsed_ratio >= 0.85:
-        return "datetime"
-
     if pd.api.types.is_bool_dtype(series):
         return "boolean"
 
     if pd.api.types.is_numeric_dtype(series):
         return "numeric"
+
+    if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
+        parsed_dates = pd.to_datetime(series, errors="coerce")
+        parsed_ratio = float(parsed_dates.notna().mean()) if len(series) else 0.0
+        if parsed_ratio >= 0.85:
+            return "datetime"
 
     lower_name = name.lower()
     if any(tok in lower_name for tok in ["sex", "gender", "dob", "birth", "ethnicity", "race"]):
