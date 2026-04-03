@@ -113,6 +113,10 @@ def _non_missing_mask(series: pd.Series) -> pd.Series:
 
 
 def _variable_type(series: pd.Series, name: str) -> str:
+    non_missing = series[_non_missing_mask(series)]
+    if non_missing.empty:
+        return "categorical"
+
     if pd.api.types.is_datetime64_any_dtype(series):
         return "datetime"
 
@@ -122,17 +126,50 @@ def _variable_type(series: pd.Series, name: str) -> str:
     if pd.api.types.is_numeric_dtype(series):
         return "numeric"
 
-    if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
-        parsed_dates = pd.to_datetime(series, errors="coerce")
-        parsed_ratio = float(parsed_dates.notna().mean()) if len(series) else 0.0
-        if parsed_ratio >= 0.85:
-            return "datetime"
-
     lower_name = name.lower()
-    if any(tok in lower_name for tok in ["sex", "gender", "dob", "birth", "ethnicity", "race"]):
+    invariant_tokens = ["sex", "gender", "dob", "birth", "ethnicity", "race", "blood_type"]
+    if any(tok in lower_name for tok in invariant_tokens):
         return "invariant"
 
-    cardinality = series[_non_missing_mask(series)].astype("string").nunique(dropna=True)
+    txt = non_missing.astype("string").str.strip()
+    txt_lower = txt.str.lower()
+
+    # Boolean-like strings (yes/no, true/false, 1/0, etc.).
+    boolean_tokens = {"true", "false", "yes", "no", "y", "n", "si", "sí", "0", "1", "t", "f"}
+    unique_tokens = set(txt_lower.dropna().unique().tolist())
+    if unique_tokens and unique_tokens.issubset(boolean_tokens):
+        return "boolean"
+
+    if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
+        parsed_dates = pd.to_datetime(non_missing, errors="coerce")
+        parsed_ratio = float(parsed_dates.notna().mean()) if len(non_missing) else 0.0
+        if parsed_ratio >= 0.9:
+            return "datetime"
+
+    numeric_parsed = pd.to_numeric(non_missing, errors="coerce")
+    numeric_ratio = float(numeric_parsed.notna().mean())
+    if numeric_ratio >= 0.85:
+        numeric_values = numeric_parsed.dropna()
+        if not numeric_values.empty:
+            near_integer = np.isclose(numeric_values, np.round(numeric_values))
+            decimal_ratio = float((~near_integer).mean())
+            unique_numeric = int(numeric_values.nunique(dropna=True))
+            min_v, max_v = float(numeric_values.min()), float(numeric_values.max())
+            range_v = max_v - min_v
+
+            # Avoid marking tiny coded categories (e.g., 0..4 only) as numeric.
+            looks_like_small_code_set = (
+                unique_numeric <= 6
+                and decimal_ratio < 0.05
+                and min_v >= 0
+                and max_v <= 10
+            )
+
+            has_continuous_signal = (decimal_ratio >= 0.05) or (unique_numeric >= 8 and range_v > 10)
+            if has_continuous_signal and not looks_like_small_code_set:
+                return "numeric"
+
+    cardinality = txt.nunique(dropna=True)
     if cardinality <= 2:
         return "boolean"
     return "categorical"
