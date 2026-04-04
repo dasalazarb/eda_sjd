@@ -159,6 +159,9 @@ def _prepare_codebook(codebook: pd.DataFrame) -> pd.DataFrame:
             }
         )
     )
+    aggregated = aggregated[
+        (~aggregated["DISPLAY"].map(_is_blank)) | (~aggregated["CODEVALUE"].map(_is_blank))
+    ].reset_index(drop=True)
     return aggregated
 
 
