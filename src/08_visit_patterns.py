@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -121,8 +122,22 @@ def _normalize_interval(s: pd.Series) -> pd.Series:
     return s.astype("string").fillna("(missing)").str.strip()
 
 
+def _is_optional_phase(name: str) -> bool:
+    text = str(name).strip()
+    return bool(re.match(r"(?i)^(?:15d\s+)?optional evaluation\s+\d+$", text))
+
+
+def _optional_sort_key(name: str) -> tuple[int, int, str]:
+    text = str(name).strip()
+    m = re.match(r"(?i)^(15d\s+)?optional evaluation\s+(\d+)$", text)
+    if not m:
+        return (2, 9999, text.lower())
+    is_15d = 1 if m.group(1) else 0
+    return (is_15d, int(m.group(2)), text.lower())
+
+
 def _phase_rank(name: str) -> int:
-    if name in OPTIONAL_PHASES:
+    if _is_optional_phase(name):
         return 99
     try:
         return PHASE_ORDER.index(name)
@@ -144,7 +159,7 @@ def _build_visit_sequence(
         [subject_col, visit_date_col]
     )
     if not include_optional:
-        seq = seq[~seq["interval_name"].isin(OPTIONAL_PHASES)].copy()
+        seq = seq[~seq["interval_name"].map(_is_optional_phase)].copy()
 
     seq["visit_order"] = seq.groupby(subject_col).cumcount() + 1
     seq["first_visit_date"] = seq.groupby(subject_col)[visit_date_col].transform("min")
@@ -734,7 +749,7 @@ def _plot_optional_position(
     )
 
     canon = all_seq[all_seq["interval_name"].isin(PHASE_ORDER)].copy()
-    opts  = all_seq[all_seq["interval_name"].isin(OPTIONAL_PHASES)].copy()
+    opts  = all_seq[all_seq["interval_name"].map(_is_optional_phase)].copy()
 
     if opts.empty:
         print("  [!] No optional evaluation visits found — skipping plot.")
@@ -764,11 +779,10 @@ def _plot_optional_position(
     ]
     present_ctx = [p for p in phase_order_labels
                    if p in result_df["phase_context"].values]
-    opt_order   = [o for o in OPTIONAL_PHASES
-                   if o in result_df["optional_type"].values]
+    opt_order = sorted(result_df["optional_type"].dropna().unique().tolist(), key=_optional_sort_key)
 
-    palette = sns.color_palette("Set2", len(OPTIONAL_PHASES))
-    opt_color_map = {opt: palette[i] for i, opt in enumerate(OPTIONAL_PHASES)}
+    palette = sns.color_palette("Set2", len(opt_order))
+    opt_color_map = {opt: palette[i] for i, opt in enumerate(opt_order)}
 
     fig, ax = plt.subplots(figsize=(11, 5))
     fig.subplots_adjust(bottom=0.28)
