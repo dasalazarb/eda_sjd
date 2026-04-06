@@ -18,10 +18,49 @@ from common import (
     replace_empty_with_nan,
     merge_sheet_dicts,
     save_parquet_and_csv,
+    resolve_canonical_column,
     setup_logger,
     standardize_columns,
     upsert_eda_sheets_xlsx,
 )
+
+
+def relabel_15d_optional_evaluations(df: pd.DataFrame, logger) -> pd.DataFrame:
+    """Re-label 15D interval names after the earliest visit per patient."""
+    interval_col = "ids__interval_name"
+    time_col = "ids__time_24_hour"
+
+    if interval_col not in df.columns or time_col not in df.columns:
+        logger.warning(
+            "Skipping 15D interval relabel because required columns are missing: %s",
+            [c for c in [interval_col, time_col] if c not in df.columns],
+        )
+        return df
+
+    try:
+        patient_col = resolve_canonical_column(df, "patient_record_number")
+    except KeyError:
+        logger.warning("Skipping 15D interval relabel because patient_record_number was not found.")
+        return df
+
+    out = df.copy()
+    out[time_col] = pd.to_datetime(out[time_col], errors="coerce")
+
+    rank = (
+        out.groupby(patient_col, dropna=False)[time_col]
+        .rank(method="first", ascending=True, na_option="bottom")
+        .astype("Int64")
+    )
+
+    mask = rank > 1
+    out.loc[mask, interval_col] = "15D optional Evaluation " + (rank[mask] - 1).astype(str)
+
+    logger.info(
+        "Applied 15D interval relabeling | patient_col=%s | relabeled_rows=%d",
+        patient_col,
+        int(mask.sum()),
+    )
+    return out
 
 
 def ingest_one(path: Path, source_protocol: str, logger) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -86,6 +125,7 @@ def main() -> None:
     print_step(1, "Read 11D and 15D raw files with two-row grouped headers")
     df11, input11_baseline = ingest_one(f11, "11D", logger)
     df15, input15_baseline = ingest_one(f15, "15D", logger)
+    df15 = relabel_15d_optional_evaluations(df15, logger)
 
     print_step(2, "Save cleaned raw outputs to data_intermediate")
     save_parquet_and_csv(df11, INTERMEDIATE_DIR / "11d_raw_enriched", logger)
