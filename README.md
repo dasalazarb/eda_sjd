@@ -66,6 +66,8 @@ python src/15_codebook_cleanliness_check.py \
   --corrected-path data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet
 python src/13_longitudinal_plausibility_audit.py \
   --input-path data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet
+python src/16_missingness_patterns.py \
+  --input-path data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet
 ```
 
 Every script:
@@ -134,6 +136,10 @@ Each script prints an English, step-by-step console narrative with numbered step
    - Quantifies coverage, repeated observations (`>=1`, `>=2`, `>=3`), continuity across consecutive visits, temporal plausibility, and missingness bias by interval.
    - Adds variable-type-specific metrics (numeric deltas and outliers, categorical changes/flips/contradictions, invariant discordance).
    - Produces an ML-focused label per variable: `lista para longitudinal`, `usable solo cross-sectional`, `usable con cautela`, `no usable todavía`.
+13. `16_missingness_patterns.py`
+   - Evalúa faltantes por variable y por categoría a partir de la convención `{categoria}_{variable}` o `{categoria}__{variable}`.
+   - Identifica patrones de missingness globales y por categoría (top patrones más frecuentes).
+   - Exporta top variables con más/menos faltantes y recomendaciones adicionales para análisis de calidad de datos.
 
 ## Operational definitions encoded in the pipeline
 
@@ -188,6 +194,13 @@ Reports:
 - `reports/codebook_cleanliness_check.csv`
 - `reports/longitudinal_plausibility/longitudinal_variable_summary.csv`
 - `reports/longitudinal_plausibility/longitudinal_variable_label_counts.csv`
+- `reports/missingness/missingness_by_variable.csv`
+- `reports/missingness/missingness_by_category.csv`
+- `reports/missingness/missingness_patterns_overall_top.csv`
+- `reports/missingness/missingness_patterns_by_category_top.csv`
+- `reports/missingness/variables_most_missing_top.csv`
+- `reports/missingness/variables_least_missing_top.csv`
+- `reports/missingness/missingness_report.xlsx`
 
 ## EDA unificada (`reports/eda_unificado.xlsx`)
 
