@@ -52,6 +52,11 @@ OPTIONAL_PHASES: list[str] = [
     "Optional Evaluation 4",
 ]
 
+# Accept common spelling variants found in source data (e.g., "Evalaution").
+OPTIONAL_PHASE_PATTERN = re.compile(
+    r"(?i)^(?:15d\s+)?optional\s+eval(?:uation|aution)\s+(\d+)$"
+)
+
 PHASE_LABELS: dict[str, str] = {
     "Natural History Protocol 478 Interval":        "V1 (Nat. Hist.)",
     "(missing)":                                    "V1 (missing)",
@@ -124,16 +129,16 @@ def _normalize_interval(s: pd.Series) -> pd.Series:
 
 def _is_optional_phase(name: str) -> bool:
     text = str(name).strip()
-    return bool(re.match(r"(?i)^(?:15d\s+)?optional evaluation\s+\d+$", text))
+    return bool(OPTIONAL_PHASE_PATTERN.match(text))
 
 
 def _optional_sort_key(name: str) -> tuple[int, int, str]:
     text = str(name).strip()
-    m = re.match(r"(?i)^(15d\s+)?optional evaluation\s+(\d+)$", text)
+    m = OPTIONAL_PHASE_PATTERN.match(text)
     if not m:
         return (2, 9999, text.lower())
-    is_15d = 1 if m.group(1) else 0
-    return (is_15d, int(m.group(2)), text.lower())
+    is_15d = 1 if text.lower().startswith("15d ") else 0
+    return (is_15d, int(m.group(1)), text.lower())
 
 
 def _phase_rank(name: str) -> int:
