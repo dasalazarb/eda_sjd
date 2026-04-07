@@ -31,7 +31,7 @@ def relabel_15d_optional_evaluations(df: pd.DataFrame, logger) -> pd.DataFrame:
     visit_date_col = "ids__visit_date"
     time_col = "ids__time_24_hour"
 
-    required_cols = [interval_col, patient_col, visit_date_col, time_col]
+    required_cols = [interval_col, patient_col, visit_date_col]
     if any(col not in df.columns for col in required_cols):
         logger.warning(
             "Skipping 15D interval relabel because required columns are missing: %s",
@@ -40,17 +40,21 @@ def relabel_15d_optional_evaluations(df: pd.DataFrame, logger) -> pd.DataFrame:
         return df
 
     out = df.copy()
-    out[visit_date_col] = pd.to_datetime(out[visit_date_col], errors="coerce")
-    out[time_col] = pd.to_datetime(out[time_col], errors="coerce")
-    out = out.sort_values([patient_col, visit_date_col, time_col], ascending=[True, True, True], kind="stable")
+    out["_visit_date_dt"] = pd.to_datetime(out[visit_date_col], errors="coerce", format="mixed")
+    out["_visit_day"] = out["_visit_date_dt"].dt.normalize()
+    if time_col in out.columns:
+        out["_visit_time_dt"] = pd.to_datetime(out[time_col], errors="coerce", format="mixed")
+    else:
+        out["_visit_time_dt"] = pd.NaT
+    out = out.sort_values([patient_col, "_visit_day", "_visit_time_dt"], ascending=[True, True, True], kind="stable")
 
-    baseline_date = out.groupby(patient_col, dropna=False)[visit_date_col].transform("min")
-    post_baseline_mask = out[visit_date_col].notna() & baseline_date.notna() & (out[visit_date_col] > baseline_date)
+    baseline_day = out.groupby(patient_col, dropna=False)["_visit_day"].transform("min")
+    post_baseline_mask = out["_visit_day"].notna() & baseline_day.notna() & (out["_visit_day"] > baseline_day)
 
     unique_post_visit_rank = (
-        out.loc[post_baseline_mask, [patient_col, visit_date_col]]
+        out.loc[post_baseline_mask, [patient_col, "_visit_day"]]
         .drop_duplicates()
-        .sort_values([patient_col, visit_date_col], ascending=[True, True], kind="stable")
+        .sort_values([patient_col, "_visit_day"], ascending=[True, True], kind="stable")
     )
     unique_post_visit_rank["evaluation_num"] = (
         unique_post_visit_rank.groupby(patient_col, dropna=False).cumcount() + 1
@@ -58,7 +62,7 @@ def relabel_15d_optional_evaluations(df: pd.DataFrame, logger) -> pd.DataFrame:
 
     out = out.merge(
         unique_post_visit_rank,
-        on=[patient_col, visit_date_col],
+        on=[patient_col, "_visit_day"],
         how="left",
         sort=False,
     )
@@ -67,7 +71,7 @@ def relabel_15d_optional_evaluations(df: pd.DataFrame, logger) -> pd.DataFrame:
     out.loc[relabel_mask, interval_col] = "15D Optional Evaluation " + out.loc[
         relabel_mask, "evaluation_num"
     ].astype(int).astype(str)
-    out = out.drop(columns=["evaluation_num"])
+    out = out.drop(columns=["_visit_date_dt", "_visit_day", "_visit_time_dt", "evaluation_num"])
 
     logger.info(
         "Applied 15D interval relabeling | patient_col=%s | relabeled_rows=%d | baseline_ties_preserved=%s",
