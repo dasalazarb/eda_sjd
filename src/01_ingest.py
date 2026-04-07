@@ -29,9 +29,10 @@ def relabel_15d_optional_evaluations(df: pd.DataFrame, logger) -> pd.DataFrame:
     interval_col = "ids__interval_name"
     patient_col = "ids__patient_id"
     visit_date_col = "ids__visit_date"
+    visit_datetime_col = "visit_datetime"
     time_col = "ids__time_24_hour"
 
-    required_cols = [interval_col, patient_col, visit_date_col, time_col]
+    required_cols = [interval_col, patient_col, visit_date_col]
     if any(col not in df.columns for col in required_cols):
         logger.warning(
             "Skipping 15D interval relabel because required columns are missing: %s",
@@ -41,8 +42,18 @@ def relabel_15d_optional_evaluations(df: pd.DataFrame, logger) -> pd.DataFrame:
 
     out = df.copy()
     out[visit_date_col] = pd.to_datetime(out[visit_date_col], errors="coerce")
-    out[time_col] = pd.to_datetime(out[time_col], errors="coerce")
-    out = out.sort_values([patient_col, visit_date_col, time_col], ascending=[True, True, True], kind="stable")
+    if visit_datetime_col not in out.columns:
+        out[visit_datetime_col] = out[visit_date_col]
+    out[visit_datetime_col] = pd.to_datetime(out[visit_datetime_col], errors="coerce")
+    if time_col in out.columns:
+        out[time_col] = pd.to_datetime(out[time_col], errors="coerce", format="mixed")
+    else:
+        out[time_col] = pd.NaT
+    out = out.sort_values(
+        [patient_col, visit_datetime_col, visit_date_col, time_col],
+        ascending=[True, True, True, True],
+        kind="stable",
+    )
 
     baseline_date = out.groupby(patient_col, dropna=False)[visit_date_col].transform("min")
     post_baseline_mask = out[visit_date_col].notna() & baseline_date.notna() & (out[visit_date_col] > baseline_date)
