@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import matplotlib.pyplot as plt
 import pandas as pd
+import seaborn as sns
 
 from common import (
     ANALYTIC_DIR,
     EDA_UNIFIED_REPORT_PATH,
     INTERMEDIATE_DIR,
+    REPORTS_DIR,
     build_targeted_eda_sheets,
     merge_sheet_dicts,
     print_kv,
@@ -24,6 +27,68 @@ def _resolve_optional_column(df: pd.DataFrame, canonical_name: str) -> str | Non
         return resolve_canonical_column(df, canonical_name)
     except KeyError:
         return None
+
+
+def build_n_visits_boxplot(patient_master: pd.DataFrame) -> str | None:
+    """Build a professional boxplot for patient-level visit counts."""
+    n_visits = pd.to_numeric(patient_master.get("n_visits"), errors="coerce").dropna()
+    if n_visits.empty:
+        return None
+
+    q1 = float(n_visits.quantile(0.25))
+    q3 = float(n_visits.quantile(0.75))
+    iqr = q3 - q1
+    median = float(n_visits.median())
+    mean = float(n_visits.mean())
+    min_v = float(n_visits.min())
+    max_v = float(n_visits.max())
+
+    sns.set_theme(style="whitegrid", context="talk")
+    fig, ax = plt.subplots(figsize=(11, 4.8))
+
+    boxprops = dict(facecolor="#5DADE2", edgecolor="#1B4F72", alpha=0.35, linewidth=1.8)
+    whiskerprops = dict(color="#1B4F72", linewidth=1.6)
+    capprops = dict(color="#1B4F72", linewidth=1.6)
+    medianprops = dict(color="#C0392B", linewidth=2.6)
+    flierprops = dict(marker="o", markerfacecolor="#154360", markeredgecolor="#154360", alpha=0.4, markersize=4)
+
+    sns.boxplot(
+        x=n_visits,
+        ax=ax,
+        width=0.35,
+        boxprops=boxprops,
+        whiskerprops=whiskerprops,
+        capprops=capprops,
+        medianprops=medianprops,
+        flierprops=flierprops,
+    )
+
+    ax.axvline(mean, color="#117A65", linestyle="--", linewidth=2.0, alpha=0.9, label=f"Mean: {mean:.2f}")
+    ax.axvline(median, color="#C0392B", linestyle="-", linewidth=2.2, alpha=0.95, label=f"Median: {median:.2f}")
+    ax.axvspan(q1, q3, color="#85C1E9", alpha=0.15, label=f"IQR (Q1-Q3): {q1:.2f} - {q3:.2f}")
+    ax.axvline(min_v, color="#7D3C98", linestyle=":", linewidth=1.6, alpha=0.65, label=f"Min: {min_v:.0f}")
+    ax.axvline(max_v, color="#7D3C98", linestyle=":", linewidth=1.6, alpha=0.65, label=f"Max: {max_v:.0f}")
+
+    ax.set_title("Distribution of n_visits in patient_master", pad=16, fontweight="bold")
+    ax.set_xlabel("Number of visits per patient")
+    ax.set_ylabel("")
+    ax.grid(axis="x", alpha=0.22)
+    ax.grid(axis="y", visible=False)
+
+    summary_text = (
+        f"n={len(n_visits):,}  |  Min={min_v:.0f}  Max={max_v:.0f}  "
+        f"Mean={mean:.2f}  Median={median:.2f}  IQR={iqr:.2f}"
+    )
+    fig.text(0.5, 0.10, summary_text, ha="center", va="center", fontsize=10, color="#1C2833")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.34), ncol=3, frameon=True, fontsize=9)
+
+    plot_dir = REPORTS_DIR / "05_backbone"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    plot_path = plot_dir / "patient_master_n_visits_boxplot.png"
+    fig.tight_layout(rect=(0, 0.24, 1, 1))
+    fig.savefig(plot_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return str(plot_path)
 
 
 def build_patient_master(visits: pd.DataFrame) -> pd.DataFrame:
@@ -80,6 +145,13 @@ def main() -> None:
     save_parquet_and_csv(master, ANALYTIC_DIR / "patient_master", logger)
     save_parquet_and_csv(visits, ANALYTIC_DIR / "visits_long", logger)
 
+    print_step(4, "Generate professional boxplot for patient_master.n_visits")
+    plot_path = build_n_visits_boxplot(master)
+    if plot_path:
+        logger.info("Saved n_visits boxplot: %s", plot_path)
+    else:
+        logger.warning("Could not build n_visits boxplot (no numeric values found).")
+
     print_kv(
         "Backbone summary",
         {
@@ -87,7 +159,7 @@ def main() -> None:
             "n_visits": len(visits),
         },
     )
-    print_step(4, "Append targeted EDA for patient_master and visits to unified workbook")
+    print_step(5, "Append targeted EDA for patient_master and visits to unified workbook")
     sheets = {}
     sheets = merge_sheet_dicts(
         sheets,
