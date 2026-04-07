@@ -18,7 +18,6 @@ from common import (
     replace_empty_with_nan,
     merge_sheet_dicts,
     save_parquet_and_csv,
-    resolve_canonical_column,
     setup_logger,
     standardize_columns,
     upsert_eda_sheets_xlsx,
@@ -26,39 +25,55 @@ from common import (
 
 
 def relabel_15d_optional_evaluations(df: pd.DataFrame, logger) -> pd.DataFrame:
-    """Re-label 15D interval names after the earliest visit per patient."""
+    """Re-label 15D interval names after the baseline visit date per patient."""
     interval_col = "ids__interval_name"
+    patient_col = "ids__patient_id"
+    visit_date_col = "ids__visit_date"
     time_col = "ids__time_24_hour"
 
-    if interval_col not in df.columns or time_col not in df.columns:
+    required_cols = [interval_col, patient_col, visit_date_col, time_col]
+    if any(col not in df.columns for col in required_cols):
         logger.warning(
             "Skipping 15D interval relabel because required columns are missing: %s",
-            [c for c in [interval_col, time_col] if c not in df.columns],
+            [c for c in required_cols if c not in df.columns],
         )
         return df
 
-    try:
-        patient_col = resolve_canonical_column(df, "patient_record_number")
-    except KeyError:
-        logger.warning("Skipping 15D interval relabel because patient_record_number was not found.")
-        return df
-
     out = df.copy()
+    out[visit_date_col] = pd.to_datetime(out[visit_date_col], errors="coerce")
     out[time_col] = pd.to_datetime(out[time_col], errors="coerce")
+    out = out.sort_values([patient_col, visit_date_col, time_col], ascending=[True, True, True], kind="stable")
 
-    rank = (
-        out.groupby(patient_col, dropna=False)[time_col]
-        .rank(method="first", ascending=True, na_option="bottom")
-        .astype("Int64")
+    baseline_date = out.groupby(patient_col, dropna=False)[visit_date_col].transform("min")
+    post_baseline_mask = out[visit_date_col].notna() & baseline_date.notna() & (out[visit_date_col] > baseline_date)
+
+    unique_post_visit_rank = (
+        out.loc[post_baseline_mask, [patient_col, visit_date_col]]
+        .drop_duplicates()
+        .sort_values([patient_col, visit_date_col], ascending=[True, True], kind="stable")
+    )
+    unique_post_visit_rank["evaluation_num"] = (
+        unique_post_visit_rank.groupby(patient_col, dropna=False).cumcount() + 1
     )
 
-    mask = rank > 1
-    out.loc[mask, interval_col] = "15D optional Evaluation " + (rank[mask] - 1).astype(str)
+    out = out.merge(
+        unique_post_visit_rank,
+        on=[patient_col, visit_date_col],
+        how="left",
+        sort=False,
+    )
+
+    relabel_mask = out["evaluation_num"].notna()
+    out.loc[relabel_mask, interval_col] = "15D Optional Evaluation " + out.loc[
+        relabel_mask, "evaluation_num"
+    ].astype(int).astype(str)
+    out = out.drop(columns=["evaluation_num"])
 
     logger.info(
-        "Applied 15D interval relabeling | patient_col=%s | relabeled_rows=%d",
+        "Applied 15D interval relabeling | patient_col=%s | relabeled_rows=%d | baseline_ties_preserved=%s",
         patient_col,
-        int(mask.sum()),
+        int(relabel_mask.sum()),
+        True,
     )
     return out
 
