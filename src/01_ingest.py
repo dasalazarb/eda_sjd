@@ -29,6 +29,7 @@ def relabel_15d_optional_evaluations(df: pd.DataFrame, logger) -> pd.DataFrame:
     interval_col = "ids__interval_name"
     patient_col = "ids__patient_id"
     visit_date_col = "ids__visit_date"
+    visit_datetime_col = "visit_datetime"
     time_col = "ids__time_24_hour"
 
     required_cols = [interval_col, patient_col, visit_date_col]
