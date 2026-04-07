@@ -27,7 +27,7 @@ from common import (
 def relabel_15d_optional_evaluations(df: pd.DataFrame, logger) -> pd.DataFrame:
     """Re-label 15D interval names after the baseline visit date per patient."""
     interval_col = "ids__interval_name"
-    patient_col = "ids__patient_id"
+    patient_col = "ids__patient_record_number"
     visit_date_col = "ids__visit_date"
     visit_datetime_col = "visit_datetime"
     time_col = "ids__time_24_hour"
