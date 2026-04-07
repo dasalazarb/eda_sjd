@@ -29,6 +29,12 @@ def _normalize_identifier(series: pd.Series) -> pd.Series:
     return normalized
 
 
+def _normalize_visit_date(series: pd.Series) -> pd.Series:
+    """Normalize visit date to calendar date (YYYY-MM-DD), ignoring time."""
+    normalized = pd.to_datetime(series, errors="coerce").dt.strftime("%Y-%m-%d")
+    return normalized.replace({"NaT": np.nan})
+
+
 def _resolve_columns(df: pd.DataFrame, canonical_names: Iterable[str]) -> dict[str, str]:
     """
     Resolve canonical names from heterogeneous schemas.
@@ -95,6 +101,15 @@ def build_episode_candidates(df11: pd.DataFrame, df15: pd.DataFrame) -> pd.DataF
     output_cols = ["subject_number", "rule_type", "row_id_11d", "row_id_15d"]
     if not on_cols:
         return pd.DataFrame(columns=output_cols)
+
+    visit_date_11 = resolved_11.get("visit_date")
+    visit_date_15 = resolved_15.get("visit_date")
+    using_ids_visit_date = "visit_date" in on_cols and (
+        visit_date_11 == "ids__visit_date" or visit_date_15 == "ids__visit_date"
+    )
+    if using_ids_visit_date:
+        left["visit_date"] = _normalize_visit_date(left["visit_date"])
+        right["visit_date"] = _normalize_visit_date(right["visit_date"])
 
     exact = left.merge(right, on=on_cols, how="inner")
     if exact.empty:
