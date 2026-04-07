@@ -79,13 +79,13 @@ def build_n_visits_boxplot(patient_master: pd.DataFrame) -> str | None:
         f"n={len(n_visits):,}  |  Min={min_v:.0f}  Max={max_v:.0f}  "
         f"Mean={mean:.2f}  Median={median:.2f}  IQR={iqr:.2f}"
     )
-    fig.text(0.5, 0.06, summary_text, ha="center", va="center", fontsize=10, color="#1C2833")
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=3, frameon=True, fontsize=9)
+    fig.text(0.5, 0.10, summary_text, ha="center", va="center", fontsize=10, color="#1C2833")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.34), ncol=3, frameon=True, fontsize=9)
 
     plot_dir = REPORTS_DIR / "05_backbone"
     plot_dir.mkdir(parents=True, exist_ok=True)
     plot_path = plot_dir / "patient_master_n_visits_boxplot.png"
-    fig.tight_layout(rect=(0, 0.14, 1, 1))
+    fig.tight_layout(rect=(0, 0.24, 1, 1))
     fig.savefig(plot_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     return str(plot_path)
