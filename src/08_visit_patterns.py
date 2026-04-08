@@ -1040,6 +1040,20 @@ def _build_optional_position_data(
     return pd.DataFrame(results)
 
 
+def _recompute_visit_order(
+    seq: pd.DataFrame,
+    subject_col: str,
+    visit_date_col: str,
+) -> pd.DataFrame:
+    """
+    Rebuild visit_order to be consecutive per patient after any filtering step
+    (e.g., removing optional visits from seq_main).
+    """
+    out = seq.sort_values([subject_col, visit_date_col, "phase_rank", "interval_name"]).copy()
+    out["visit_order"] = out.groupby(subject_col).cumcount() + 1
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────
@@ -1065,6 +1079,7 @@ def main() -> None:
     seq_main = seq.copy()
     if not INCLUDE_OPTIONAL:
         seq_main = seq_main[~seq_main["flag_optional"]].copy()
+    seq_main = _recompute_visit_order(seq_main, subject_col, visit_date_col)
     seq_special = seq[seq["special_reason_visit"] != "standard"].copy()
     interval_map = (
         seq_main.groupby("interval_name", dropna=False, as_index=False)
