@@ -173,13 +173,23 @@ def _build_visit_sequence(
     seq["flag_noncanonical_interval"] = (
         ~seq["interval_name"].isin(PHASE_ORDER) & ~seq["flag_optional"]
     )
+    seq["phase_rank"] = seq["interval_name"].apply(_phase_rank)
     seq = seq.dropna(subset=[subject_col, visit_date_col]).sort_values(
         [subject_col, visit_date_col]
+    )
+    # Deduplicate same-day repeats of the same interval for a patient before
+    # assigning visit order (e.g., V1 repeated many times on the same date).
+    seq = (
+        seq.drop_duplicates(
+            subset=[subject_col, visit_date_col, "interval_name"],
+            keep="first",
+        )
+        .sort_values([subject_col, visit_date_col, "phase_rank", "interval_name"])
+        .reset_index(drop=True)
     )
     seq["visit_order"] = seq.groupby(subject_col).cumcount() + 1
     seq["first_visit_date"] = seq.groupby(subject_col)[visit_date_col].transform("min")
     seq["day_from_first"] = (seq[visit_date_col] - seq["first_visit_date"]).dt.days
-    seq["phase_rank"] = seq["interval_name"].apply(_phase_rank)
     seq["phase_label"] = seq["interval_name"].map(PHASE_LABELS).fillna(seq["interval_name"])
     seq["special_reason_visit"] = np.select(
         [seq["flag_optional"], seq["flag_noncanonical_interval"]],
@@ -359,7 +369,7 @@ def _legend_below(
     fontsize: int = 8,
     title: str | None = None,
     y_offset: float = -0.18,
-) -> None:
+) -> plt.Legend:
     """Legend centered below the x-axis."""
     kw: dict = dict(
         handles=handles,
@@ -375,7 +385,16 @@ def _legend_below(
     if title:
         kw["title"] = title
         kw["title_fontsize"] = fontsize
-    ax.legend(**kw)
+    return ax.legend(**kw)
+
+
+def _marker_map_for_intervals(interval_names: list[str]) -> dict[str, str]:
+    """
+    Stable marker assignment for visit types (interval_name).
+    """
+    marker_cycle = ["o", "s", "^", "D", "P", "X", "v", "<", ">", "*", "h", "8"]
+    sorted_intervals = sorted(interval_names, key=lambda x: (_phase_rank(x), str(x)))
+    return {name: marker_cycle[i % len(marker_cycle)] for i, name in enumerate(sorted_intervals)}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -387,10 +406,12 @@ def _plot_swimmer(
     subject_col: str,
     output_path: Path,
     xlim_days: int = 3650,
+    marker_by_visit_type: bool = False,
 ) -> None:
     """
     Each row = one patient, sorted by total number of visits (descending).
-    Color = visit order (purple=early visits, yellow=late visits).
+    Default encoding uses color = visit order. If marker_by_visit_type=True,
+    marker shape encodes visit type.
     X-axis = days from the patient's very first record.
     Patients beyond xlim_days are noted in text but not plotted beyond the limit.
     """
@@ -414,17 +435,45 @@ def _plot_swimmer(
         xmax=patient_summary["max_day"].clip(upper=xlim_days),
         color="#aab4be", linewidth=0.6, zorder=1,
     )
-    scatter = ax.scatter(
-        swim["day_from_first"].clip(upper=xlim_days),
-        swim["patient_rank"],
-        c=swim["visit_order"], cmap="viridis",
-        s=14, alpha=0.85, zorder=2,
-    )
-    cbar = fig.colorbar(scatter, ax=ax, pad=0.01)
-    cbar.set_label(
-        "Visit order\n(1 = first visit, higher = later visit per patient)",
-        fontsize=8,
-    )
+    marker_handles = []
+    if marker_by_visit_type:
+        marker_map = _marker_map_for_intervals(swim["interval_name"].dropna().unique().tolist())
+        for interval_name, marker in marker_map.items():
+            sub = swim[swim["interval_name"] == interval_name]
+            if sub.empty:
+                continue
+            label = PHASE_LABELS.get(interval_name, interval_name)
+            ax.scatter(
+                sub["day_from_first"].clip(upper=xlim_days),
+                sub["patient_rank"],
+                marker=marker,
+                color="#2c7fb8",
+                s=24,
+                alpha=0.85,
+                zorder=2,
+            )
+            marker_handles.append(
+                mlines.Line2D(
+                    [], [], marker=marker, linestyle="None",
+                    markerfacecolor="#2c7fb8", markeredgecolor="#2c7fb8",
+                    markersize=6, label=label,
+                )
+            )
+    else:
+        scatter = ax.scatter(
+            swim["day_from_first"].clip(upper=xlim_days),
+            swim["patient_rank"],
+            c=swim["visit_order"],
+            cmap="viridis",
+            s=14,
+            alpha=0.85,
+            zorder=2,
+        )
+        cbar = fig.colorbar(scatter, ax=ax, pad=0.01)
+        cbar.set_label(
+            "Visit order\n(1 = first visit, higher = later visit per patient)",
+            fontsize=8,
+        )
 
     n_out = (patient_summary["max_day"] > xlim_days).sum()
     if n_out > 0:
@@ -437,14 +486,28 @@ def _plot_swimmer(
     ax.set_xlim(0, xlim_days)
     ref_handles = _add_vref_lines(ax, xlim=xlim_days)
 
-    ax.set_title(
-        "Swimmer plot — visit timeline per patient\n(baseline = first record)",
-        fontsize=12,
+    subtitle = (
+        "(baseline = first record; marker shape = visit type)"
+        if marker_by_visit_type
+        else "(baseline = first record)"
     )
+    ax.set_title(f"Swimmer plot — visit timeline per patient\n{subtitle}", fontsize=12)
     ax.set_xlabel("Days from first record", labelpad=45)
     ax.set_ylabel(f"Patients (n={patient_summary.shape[0]}), sorted by N visits")
     ax.grid(axis="x", linestyle=":", alpha=0.3)
-    _legend_below(ax, handles=ref_handles, ncol=8, title="Time references")
+    ref_legend = _legend_below(ax, handles=ref_handles, ncol=8, title="Time references")
+    if marker_by_visit_type and marker_handles:
+        ax.add_artist(ref_legend)
+        ax.legend(
+            handles=marker_handles,
+            loc="upper left",
+            fontsize=7,
+            title="Visit type",
+            title_fontsize=8,
+            frameon=True,
+            framealpha=0.9,
+            ncol=2,
+        )
 
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
@@ -459,6 +522,7 @@ def _plot_swimmer_phase1_baseline(
     subject_col: str,
     output_path: Path,
     xlim_days: int = 3650,
+    marker_by_visit_type: bool = False,
 ) -> None:
     """
     Same as Swimmer 1 but day 0 = first occurrence of
@@ -466,8 +530,8 @@ def _plot_swimmer_phase1_baseline(
     Patients without that phase are excluded.
     Pre-baseline records (V1: Natural History / missing) are excluded.
 
-    Visit order color: 1 = first visit after Phase 1 baseline,
-    higher numbers = later visits in that patient's follow-up.
+    Default encoding uses color = visit order. If marker_by_visit_type=True,
+    marker shape encodes visit type.
     """
     if phase1_swim.empty:
         print("  [!] No Phase 1 Initial records found — skipping swimmer_phase1.")
@@ -493,17 +557,45 @@ def _plot_swimmer_phase1_baseline(
         xmax=patient_summary["max_day"].clip(upper=xlim_days),
         color="#aab4be", linewidth=0.6, zorder=1,
     )
-    scatter = ax.scatter(
-        swim["day_from_phase1"].clip(upper=xlim_days),
-        swim["patient_rank"],
-        c=swim["visit_order"], cmap="viridis",
-        s=14, alpha=0.85, zorder=2,
-    )
-    cbar = fig.colorbar(scatter, ax=ax, pad=0.01)
-    cbar.set_label(
-        "Visit order\n(1 = first visit, higher = later visit per patient)",
-        fontsize=8,
-    )
+    marker_handles = []
+    if marker_by_visit_type:
+        marker_map = _marker_map_for_intervals(swim["interval_name"].dropna().unique().tolist())
+        for interval_name, marker in marker_map.items():
+            sub = swim[swim["interval_name"] == interval_name]
+            if sub.empty:
+                continue
+            label = PHASE_LABELS.get(interval_name, interval_name)
+            ax.scatter(
+                sub["day_from_phase1"].clip(upper=xlim_days),
+                sub["patient_rank"],
+                marker=marker,
+                color="#2c7fb8",
+                s=24,
+                alpha=0.85,
+                zorder=2,
+            )
+            marker_handles.append(
+                mlines.Line2D(
+                    [], [], marker=marker, linestyle="None",
+                    markerfacecolor="#2c7fb8", markeredgecolor="#2c7fb8",
+                    markersize=6, label=label,
+                )
+            )
+    else:
+        scatter = ax.scatter(
+            swim["day_from_phase1"].clip(upper=xlim_days),
+            swim["patient_rank"],
+            c=swim["visit_order"],
+            cmap="viridis",
+            s=14,
+            alpha=0.85,
+            zorder=2,
+        )
+        cbar = fig.colorbar(scatter, ax=ax, pad=0.01)
+        cbar.set_label(
+            "Visit order\n(1 = first visit, higher = later visit per patient)",
+            fontsize=8,
+        )
 
     n_out = (patient_summary["max_day"] > xlim_days).sum()
     if n_out > 0:
@@ -516,15 +608,28 @@ def _plot_swimmer_phase1_baseline(
     ax.set_xlim(0, xlim_days)
     ref_handles = _add_vref_lines(ax, xlim=xlim_days)
 
-    ax.set_title(
-        "Swimmer plot — visit timeline per patient\n"
-        "(baseline = Phase 1: Initial Full Evaluation)",
-        fontsize=12,
+    subtitle = (
+        "(baseline = Phase 1: Initial Full Evaluation; marker shape = visit type)"
+        if marker_by_visit_type
+        else "(baseline = Phase 1: Initial Full Evaluation)"
     )
+    ax.set_title(f"Swimmer plot — visit timeline per patient\n{subtitle}", fontsize=12)
     ax.set_xlabel("Days from Phase 1: Initial Full Evaluation", labelpad=45)
     ax.set_ylabel(f"Patients (n={patient_summary.shape[0]}), sorted by N visits")
     ax.grid(axis="x", linestyle=":", alpha=0.3)
-    _legend_below(ax, handles=ref_handles, ncol=8, title="Time references")
+    ref_legend = _legend_below(ax, handles=ref_handles, ncol=8, title="Time references")
+    if marker_by_visit_type and marker_handles:
+        ax.add_artist(ref_legend)
+        ax.legend(
+            handles=marker_handles,
+            loc="upper left",
+            fontsize=7,
+            title="Visit type",
+            title_fontsize=8,
+            frameon=True,
+            framealpha=0.9,
+            ncol=2,
+        )
 
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
@@ -1030,6 +1135,20 @@ def _build_optional_position_data(
     return pd.DataFrame(results)
 
 
+def _recompute_visit_order(
+    seq: pd.DataFrame,
+    subject_col: str,
+    visit_date_col: str,
+) -> pd.DataFrame:
+    """
+    Rebuild visit_order to be consecutive per patient after any filtering step
+    (e.g., removing optional visits from seq_main).
+    """
+    out = seq.sort_values([subject_col, visit_date_col, "phase_rank", "interval_name"]).copy()
+    out["visit_order"] = out.groupby(subject_col).cumcount() + 1
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────
@@ -1055,6 +1174,7 @@ def main() -> None:
     seq_main = seq.copy()
     if not INCLUDE_OPTIONAL:
         seq_main = seq_main[~seq_main["flag_optional"]].copy()
+    seq_main = _recompute_visit_order(seq_main, subject_col, visit_date_col)
     seq_special = seq[seq["special_reason_visit"] != "standard"].copy()
     interval_map = (
         seq_main.groupby("interval_name", dropna=False, as_index=False)
@@ -1161,12 +1281,26 @@ def main() -> None:
         seq_main, subject_col,
         PLOTS_DIR / "swimmer_all_records.png",
         xlim_days=3650,
+        marker_by_visit_type=False,
+    )
+    _plot_swimmer(
+        seq_main, subject_col,
+        PLOTS_DIR / "swimmer_all_records_by_visit_type.png",
+        xlim_days=3650,
+        marker_by_visit_type=True,
     )
 
     _plot_swimmer_phase1_baseline(
         phase1_swim_main, subject_col,
         PLOTS_DIR / "swimmer_phase1_baseline.png",
         xlim_days=3650,
+        marker_by_visit_type=False,
+    )
+    _plot_swimmer_phase1_baseline(
+        phase1_swim_main, subject_col,
+        PLOTS_DIR / "swimmer_phase1_baseline_by_visit_type.png",
+        xlim_days=3650,
+        marker_by_visit_type=True,
     )
 
     _plot_violin(gaps_main, PLOTS_DIR / "violin_transition_plot.png")
