@@ -28,7 +28,6 @@ def _resolve_optional_column(df: pd.DataFrame, canonical_name: str) -> str | Non
     except KeyError:
         return None
 
-
 def build_n_visits_boxplot(patient_master: pd.DataFrame) -> str | None:
     """Build a professional boxplot for patient-level visit counts."""
     n_visits = pd.to_numeric(patient_master.get("n_visits"), errors="coerce").dropna()
@@ -44,13 +43,24 @@ def build_n_visits_boxplot(patient_master: pd.DataFrame) -> str | None:
     max_v = float(n_visits.max())
 
     sns.set_theme(style="whitegrid", context="talk")
-    fig, ax = plt.subplots(figsize=(11, 4.8))
+    fig, ax = plt.subplots(figsize=(11, 5.4))
 
-    boxprops = dict(facecolor="#5DADE2", edgecolor="#1B4F72", alpha=0.35, linewidth=1.8)
+    boxprops = dict(
+        facecolor="#5DADE2",
+        edgecolor="#1B4F72",
+        alpha=0.35,
+        linewidth=1.8
+    )
     whiskerprops = dict(color="#1B4F72", linewidth=1.6)
     capprops = dict(color="#1B4F72", linewidth=1.6)
     medianprops = dict(color="#C0392B", linewidth=2.6)
-    flierprops = dict(marker="o", markerfacecolor="#154360", markeredgecolor="#154360", alpha=0.4, markersize=4)
+    flierprops = dict(
+        marker="o",
+        markerfacecolor="#154360",
+        markeredgecolor="#154360",
+        alpha=0.4,
+        markersize=4
+    )
 
     sns.boxplot(
         x=n_visits,
@@ -70,7 +80,7 @@ def build_n_visits_boxplot(patient_master: pd.DataFrame) -> str | None:
     ax.axvline(max_v, color="#7D3C98", linestyle=":", linewidth=1.6, alpha=0.65, label=f"Max: {max_v:.0f}")
 
     ax.set_title("Distribution of n_visits in patient_master", pad=16, fontweight="bold")
-    ax.set_xlabel("Number of visits per patient")
+    ax.set_xlabel("Number of visits per patient", labelpad=20)
     ax.set_ylabel("")
     ax.grid(axis="x", alpha=0.22)
     ax.grid(axis="y", visible=False)
@@ -79,17 +89,34 @@ def build_n_visits_boxplot(patient_master: pd.DataFrame) -> str | None:
         f"n={len(n_visits):,}  |  Min={min_v:.0f}  Max={max_v:.0f}  "
         f"Mean={mean:.2f}  Median={median:.2f}  IQR={iqr:.2f}"
     )
-    fig.text(0.5, 0.06, summary_text, ha="center", va="center", fontsize=10, color="#1C2833")
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=3, frameon=True, fontsize=9)
+
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.38),   # más abajo que el xlabel
+        ncol=3,
+        frameon=True,
+        fontsize=9
+    )
+
+    fig.text(
+        0.5,
+        0.045,
+        summary_text,
+        ha="center",
+        va="center",
+        fontsize=10,
+        color="#1C2833"
+    )
 
     plot_dir = REPORTS_DIR / "05_backbone"
     plot_dir.mkdir(parents=True, exist_ok=True)
     plot_path = plot_dir / "patient_master_n_visits_boxplot.png"
-    fig.tight_layout(rect=(0, 0.14, 1, 1))
+
+    fig.subplots_adjust(bottom=0.36)   # más espacio abajo
     fig.savefig(plot_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
-    return str(plot_path)
 
+    return str(plot_path)
 
 def build_patient_master(visits: pd.DataFrame) -> pd.DataFrame:
     """Create one row per patient with visit counts and temporal coverage."""
