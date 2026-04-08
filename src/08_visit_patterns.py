@@ -84,6 +84,16 @@ CANONICAL_TRANSITIONS: dict[str, str] = {
         "V5 (4th) → V6 (5th)",
 }
 
+PHASE_TO_STAGE: dict[str, int] = {
+    "Natural History Protocol 478 Interval": 1,
+    "(missing)": 1,
+    "Phase 1: Initial Full Evaluation": 2,
+    "Phase 1: Second Full Evaluation": 3,
+    "Phase 1: Final Full (Third Full) Evaluation": 4,
+    "Phase 2: 4th Full Evaluation": 5,
+    "Phase 2: 5th Full Evaluation": 6,
+}
+
 # Reference lines: label → days
 TIME_REFS: dict[str, int] = {
     "1 wk":  7,
@@ -258,7 +268,9 @@ def _build_transition_gaps_with_flags(
         if merged.empty:
             continue
         merged["transition_interval"] = transition
-        merged["transition_order"] = CANONICAL_TRANSITIONS[transition].split(" ")[0]
+        prev_stage = PHASE_TO_STAGE.get(prev_phase)
+        next_stage = PHASE_TO_STAGE.get(next_phase)
+        merged["transition_order"] = f"V{prev_stage}→V{next_stage}"
         merged["prev_phase_max_date"] = merged["phase_max_date_prev"]
         merged["next_phase_min_date"] = merged["phase_min_date_next"]
         merged["gap_days"] = (
