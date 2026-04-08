@@ -217,49 +217,91 @@ def _build_transition_gaps_with_flags(
     subject_col: str,
     visit_date_col: str,
 ) -> pd.DataFrame:
-    gap = seq.copy()
-    gap["prev_visit_date"]    = gap.groupby(subject_col)[visit_date_col].shift(1)
-    gap["prev_visit_order"]   = gap.groupby(subject_col)["visit_order"].shift(1)
-    gap["prev_interval_name"] = gap.groupby(subject_col)["interval_name"].shift(1)
-    gap["gap_days"] = (gap[visit_date_col] - gap["prev_visit_date"]).dt.days
-    gap["transition_order"] = np.where(
-        gap["prev_visit_order"].notna(),
-        "V" + gap["prev_visit_order"].fillna(-1).astype(int).astype(str)
-        + "→V" + gap["visit_order"].astype(int).astype(str),
-        pd.NA,
+    canon = seq[seq["interval_name"].isin(PHASE_ORDER)].copy()
+    if canon.empty:
+        return pd.DataFrame(
+            columns=[
+                subject_col,
+                "transition_order",
+                "transition_interval",
+                "prev_phase_max_date",
+                "next_phase_min_date",
+                "gap_days",
+                "transition_case",
+                "flag_zero_gap",
+                "flag_negative_gap",
+            ]
+        )
+
+    phase_bounds = (
+        canon.groupby([subject_col, "interval_name"], as_index=False)
+        .agg(
+            phase_min_date=(visit_date_col, "min"),
+            phase_max_date=(visit_date_col, "max"),
+            n_visits_in_phase=(visit_date_col, "size"),
+        )
     )
-    gap["transition_interval"] = np.where(
-        gap["prev_interval_name"].notna(),
-        gap["prev_interval_name"].astype(str) + " → " + gap["interval_name"].astype(str),
-        pd.NA,
-    )
-    gap["flag_first_visit"] = gap["prev_visit_date"].isna()
-    gap["flag_zero_gap"] = gap["gap_days"].eq(0)
-    gap["flag_negative_gap"] = gap["gap_days"].lt(0)
-    gap["flag_same_phase"] = (
-        gap["prev_interval_name"].eq(gap["interval_name"]).fillna(False)
-    )
-    gap["flag_noncanonical_transition"] = (
-        ~gap["transition_interval"].isin(CANONICAL_TRANSITIONS.keys())
-    ).fillna(False)
-    gap["transition_case"] = np.select(
-        [
-            gap["flag_first_visit"],
-            gap["flag_negative_gap"],
-            gap["flag_zero_gap"],
-            gap["flag_same_phase"],
-            gap["flag_noncanonical_transition"],
-        ],
-        [
-            "first_visit_no_transition",
-            "negative_gap",
-            "zero_gap_same_day",
-            "same_phase_repeat",
-            "noncanonical_transition",
-        ],
-        default="canonical_positive_gap",
-    )
-    return gap
+
+    gap_frames: list[pd.DataFrame] = []
+    for transition in CANONICAL_TRANSITIONS:
+        prev_phase, next_phase = transition.split(" → ")
+        prev_df = phase_bounds[phase_bounds["interval_name"] == prev_phase].copy()
+        next_df = phase_bounds[phase_bounds["interval_name"] == next_phase].copy()
+        if prev_df.empty or next_df.empty:
+            continue
+        merged = prev_df.merge(
+            next_df,
+            on=subject_col,
+            suffixes=("_prev", "_next"),
+            how="inner",
+        )
+        if merged.empty:
+            continue
+        merged["transition_interval"] = transition
+        merged["transition_order"] = CANONICAL_TRANSITIONS[transition].split(" ")[0]
+        merged["prev_phase_max_date"] = merged["phase_max_date_prev"]
+        merged["next_phase_min_date"] = merged["phase_min_date_next"]
+        merged["gap_days"] = (
+            merged["next_phase_min_date"] - merged["prev_phase_max_date"]
+        ).dt.days
+        merged["flag_zero_gap"] = merged["gap_days"].eq(0)
+        merged["flag_negative_gap"] = merged["gap_days"].lt(0)
+        merged["transition_case"] = np.select(
+            [merged["flag_negative_gap"], merged["flag_zero_gap"]],
+            ["negative_gap", "zero_gap_same_day"],
+            default="canonical_positive_gap",
+        )
+        gap_frames.append(
+            merged[
+                [
+                    subject_col,
+                    "transition_order",
+                    "transition_interval",
+                    "prev_phase_max_date",
+                    "next_phase_min_date",
+                    "gap_days",
+                    "transition_case",
+                    "flag_zero_gap",
+                    "flag_negative_gap",
+                ]
+            ]
+        )
+
+    if not gap_frames:
+        return pd.DataFrame(
+            columns=[
+                subject_col,
+                "transition_order",
+                "transition_interval",
+                "prev_phase_max_date",
+                "next_phase_min_date",
+                "gap_days",
+                "transition_case",
+                "flag_zero_gap",
+                "flag_negative_gap",
+            ]
+        )
+    return pd.concat(gap_frames, ignore_index=True)
 
 
 def _add_vref_lines(
