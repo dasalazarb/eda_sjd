@@ -155,26 +155,64 @@ def _build_visit_sequence(
     subject_col: str,
     visit_date_col: str,
     interval_col: str,
-    include_optional: bool = INCLUDE_OPTIONAL,
 ) -> pd.DataFrame:
     seq = visits[[subject_col, visit_date_col, interval_col]].copy()
     seq[visit_date_col] = pd.to_datetime(seq[visit_date_col], errors="coerce")
     seq["interval_name"] = _normalize_interval(seq[interval_col])
+    seq["flag_optional"] = seq["interval_name"].map(_is_optional_phase)
+    seq["flag_noncanonical_interval"] = (
+        ~seq["interval_name"].isin(PHASE_ORDER) & ~seq["flag_optional"]
+    )
     seq = seq.dropna(subset=[subject_col, visit_date_col]).sort_values(
         [subject_col, visit_date_col]
     )
-    if not include_optional:
-        seq = seq[~seq["interval_name"].map(_is_optional_phase)].copy()
-
     seq["visit_order"] = seq.groupby(subject_col).cumcount() + 1
     seq["first_visit_date"] = seq.groupby(subject_col)[visit_date_col].transform("min")
     seq["day_from_first"] = (seq[visit_date_col] - seq["first_visit_date"]).dt.days
     seq["phase_rank"] = seq["interval_name"].apply(_phase_rank)
     seq["phase_label"] = seq["interval_name"].map(PHASE_LABELS).fillna(seq["interval_name"])
+    seq["special_reason_visit"] = np.select(
+        [seq["flag_optional"], seq["flag_noncanonical_interval"]],
+        ["optional_visit", "noncanonical_interval"],
+        default="standard",
+    )
     return seq
 
 
-def _build_transition_gaps(
+def _flag_visit_special_cases(
+    visits: pd.DataFrame,
+    subject_col: str,
+    visit_date_col: str,
+    interval_col: str,
+) -> pd.DataFrame:
+    x = visits[[subject_col, visit_date_col, interval_col]].copy()
+    x["visit_date_parsed"] = pd.to_datetime(x[visit_date_col], errors="coerce")
+    x["interval_name_norm"] = _normalize_interval(x[interval_col])
+    x["flag_missing_subject"] = x[subject_col].isna()
+    x["flag_invalid_date"] = x["visit_date_parsed"].isna()
+    x["flag_optional"] = x["interval_name_norm"].map(_is_optional_phase)
+    x["flag_noncanonical_interval"] = (
+        ~x["interval_name_norm"].isin(PHASE_ORDER) & ~x["flag_optional"]
+    )
+    x["special_reason_visit"] = np.select(
+        [
+            x["flag_missing_subject"],
+            x["flag_invalid_date"],
+            x["flag_optional"],
+            x["flag_noncanonical_interval"],
+        ],
+        [
+            "missing_subject",
+            "invalid_date",
+            "optional_visit",
+            "noncanonical_interval",
+        ],
+        default="standard",
+    )
+    return x
+
+
+def _build_transition_gaps_with_flags(
     seq: pd.DataFrame,
     subject_col: str,
     visit_date_col: str,
@@ -184,14 +222,38 @@ def _build_transition_gaps(
     gap["prev_visit_order"]   = gap.groupby(subject_col)["visit_order"].shift(1)
     gap["prev_interval_name"] = gap.groupby(subject_col)["interval_name"].shift(1)
     gap["gap_days"] = (gap[visit_date_col] - gap["prev_visit_date"]).dt.days
-    gap = gap[gap["prev_visit_date"].notna()].copy()
-    gap["transition_order"] = (
-        "V" + gap["prev_visit_order"].astype(int).astype(str)
-        + "→V" + gap["visit_order"].astype(int).astype(str)
+    gap["transition_order"] = np.where(
+        gap["prev_visit_order"].notna(),
+        "V" + gap["prev_visit_order"].fillna(-1).astype(int).astype(str)
+        + "→V" + gap["visit_order"].astype(int).astype(str),
+        pd.NA,
     )
-    gap["transition_interval"] = (
-        gap["prev_interval_name"].astype(str)
-        + " → " + gap["interval_name"].astype(str)
+    gap["transition_interval"] = np.where(
+        gap["prev_interval_name"].notna(),
+        gap["prev_interval_name"].astype(str) + " → " + gap["interval_name"].astype(str),
+        pd.NA,
+    )
+    gap["flag_first_visit"] = gap["prev_visit_date"].isna()
+    gap["flag_zero_gap"] = gap["gap_days"].eq(0)
+    gap["flag_negative_gap"] = gap["gap_days"].lt(0)
+    gap["flag_same_phase"] = gap["prev_interval_name"].eq(gap["interval_name"])
+    gap["flag_noncanonical_transition"] = ~gap["transition_interval"].isin(CANONICAL_TRANSITIONS.keys())
+    gap["transition_case"] = np.select(
+        [
+            gap["flag_first_visit"],
+            gap["flag_negative_gap"],
+            gap["flag_zero_gap"],
+            gap["flag_same_phase"],
+            gap["flag_noncanonical_transition"],
+        ],
+        [
+            "first_visit_no_transition",
+            "negative_gap",
+            "zero_gap_same_day",
+            "same_phase_repeat",
+            "noncanonical_transition",
+        ],
+        default="canonical_positive_gap",
     )
     return gap
 
@@ -780,19 +842,30 @@ def _build_swimmer_phase1_baseline_data(
     seq: pd.DataFrame,
     subject_col: str,
     visit_date_col: str,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     phase1 = "Phase 1: Initial Full Evaluation"
-    baseline = (
+    baseline_by_patient = (
         seq[seq["interval_name"] == phase1]
         .groupby(subject_col)[visit_date_col].min()
         .rename("baseline_date").reset_index()
     )
-    if baseline.empty:
-        return pd.DataFrame(columns=list(seq.columns) + ["baseline_date", "day_from_phase1"])
+    if baseline_by_patient.empty:
+        empty = pd.DataFrame(columns=list(seq.columns) + ["baseline_date", "day_from_phase1"])
+        excluded = seq[[subject_col]].drop_duplicates().assign(phase1_special_reason="no_phase1_baseline")
+        return empty, excluded
 
-    swim = seq.merge(baseline, on=subject_col, how="inner")
+    phase1_status = (
+        seq.groupby(subject_col, as_index=False)["interval_name"]
+        .apply(lambda s: (s == phase1).any())
+        .rename(columns={"interval_name": "has_phase1"})
+    )
+    excluded = phase1_status[~phase1_status["has_phase1"]][[subject_col]].copy()
+    excluded["phase1_special_reason"] = "no_phase1_baseline"
+
+    swim = seq.merge(baseline_by_patient, on=subject_col, how="inner")
     swim["day_from_phase1"] = (swim[visit_date_col] - swim["baseline_date"]).dt.days
-    return swim[swim["day_from_phase1"] >= 0].copy()
+    swim = swim[swim["day_from_phase1"] >= 0].copy()
+    return swim, excluded
 
 
 def _build_optional_position_data(
@@ -853,12 +926,14 @@ def main() -> None:
     interval_col   = resolve_canonical_column(visits, "interval_name")
 
     print_step(2, "Build visit sequence and interval map")
-    seq = _build_visit_sequence(
-        visits, subject_col, visit_date_col, interval_col,
-        include_optional=INCLUDE_OPTIONAL,
-    )
+    visit_flags = _flag_visit_special_cases(visits, subject_col, visit_date_col, interval_col)
+    seq = _build_visit_sequence(visits, subject_col, visit_date_col, interval_col)
+    seq_main = seq.copy()
+    if not INCLUDE_OPTIONAL:
+        seq_main = seq_main[~seq_main["flag_optional"]].copy()
+    seq_special = seq[seq["special_reason_visit"] != "standard"].copy()
     interval_map = (
-        seq.groupby("interval_name", dropna=False, as_index=False)
+        seq_main.groupby("interval_name", dropna=False, as_index=False)
         .agg(
             n_visits=("interval_name", "size"),
             n_patients=(subject_col, "nunique"),
@@ -867,17 +942,23 @@ def main() -> None:
     )
 
     print_step(3, "Build transition gaps")
-    gaps = _build_transition_gaps(seq, subject_col, visit_date_col)
-    phase1_swim = _build_swimmer_phase1_baseline_data(seq, subject_col, visit_date_col)
-    violin_data = gaps[gaps["gap_days"].notna() & (gaps["gap_days"] > 0)].copy()
-    kde_hist_data = gaps[gaps["gap_days"].notna() & (gaps["gap_days"] > 0)].copy()
-    kde_by_interval_data = (
-        gaps[gaps["gap_days"].notna() & (gaps["gap_days"] > 0)]
-        .copy()
+    gaps_all = _build_transition_gaps_with_flags(seq_main, subject_col, visit_date_col)
+    gaps_main = gaps_all[gaps_all["transition_case"] == "canonical_positive_gap"].copy()
+    gaps_special = gaps_all[gaps_all["transition_case"] != "canonical_positive_gap"].copy()
+    phase1_swim_main, phase1_swim_excluded = _build_swimmer_phase1_baseline_data(
+        seq_main, subject_col, visit_date_col
     )
-    kde_by_interval_data = kde_by_interval_data[
-        kde_by_interval_data["transition_interval"].isin(CANONICAL_TRANSITIONS.keys())
+    violin_data = gaps_main.copy()
+    kde_hist_data = gaps_main.copy()
+    kde_by_interval_data = gaps_main[
+        gaps_main["transition_interval"].isin(CANONICAL_TRANSITIONS.keys())
     ].copy()
+    kde_by_interval_special_counts = (
+        gaps_special.groupby(["transition_case", "transition_interval"], dropna=False, as_index=False)
+        .size()
+        .rename(columns={"size": "n"})
+        .sort_values("n", ascending=False)
+    )
     optional_position_data = _build_optional_position_data(
         visits, subject_col, visit_date_col, interval_col
     )
@@ -885,21 +966,67 @@ def main() -> None:
     print_step(4, "Save plot-ready datasets")
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     interval_map.to_csv(PLOTS_DIR / "plot00_interval_name_map.csv", index=False)
-    seq[
+    visit_flags.to_csv(PLOTS_DIR / "plot00_visit_special_case_flags.csv", index=False)
+    (
+        visit_flags["special_reason_visit"]
+        .value_counts(dropna=False)
+        .rename_axis("special_reason_visit")
+        .reset_index(name="n")
+    ).to_csv(PLOTS_DIR / "plot00_visit_special_case_counts.csv", index=False)
+    seq_main[
         [subject_col, "visit_order", "interval_name", visit_date_col, "day_from_first"]
-    ].to_csv(PLOTS_DIR / "plot01_swimmer_all_records.csv", index=False)
-    phase1_swim[
+    ].to_csv(PLOTS_DIR / "plot01_swimmer_all_records_main.csv", index=False)
+    seq_special[
+        [subject_col, "visit_order", "interval_name", visit_date_col, "day_from_first", "special_reason_visit"]
+    ].to_csv(PLOTS_DIR / "plot01_swimmer_all_records_special_cases.csv", index=False)
+    (
+        seq_special["special_reason_visit"].value_counts(dropna=False)
+        .rename_axis("special_reason_visit")
+        .reset_index(name="n")
+    ).to_csv(PLOTS_DIR / "plot01_swimmer_all_records_special_case_counts.csv", index=False)
+    phase1_swim_main[
         [subject_col, "visit_order", "interval_name", visit_date_col, "baseline_date", "day_from_phase1"]
-    ].to_csv(PLOTS_DIR / "plot02_swimmer_phase1_baseline.csv", index=False)
+    ].to_csv(PLOTS_DIR / "plot02_swimmer_phase1_baseline_main.csv", index=False)
+    phase1_swim_excluded.to_csv(
+        PLOTS_DIR / "plot02_swimmer_phase1_baseline_special_cases.csv", index=False
+    )
+    (
+        phase1_swim_excluded["phase1_special_reason"].value_counts(dropna=False)
+        .rename_axis("phase1_special_reason")
+        .reset_index(name="n")
+    ).to_csv(PLOTS_DIR / "plot02_swimmer_phase1_baseline_special_case_counts.csv", index=False)
     violin_data[
-        [subject_col, "transition_order", "transition_interval", "gap_days"]
-    ].to_csv(PLOTS_DIR / "plot03_violin_transition_plot.csv", index=False)
+        [subject_col, "transition_order", "transition_interval", "gap_days", "transition_case"]
+    ].to_csv(PLOTS_DIR / "plot03_violin_transition_plot_main.csv", index=False)
+    gaps_special[
+        [subject_col, "transition_order", "transition_interval", "gap_days", "transition_case"]
+    ].to_csv(PLOTS_DIR / "plot03_violin_transition_plot_special_cases.csv", index=False)
+    (
+        gaps_special["transition_case"].value_counts(dropna=False)
+        .rename_axis("transition_case")
+        .reset_index(name="n")
+    ).to_csv(PLOTS_DIR / "plot03_violin_transition_plot_special_case_counts.csv", index=False)
     kde_hist_data[
-        [subject_col, "gap_days", "transition_order"]
-    ].to_csv(PLOTS_DIR / "plot04_kde_hist_gapdays_plot.csv", index=False)
+        [subject_col, "gap_days", "transition_order", "transition_case"]
+    ].to_csv(PLOTS_DIR / "plot04_kde_hist_gapdays_plot_main.csv", index=False)
+    gaps_special[
+        [subject_col, "gap_days", "transition_order", "transition_case"]
+    ].to_csv(PLOTS_DIR / "plot04_kde_hist_gapdays_plot_special_cases.csv", index=False)
+    (
+        gaps_special["transition_case"].value_counts(dropna=False)
+        .rename_axis("transition_case")
+        .reset_index(name="n")
+    ).to_csv(PLOTS_DIR / "plot04_kde_hist_gapdays_plot_special_case_counts.csv", index=False)
     kde_by_interval_data[
-        [subject_col, "transition_interval", "gap_days"]
-    ].to_csv(PLOTS_DIR / "plot05_kde_by_interval_plot.csv", index=False)
+        [subject_col, "transition_interval", "gap_days", "transition_case"]
+    ].to_csv(PLOTS_DIR / "plot05_kde_by_interval_plot_main.csv", index=False)
+    gaps_special[
+        [subject_col, "transition_interval", "gap_days", "transition_case"]
+    ].to_csv(PLOTS_DIR / "plot05_kde_by_interval_plot_special_cases.csv", index=False)
+    kde_by_interval_special_counts.to_csv(
+        PLOTS_DIR / "plot05_kde_by_interval_plot_special_case_counts.csv",
+        index=False,
+    )
     optional_position_data.to_csv(
         PLOTS_DIR / "plot07_optional_eval_position.csv", index=False
     )
@@ -907,24 +1034,24 @@ def main() -> None:
     print_step(5, "Render plots")
 
     _plot_swimmer(
-        seq, subject_col,
+        seq_main, subject_col,
         PLOTS_DIR / "swimmer_all_records.png",
         xlim_days=3650,
     )
 
     _plot_swimmer_phase1_baseline(
-        phase1_swim, subject_col,
+        phase1_swim_main, subject_col,
         PLOTS_DIR / "swimmer_phase1_baseline.png",
         xlim_days=3650,
     )
 
-    _plot_violin(gaps, PLOTS_DIR / "violin_transition_plot.png")
+    _plot_violin(gaps_main, PLOTS_DIR / "violin_transition_plot.png")
 
-    _plot_kde_hist(gaps, PLOTS_DIR / "kde_hist_gapdays_plot.png")
+    _plot_kde_hist(gaps_main, PLOTS_DIR / "kde_hist_gapdays_plot.png")
 
-    _plot_kde_by_interval(gaps, PLOTS_DIR / "kde_by_interval_plot.png")
+    _plot_kde_by_interval(gaps_main, PLOTS_DIR / "kde_by_interval_plot.png")
 
-    hm = _plot_heatmap(seq, subject_col, PLOTS_DIR / "heatmap_patient_time.png")
+    hm = _plot_heatmap(seq_main, subject_col, PLOTS_DIR / "heatmap_patient_time.png")
     hm.to_csv(PLOTS_DIR / "plot06_heatmap_patient_time_matrix.csv", index=False)
 
     # Always uses full data regardless of INCLUDE_OPTIONAL
@@ -936,20 +1063,22 @@ def main() -> None:
     print_kv(
         "Visit patterns summary",
         {
-            "n_patients":       int(seq[subject_col].nunique(dropna=True)),
-            "n_visits":         int(len(seq)),
-            "n_transitions":    int(len(gaps)),
+            "n_patients":       int(seq_main[subject_col].nunique(dropna=True)),
+            "n_visits":         int(len(seq_main)),
+            "n_transitions":    int(len(gaps_main)),
+            "n_special_visits": int(len(seq_special)),
+            "n_special_trans":  int(len(gaps_special)),
             "n_interval_names": int(interval_map["interval_name"].nunique(dropna=False)),
-            "gap_days_median":  int(gaps["gap_days"].median()),
-            "gap_days_p25":     int(gaps["gap_days"].quantile(0.25)),
-            "gap_days_p75":     int(gaps["gap_days"].quantile(0.75)),
+            "gap_days_median":  int(gaps_main["gap_days"].median()),
+            "gap_days_p25":     int(gaps_main["gap_days"].quantile(0.25)),
+            "gap_days_p75":     int(gaps_main["gap_days"].quantile(0.75)),
             "include_optional": INCLUDE_OPTIONAL,
             "output_dir":       str(PLOTS_DIR),
         },
     )
     print_step(6, "Append targeted EDA for transformed visits dataset to unified workbook")
     sheets = build_targeted_eda_sheets(
-        seq,
+        seq_main,
         "08_visits_transformed_patterns_output",
         "08_visits_transformed_patterns_output",
         consolidated=True,
