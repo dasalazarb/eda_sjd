@@ -173,13 +173,23 @@ def _build_visit_sequence(
     seq["flag_noncanonical_interval"] = (
         ~seq["interval_name"].isin(PHASE_ORDER) & ~seq["flag_optional"]
     )
+    seq["phase_rank"] = seq["interval_name"].apply(_phase_rank)
     seq = seq.dropna(subset=[subject_col, visit_date_col]).sort_values(
         [subject_col, visit_date_col]
+    )
+    # Deduplicate same-day repeats of the same interval for a patient before
+    # assigning visit order (e.g., V1 repeated many times on the same date).
+    seq = (
+        seq.drop_duplicates(
+            subset=[subject_col, visit_date_col, "interval_name"],
+            keep="first",
+        )
+        .sort_values([subject_col, visit_date_col, "phase_rank", "interval_name"])
+        .reset_index(drop=True)
     )
     seq["visit_order"] = seq.groupby(subject_col).cumcount() + 1
     seq["first_visit_date"] = seq.groupby(subject_col)[visit_date_col].transform("min")
     seq["day_from_first"] = (seq[visit_date_col] - seq["first_visit_date"]).dt.days
-    seq["phase_rank"] = seq["interval_name"].apply(_phase_rank)
     seq["phase_label"] = seq["interval_name"].map(PHASE_LABELS).fillna(seq["interval_name"])
     seq["special_reason_visit"] = np.select(
         [seq["flag_optional"], seq["flag_noncanonical_interval"]],
