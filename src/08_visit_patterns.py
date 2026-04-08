@@ -335,9 +335,8 @@ def _plot_swimmer(
 # ─────────────────────────────────────────────────────────────────────
 
 def _plot_swimmer_phase1_baseline(
-    seq: pd.DataFrame,
+    phase1_swim: pd.DataFrame,
     subject_col: str,
-    visit_date_col: str,
     output_path: Path,
     xlim_days: int = 3650,
 ) -> None:
@@ -350,29 +349,18 @@ def _plot_swimmer_phase1_baseline(
     Visit order color: 1 = first visit after Phase 1 baseline,
     higher numbers = later visits in that patient's follow-up.
     """
-    phase1 = "Phase 1: Initial Full Evaluation"
-
-    baseline = (
-        seq[seq["interval_name"] == phase1]
-        .groupby(subject_col)[visit_date_col].min()
-        .rename("baseline_date").reset_index()
-    )
-    if baseline.empty:
+    if phase1_swim.empty:
         print("  [!] No Phase 1 Initial records found — skipping swimmer_phase1.")
         return
 
-    swim = seq.merge(baseline, on=subject_col, how="inner")
-    swim["day_from_phase1"] = (swim[visit_date_col] - swim["baseline_date"]).dt.days
-    swim = swim[swim["day_from_phase1"] >= 0].copy()
-
     patient_summary = (
-        swim.groupby(subject_col, as_index=False)
+        phase1_swim.groupby(subject_col, as_index=False)
         .agg(max_day=("day_from_phase1", "max"), n_visits=("visit_order", "max"))
         .sort_values(["n_visits", "max_day"], ascending=[False, False])
         .reset_index(drop=True)
     )
     patient_summary["patient_rank"] = np.arange(len(patient_summary))
-    swim = swim.merge(
+    swim = phase1_swim.merge(
         patient_summary[[subject_col, "patient_rank"]], on=subject_col, how="left"
     )
 
@@ -732,10 +720,7 @@ def _plot_heatmap(
 # ─────────────────────────────────────────────────────────────────────
 
 def _plot_optional_position(
-    visits: pd.DataFrame,
-    subject_col: str,
-    visit_date_col: str,
-    interval_col: str,
+    result_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
     """
@@ -746,38 +731,9 @@ def _plot_optional_position(
 
     Always runs on the full dataset regardless of INCLUDE_OPTIONAL.
     """
-    all_seq = visits[[subject_col, visit_date_col, interval_col]].copy()
-    all_seq[visit_date_col] = pd.to_datetime(all_seq[visit_date_col], errors="coerce")
-    all_seq["interval_name"] = _normalize_interval(all_seq[interval_col])
-    all_seq = all_seq.dropna(subset=[subject_col, visit_date_col]).sort_values(
-        [subject_col, visit_date_col]
-    )
-
-    canon = all_seq[all_seq["interval_name"].isin(PHASE_ORDER)].copy()
-    opts  = all_seq[all_seq["interval_name"].map(_is_optional_phase)].copy()
-
-    if opts.empty:
+    if result_df.empty:
         print("  [!] No optional evaluation visits found — skipping plot.")
         return
-
-    results = []
-    for _, row in opts.iterrows():
-        pid      = row[subject_col]
-        opt_date = row[visit_date_col]
-        opt_name = row["interval_name"]
-
-        before = canon[
-            (canon[subject_col] == pid) & (canon[visit_date_col] <= opt_date)
-        ]
-        if before.empty:
-            phase_ctx = "Before V2 (Initial)"
-        else:
-            last = before.sort_values(visit_date_col).iloc[-1]
-            phase_ctx = PHASE_LABELS.get(last["interval_name"], last["interval_name"])
-
-        results.append({"optional_type": opt_name, "phase_context": phase_ctx})
-
-    result_df = pd.DataFrame(results)
 
     phase_order_labels = ["Before V2 (Initial)"] + [
         PHASE_LABELS[p] for p in PHASE_ORDER if p in PHASE_LABELS
@@ -820,6 +776,63 @@ def _plot_optional_position(
     plt.close(fig)
 
 
+def _build_swimmer_phase1_baseline_data(
+    seq: pd.DataFrame,
+    subject_col: str,
+    visit_date_col: str,
+) -> pd.DataFrame:
+    phase1 = "Phase 1: Initial Full Evaluation"
+    baseline = (
+        seq[seq["interval_name"] == phase1]
+        .groupby(subject_col)[visit_date_col].min()
+        .rename("baseline_date").reset_index()
+    )
+    if baseline.empty:
+        return pd.DataFrame(columns=list(seq.columns) + ["baseline_date", "day_from_phase1"])
+
+    swim = seq.merge(baseline, on=subject_col, how="inner")
+    swim["day_from_phase1"] = (swim[visit_date_col] - swim["baseline_date"]).dt.days
+    return swim[swim["day_from_phase1"] >= 0].copy()
+
+
+def _build_optional_position_data(
+    visits: pd.DataFrame,
+    subject_col: str,
+    visit_date_col: str,
+    interval_col: str,
+) -> pd.DataFrame:
+    all_seq = visits[[subject_col, visit_date_col, interval_col]].copy()
+    all_seq[visit_date_col] = pd.to_datetime(all_seq[visit_date_col], errors="coerce")
+    all_seq["interval_name"] = _normalize_interval(all_seq[interval_col])
+    all_seq = all_seq.dropna(subset=[subject_col, visit_date_col]).sort_values(
+        [subject_col, visit_date_col]
+    )
+
+    canon = all_seq[all_seq["interval_name"].isin(PHASE_ORDER)].copy()
+    opts = all_seq[all_seq["interval_name"].map(_is_optional_phase)].copy()
+    if opts.empty:
+        return pd.DataFrame(columns=["optional_type", "phase_context"])
+
+    results = []
+    for _, row in opts.iterrows():
+        pid = row[subject_col]
+        opt_date = row[visit_date_col]
+        opt_name = row["interval_name"]
+
+        before = canon[
+            (canon[subject_col] == pid) & (canon[visit_date_col] <= opt_date)
+        ]
+        if before.empty:
+            phase_ctx = "Before V2 (Initial)"
+        else:
+            last = before.sort_values(visit_date_col).iloc[-1]
+            phase_ctx = PHASE_LABELS.get(last["interval_name"], last["interval_name"])
+
+        results.append({"optional_type": opt_name, "phase_context": phase_ctx})
+
+    return pd.DataFrame(results)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────
@@ -855,19 +868,41 @@ def main() -> None:
 
     print_step(3, "Build transition gaps")
     gaps = _build_transition_gaps(seq, subject_col, visit_date_col)
+    phase1_swim = _build_swimmer_phase1_baseline_data(seq, subject_col, visit_date_col)
+    violin_data = gaps[gaps["gap_days"].notna() & (gaps["gap_days"] > 0)].copy()
+    kde_hist_data = gaps[gaps["gap_days"].notna() & (gaps["gap_days"] > 0)].copy()
+    kde_by_interval_data = (
+        gaps[gaps["gap_days"].notna() & (gaps["gap_days"] > 0)]
+        .copy()
+    )
+    kde_by_interval_data = kde_by_interval_data[
+        kde_by_interval_data["transition_interval"].isin(CANONICAL_TRANSITIONS.keys())
+    ].copy()
+    optional_position_data = _build_optional_position_data(
+        visits, subject_col, visit_date_col, interval_col
+    )
 
     print_step(4, "Save plot-ready datasets")
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    interval_map.to_csv(PLOTS_DIR / "interval_name_map.csv", index=False)
+    interval_map.to_csv(PLOTS_DIR / "plot00_interval_name_map.csv", index=False)
     seq[
         [subject_col, "visit_order", "interval_name", visit_date_col, "day_from_first"]
-    ].to_csv(PLOTS_DIR / "plot_data_swimmer.csv", index=False)
-    gaps[
+    ].to_csv(PLOTS_DIR / "plot01_swimmer_all_records.csv", index=False)
+    phase1_swim[
+        [subject_col, "visit_order", "interval_name", visit_date_col, "baseline_date", "day_from_phase1"]
+    ].to_csv(PLOTS_DIR / "plot02_swimmer_phase1_baseline.csv", index=False)
+    violin_data[
         [subject_col, "transition_order", "transition_interval", "gap_days"]
-    ].to_csv(PLOTS_DIR / "plot_data_violin.csv", index=False)
-    gaps[
+    ].to_csv(PLOTS_DIR / "plot03_violin_transition_plot.csv", index=False)
+    kde_hist_data[
         [subject_col, "gap_days", "transition_order"]
-    ].to_csv(PLOTS_DIR / "plot_data_kde_hist.csv", index=False)
+    ].to_csv(PLOTS_DIR / "plot04_kde_hist_gapdays_plot.csv", index=False)
+    kde_by_interval_data[
+        [subject_col, "transition_interval", "gap_days"]
+    ].to_csv(PLOTS_DIR / "plot05_kde_by_interval_plot.csv", index=False)
+    optional_position_data.to_csv(
+        PLOTS_DIR / "plot07_optional_eval_position.csv", index=False
+    )
 
     print_step(5, "Render plots")
 
@@ -878,7 +913,7 @@ def main() -> None:
     )
 
     _plot_swimmer_phase1_baseline(
-        seq, subject_col, visit_date_col,
+        phase1_swim, subject_col,
         PLOTS_DIR / "swimmer_phase1_baseline.png",
         xlim_days=3650,
     )
@@ -890,11 +925,11 @@ def main() -> None:
     _plot_kde_by_interval(gaps, PLOTS_DIR / "kde_by_interval_plot.png")
 
     hm = _plot_heatmap(seq, subject_col, PLOTS_DIR / "heatmap_patient_time.png")
-    hm.to_csv(PLOTS_DIR / "plot_data_heatmap_matrix.csv", index=False)
+    hm.to_csv(PLOTS_DIR / "plot06_heatmap_patient_time_matrix.csv", index=False)
 
     # Always uses full data regardless of INCLUDE_OPTIONAL
     _plot_optional_position(
-        visits, subject_col, visit_date_col, interval_col,
+        optional_position_data,
         PLOTS_DIR / "optional_eval_position.png",
     )
 
