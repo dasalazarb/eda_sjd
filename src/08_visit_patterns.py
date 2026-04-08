@@ -236,8 +236,12 @@ def _build_transition_gaps_with_flags(
     gap["flag_first_visit"] = gap["prev_visit_date"].isna()
     gap["flag_zero_gap"] = gap["gap_days"].eq(0)
     gap["flag_negative_gap"] = gap["gap_days"].lt(0)
-    gap["flag_same_phase"] = gap["prev_interval_name"].eq(gap["interval_name"])
-    gap["flag_noncanonical_transition"] = ~gap["transition_interval"].isin(CANONICAL_TRANSITIONS.keys())
+    gap["flag_same_phase"] = (
+        gap["prev_interval_name"].eq(gap["interval_name"]).fillna(False)
+    )
+    gap["flag_noncanonical_transition"] = (
+        ~gap["transition_interval"].isin(CANONICAL_TRANSITIONS.keys())
+    ).fillna(False)
     gap["transition_case"] = np.select(
         [
             gap["flag_first_visit"],
