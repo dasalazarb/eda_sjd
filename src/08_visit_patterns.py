@@ -582,6 +582,72 @@ def _plot_violin(gaps: pd.DataFrame, output_path: Path) -> None:
     plt.close(fig)
 
 
+def _plot_violin_special_cases_dot(gaps_special: pd.DataFrame, output_path: Path) -> None:
+    """
+    Dot plot for special-case transition gaps.
+
+    - X: gap_days (can include zero/negative values)
+    - Y: transition_case category
+    - Color: transition_order (e.g., V1→V2)
+    - Categories are ordered by descending median gap_days.
+    """
+    dots = gaps_special[gaps_special["gap_days"].notna()].copy()
+    if dots.empty:
+        print("  [!] No special-case transition gaps found — skipping plot03 special-cases dot plot.")
+        return
+
+    case_order = (
+        dots.groupby("transition_case", dropna=False)["gap_days"]
+        .median()
+        .sort_values(ascending=False)
+        .index.tolist()
+    )
+
+    trans_order = sorted(
+        dots["transition_order"].dropna().unique(),
+        key=lambda x: int(str(x).split("→")[0].strip().replace("V", "")),
+    )
+    palette = sns.color_palette("tab10", n_colors=max(1, len(trans_order)))
+    palette_map = {k: v for k, v in zip(trans_order, palette)}
+
+    fig, ax = plt.subplots(figsize=(13, 6))
+    fig.subplots_adjust(bottom=0.30)
+    sns.stripplot(
+        data=dots.sort_values(["transition_case", "gap_days"], ascending=[True, False]),
+        x="gap_days",
+        y="transition_case",
+        hue="transition_order",
+        order=case_order,
+        hue_order=trans_order,
+        palette=palette_map,
+        dodge=False,
+        jitter=0.2,
+        size=5.0,
+        alpha=0.85,
+        ax=ax,
+    )
+
+    ax.axvline(0, color="#333", lw=1.2, ls="--", alpha=0.8)
+    ax.set_title("Special-case transition gaps (dot plot)", fontsize=12)
+    ax.set_xlabel("Gap days (descending values within category)")
+    ax.set_ylabel("Special-case category")
+    ax.grid(axis="x", linestyle=":", alpha=0.3)
+
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        _legend_below(
+            ax,
+            handles=handles,
+            labels=labels,
+            ncol=min(5, max(1, len(labels))),
+            title="Transition order",
+            y_offset=-0.24,
+        )
+
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Plot 4 — KDE + histogram (log scale)
 # ─────────────────────────────────────────────────────────────────────
@@ -1104,6 +1170,10 @@ def main() -> None:
     )
 
     _plot_violin(gaps_main, PLOTS_DIR / "violin_transition_plot.png")
+    _plot_violin_special_cases_dot(
+        gaps_special,
+        PLOTS_DIR / "violin_transition_plot_special_cases_dot.png",
+    )
 
     _plot_kde_hist(gaps_main, PLOTS_DIR / "kde_hist_gapdays_plot.png")
 
