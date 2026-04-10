@@ -14,7 +14,6 @@ from common import (
     print_kv,
     print_script_overview,
     print_step,
-    resolve_canonical_column,
     setup_logger,
 )
 
@@ -283,11 +282,7 @@ def _audit_and_correct(
         base_col = _strip_repeat_suffix(col)
         column_map.setdefault(base_col, []).append(col)
 
-    visit_date_col: str | None = None
-    try:
-        visit_date_col = resolve_canonical_column(collapsed, "visit_date")
-    except KeyError:
-        visit_date_col = None
+    visit_date_col = "visit_date" if "visit_date" in collapsed.columns else None
 
     for _, cb in codebook_prepared.iterrows():
         variable_name = cb["merge_key"]
