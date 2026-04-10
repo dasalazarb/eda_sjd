@@ -79,10 +79,7 @@ def _load_table(path: Path) -> pd.DataFrame:
 
 
 def _resolve_subject_col(df: pd.DataFrame) -> str:
-    try:
-        return resolve_canonical_column(df, "subject_number")
-    except KeyError:
-        return resolve_canonical_column(df, "patient_record_number")
+    return resolve_canonical_column(df, "patient_record_number")
 
 
 def _resolve_visit_time_col(df: pd.DataFrame) -> str:
