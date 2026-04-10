@@ -38,6 +38,12 @@ NON_CLINICAL: set[str] = {
     "unnamed: 0",
     "index",
     "record_id",
+    "time_24_hour",
+    "ids__time_24_hour",
+    "visit_date",
+    "ids__visit_date",
+    "visit_datetime_adjustment_seconds",
+    "dup_rank",
 }
 
 # Top-N variables shown in bar chart
@@ -413,7 +419,7 @@ def _plot_variable_audit_scatter(
 
     fig.suptitle(
         "Variable conflict vs complementarity — clinical variables only\n"
-        "(non-clinical metadata excluded: row_id_raw, visit_datetime, duplicate_group_id)",
+        "(non-clinical metadata excluded from analysis)",
         fontsize=12, y=1.01,
     )
 
@@ -837,10 +843,10 @@ def _plot_family_summary(audit: pd.DataFrame, output_path: Path) -> None:
 # ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    logger = setup_logger("09_interval_collapse_plots")
+    logger = setup_logger("10_interval_collapse_plots")
 
     print_script_overview(
-        "09_interval_collapse_plots.py",
+        "10_interval_collapse_plots.py",
         "Diagnostic plots for 09_interval_collapse_audit.py outputs.\n"
         f"  Non-clinical vars excluded: {sorted(NON_CLINICAL)}\n"
         f"  Conflict threshold for scatter zoom: {CONFLICT_PCT_THRESHOLD}%",

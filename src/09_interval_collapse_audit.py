@@ -4,7 +4,6 @@ import argparse
 from dataclasses import dataclass
 
 import pandas as pd
-from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
 
 from common import (
     ANALYTIC_DIR,
@@ -22,6 +21,21 @@ from common import (
 )
 
 MISSING_TOKEN_UPPER = {str(token).upper() for token in MISSING_TOKENS}
+ANALYSIS_EXCLUDED_VARS = {
+    "row_id_raw",
+    "visit_datetime",
+    "duplicate_group_id",
+    "row_id",
+    "unnamed: 0",
+    "index",
+    "record_id",
+    "time_24_hour",
+    "ids__time_24_hour",
+    "visit_date",
+    "ids__visit_date",
+    "visit_datetime_adjustment_seconds",
+    "dup_rank",
+}
 
 
 @dataclass(frozen=True)
@@ -85,12 +99,6 @@ def _collapse_column(series: pd.Series):
 
     if non_missing.empty:
         return pd.NA
-
-    if is_numeric_dtype(non_missing):
-        return non_missing.max()
-
-    if is_datetime64_any_dtype(non_missing):
-        return non_missing.max()
 
     unique_values = sorted({str(v).strip() for v in non_missing if pd.notna(v)})
     if len(unique_values) == 1:
@@ -253,8 +261,9 @@ def main() -> None:
 
     print_step(4, "Audit complementarity vs conflicts per variable")
     excluded_cols = {subject_col, interval_col}
-    variable_audit = _build_variable_audit(visits, group_cols, excluded_cols)
-    conflict_examples = _build_conflict_examples(visits, group_cols, excluded_cols)
+    analysis_excluded_cols = excluded_cols | ANALYSIS_EXCLUDED_VARS
+    variable_audit = _build_variable_audit(visits, group_cols, analysis_excluded_cols)
+    conflict_examples = _build_conflict_examples(visits, group_cols, analysis_excluded_cols)
 
     print_step(5, "Export reports")
     repeated_groups.to_csv(REPORTS_DIR / "interval_collapse_repeated_groups.csv", index=False)
