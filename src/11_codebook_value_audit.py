@@ -135,6 +135,20 @@ def _load_table(path: Path, sheet_name: str | None = None) -> pd.DataFrame:
 
 
 def _save_table(df: pd.DataFrame, path: Path) -> None:
+    def _coerce_mixed_object_columns_for_parquet(frame: pd.DataFrame) -> pd.DataFrame:
+        """Convert mixed-type object columns to string so pyarrow can serialize them."""
+        coerced = frame.copy()
+        object_cols = coerced.select_dtypes(include=["object"]).columns
+        for col in object_cols:
+            non_null = coerced[col].dropna()
+            if non_null.empty:
+                continue
+            type_set = {type(v) for v in non_null}
+            if len(type_set) <= 1 and str in type_set:
+                continue
+            coerced[col] = coerced[col].astype("string")
+        return coerced
+
     path.parent.mkdir(parents=True, exist_ok=True)
     suffix = path.suffix.lower()
     if suffix in {".xlsx", ".xlsm", ".xls"}:
@@ -144,7 +158,8 @@ def _save_table(df: pd.DataFrame, path: Path) -> None:
         df.to_csv(path, index=False)
         return
     if suffix == ".parquet":
-        df.to_parquet(path, index=False)
+        parquet_df = _coerce_mixed_object_columns_for_parquet(df)
+        parquet_df.to_parquet(path, index=False)
         return
     raise ValueError(f"Unsupported format for output: {path}")
 
