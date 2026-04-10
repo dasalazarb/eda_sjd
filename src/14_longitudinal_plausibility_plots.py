@@ -89,12 +89,12 @@ def plot_coverage_histograms(df: pd.DataFrame, out_dir: Path) -> int:
         ax = axes[i]
         sns.histplot(df[metric].dropna(), bins=20, kde=True, color="#2c7fb8", ax=ax)
         ax.set_title(metric)
-        ax.set_xlabel("Porcentaje")
+        ax.set_xlabel("Percentage")
 
     for j in range(len(metrics), len(axes)):
         axes[j].axis("off")
 
-    fig.suptitle("Histograma de cobertura de variables", y=1.02, fontsize=16)
+    fig.suptitle("Variable coverage histogram", y=1.02, fontsize=16)
     _save(fig, out_dir / "01_hist_cobertura_variables.png")
     return 1
 
@@ -107,7 +107,7 @@ def plot_variable_type_bars(df: pd.DataFrame, out_dir: Path) -> int:
 
     vc = df["variable_type"].value_counts(dropna=False)
     sns.barplot(x=vc.index.astype(str), y=vc.values, ax=axes[0, 0], color="#5e3c99")
-    axes[0, 0].set_title("Número de variables por tipo")
+    axes[0, 0].set_title("Number of variables by type")
     axes[0, 0].set_xlabel("variable_type")
     axes[0, 0].set_ylabel("n_variables")
     axes[0, 0].tick_params(axis="x", rotation=25)
@@ -115,8 +115,8 @@ def plot_variable_type_bars(df: pd.DataFrame, out_dir: Path) -> int:
     if "ml_longitudinal_label" in df.columns:
         tmp = pd.crosstab(df["variable_type"], df["ml_longitudinal_label"], normalize="index")
         tmp.plot(kind="bar", stacked=True, ax=axes[0, 1], colormap="viridis")
-        axes[0, 1].set_title("Proporción de label por variable_type")
-        axes[0, 1].set_ylabel("Proporción")
+        axes[0, 1].set_title("Label proportion by variable_type")
+        axes[0, 1].set_ylabel("Proportion")
         axes[0, 1].tick_params(axis="x", rotation=25)
         axes[0, 1].legend(title="ml_longitudinal_label", bbox_to_anchor=(1.02, 1), loc="upper left")
     else:
@@ -127,7 +127,7 @@ def plot_variable_type_bars(df: pd.DataFrame, out_dir: Path) -> int:
             df.groupby("variable_type", dropna=False)["pct_visits_covered"].mean().sort_values(ascending=False)
         )
         sns.barplot(x=tmp_cov.index.astype(str), y=tmp_cov.values, ax=axes[1, 0], color="#1b9e77")
-        axes[1, 0].set_title("Promedio de cobertura por tipo")
+        axes[1, 0].set_title("Average coverage by type")
         axes[1, 0].set_ylabel("pct_visits_covered (mean)")
         axes[1, 0].tick_params(axis="x", rotation=25)
     else:
@@ -138,13 +138,13 @@ def plot_variable_type_bars(df: pd.DataFrame, out_dir: Path) -> int:
             df.groupby("variable_type", dropna=False)["consistency_score"].mean().sort_values(ascending=False)
         )
         sns.barplot(x=tmp_cons.index.astype(str), y=tmp_cons.values, ax=axes[1, 1], color="#d95f02")
-        axes[1, 1].set_title("Promedio de consistencia por tipo")
+        axes[1, 1].set_title("Average consistency by type")
         axes[1, 1].set_ylabel("consistency_score (mean)")
         axes[1, 1].tick_params(axis="x", rotation=25)
     else:
         axes[1, 1].axis("off")
 
-    fig.suptitle("Resumen por variable_type", y=1.02, fontsize=16)
+    fig.suptitle("Summary by variable_type", y=1.02, fontsize=16)
     fig.tight_layout()
     _save(fig, out_dir / "02_barras_variable_type.png")
     return 1
@@ -157,7 +157,7 @@ def plot_label_bars(df: pd.DataFrame, out_dir: Path) -> int:
     counts = df["ml_longitudinal_label"].value_counts(dropna=False)
     fig, ax = plt.subplots(figsize=(10, 6))
     sns.barplot(x=counts.index.astype(str), y=counts.values, ax=ax, palette="Set2")
-    ax.set_title("Clasificación final de utilidad longitudinal")
+    ax.set_title("Final longitudinal utility classification")
     ax.set_xlabel("ml_longitudinal_label")
     ax.set_ylabel("n_variables")
     ax.tick_params(axis="x", rotation=20)
@@ -189,7 +189,7 @@ def plot_coverage_vs_consistency(df: pd.DataFrame, out_dir: Path) -> int:
         if hue:
             ax.legend(loc="best", fontsize=8)
 
-    fig.suptitle("Cobertura vs consistencia", y=1.02, fontsize=16)
+    fig.suptitle("Coverage vs consistency", y=1.02, fontsize=16)
     fig.tight_layout()
     _save(fig, out_dir / "04_scatter_cobertura_vs_consistencia.png")
     return 1
@@ -223,7 +223,7 @@ def plot_coverage_vs_change(df: pd.DataFrame, out_dir: Path) -> int:
     for j in range(len(valid_pairs), 4):
         axes_flat[j].axis("off")
 
-    fig.suptitle("Cobertura vs cambio/inestabilidad", y=1.02, fontsize=16)
+    fig.suptitle("Coverage vs change/instability", y=1.02, fontsize=16)
     fig.tight_layout()
     _save(fig, out_dir / "05_scatter_cobertura_vs_cambio.png")
     return 1
@@ -246,13 +246,13 @@ def plot_boxplots_by_type(df: pd.DataFrame, out_dir: Path) -> int:
     for i, y in enumerate(y_cols):
         ax = axes_flat[i]
         sns.boxplot(data=df, x="variable_type", y=y, ax=ax)
-        ax.set_title(f"{y} por variable_type")
+        ax.set_title(f"{y} by variable_type")
         ax.tick_params(axis="x", rotation=25)
 
     for j in range(len(y_cols), 4):
         axes_flat[j].axis("off")
 
-    fig.suptitle("Boxplots por tipo de variable", y=1.02, fontsize=16)
+    fig.suptitle("Boxplots by variable type", y=1.02, fontsize=16)
     fig.tight_layout()
     _save(fig, out_dir / "06_boxplots_por_tipo.png")
     return 1
@@ -268,7 +268,7 @@ def _plot_topn_barh(df: pd.DataFrame, metric: str, out_path: Path, n: int = 20, 
 
     fig, ax = plt.subplots(figsize=(11, 8))
     sns.barplot(data=plot_df, y="variable", x=metric, ax=ax, palette="Blues_r" if not ascending else "Reds")
-    ax.set_title(f"{'Top' if not ascending else 'Peores'} {len(plot_df)} por {metric}")
+    ax.set_title(f"{'Top' if not ascending else 'Worst'} {len(plot_df)} by {metric}")
     ax.set_xlabel(metric)
     ax.set_ylabel("variable")
     _save(fig, out_path)
@@ -331,9 +331,9 @@ def plot_metric_heatmap(df: pd.DataFrame, out_dir: Path, n: int = 50) -> int:
 
     fig_h = max(8, 0.32 * len(hm))
     fig, ax = plt.subplots(figsize=(14, fig_h))
-    sns.heatmap(hm, cmap="RdYlGn", ax=ax, cbar_kws={"label": "valor"})
-    ax.set_title(f"Heatmap variables vs métricas (top {len(hm)})")
-    ax.set_xlabel("Métricas")
+    sns.heatmap(hm, cmap="RdYlGn", ax=ax, cbar_kws={"label": "value"})
+    ax.set_title(f"Variable vs metric heatmap (top {len(hm)})")
+    ax.set_xlabel("Metrics")
     ax.set_ylabel("Variables")
     _save(fig, out_dir / "08_heatmap_variables_vs_metricas.png")
     return 1
@@ -360,7 +360,7 @@ def plot_metric_correlation(df: pd.DataFrame, out_dir: Path) -> int:
     corr = df[cols].corr(numeric_only=True)
     fig, ax = plt.subplots(figsize=(11, 9))
     sns.heatmap(corr, cmap="coolwarm", center=0, annot=True, fmt=".2f", ax=ax)
-    ax.set_title("Matriz de correlación entre métricas longitudinales")
+    ax.set_title("Correlation matrix of longitudinal metrics")
     _save(fig, out_dir / "09_matriz_correlacion_metricas.png")
     return 1
 
@@ -382,12 +382,12 @@ def plot_selection_frontier(
     ax.axvline(coverage_threshold, color="black", linestyle="--", linewidth=1.5)
     ax.axhline(consistency_threshold, color="black", linestyle="--", linewidth=1.5)
 
-    ax.text(coverage_threshold + 1, consistency_threshold + 1, "Candidatas fuertes", fontsize=10)
-    ax.text(coverage_threshold + 1, max(df[y].min(), 0) + 2, "Cobertura bien, revisar estabilidad", fontsize=9)
-    ax.text(max(df[x].min(), 0) + 2, consistency_threshold + 1, "Estables con poca cobertura", fontsize=9)
-    ax.text(max(df[x].min(), 0) + 2, max(df[y].min(), 0) + 2, "Descartar/prioridad baja", fontsize=9)
+    ax.text(coverage_threshold + 1, consistency_threshold + 1, "Strong candidates", fontsize=10)
+    ax.text(coverage_threshold + 1, max(df[y].min(), 0) + 2, "Good coverage, review stability", fontsize=9)
+    ax.text(max(df[x].min(), 0) + 2, consistency_threshold + 1, "Stable but low coverage", fontsize=9)
+    ax.text(max(df[x].min(), 0) + 2, max(df[y].min(), 0) + 2, "Discard/low priority", fontsize=9)
 
-    ax.set_title("Frontera de selección: cobertura vs consistencia")
+    ax.set_title("Selection frontier: coverage vs consistency")
     ax.set_xlabel(x)
     ax.set_ylabel(y)
     _save(fig, out_dir / "10_frontera_seleccion.png")
