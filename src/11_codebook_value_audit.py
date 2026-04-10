@@ -19,7 +19,6 @@ from common import (
 
 BLANK_TOKENS = {"", "nan", "none", "null", "na", "n/a"}
 DROP_VALUE_TOKENS = {"pt_declined_test", "nd", "not_done"}
-DEBUG_EVERY_N = 500
 
 
 @dataclass(frozen=True)
@@ -265,16 +264,11 @@ def _value_from_row(row: pd.Series, *candidates: str) -> object:
     return ""
 
 
-def _debug_print(message: str, iteration: int | None = None, every_n: int = DEBUG_EVERY_N) -> None:
-    if iteration is None or (iteration > 0 and iteration % every_n == 0):
-        print(message)
-
-
 def _audit_and_correct(
     codebook_prepared: pd.DataFrame, collapsed: pd.DataFrame
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if collapsed.empty:
-        _debug_print("[DEBUG] collapsed está vacío: se retorna salida vacía.")
+        print("[DEBUG] collapsed está vacío: se retorna salida vacía.")
         empty = pd.DataFrame()
         return empty, pd.DataFrame([{"metric": "matched_variables", "value": 0}]), empty, collapsed.copy(), empty
 
@@ -285,20 +279,20 @@ def _audit_and_correct(
     range_findings: list[dict[str, object]] = []
 
     column_map: dict[str, list[str]] = {}
-    for col_i, col in enumerate(collapsed.columns.astype(str), start=1):
-        _debug_print(f"[DEBUG] Loop columnas collapsed -> iter={col_i}, procesando columna: {col}", col_i)
+    for col in collapsed.columns.astype(str):
+        print(f"[DEBUG] Loop columnas collapsed -> procesando columna: {col}")
         base_col = _strip_repeat_suffix(col)
         column_map.setdefault(base_col, []).append(col)
 
     visit_date_col = "visit_date" if "visit_date" in collapsed.columns else None
-    _debug_print(f"[DEBUG] Condicional visit_date_col {'sí' if visit_date_col else 'no'} disponible.")
+    print(f"[DEBUG] Condicional visit_date_col {'sí' if visit_date_col else 'no'} disponible.")
 
-    for cb_i, (_, cb) in enumerate(codebook_prepared.iterrows(), start=1):
+    for _, cb in codebook_prepared.iterrows():
         variable_name = cb["merge_key"]
-        _debug_print(f"[DEBUG] Loop codebook_prepared -> iter={cb_i}, merge_key actual: {variable_name}", cb_i)
+        print(f"[DEBUG] Loop codebook_prepared -> merge_key actual: {variable_name}")
         variable_columns = column_map.get(variable_name, [])
         if not variable_columns:
-            _debug_print(f"[DEBUG] Condicional variable_columns vacío para {variable_name}: se continúa.")
+            print(f"[DEBUG] Condicional variable_columns vacío para {variable_name}: se continúa.")
             continue
 
         allowed_map = _allowed_value_maps(cb["DISPLAY"], cb["CODEVALUE"])
@@ -306,7 +300,7 @@ def _audit_and_correct(
         has_range = min_allowed is not None or max_allowed is not None
 
         if not allowed_map and not has_range:
-            _debug_print(f"[DEBUG] Condicional sin allowed_map y sin rango para {variable_name}: variable omitida.")
+            print(f"[DEBUG] Condicional sin allowed_map y sin rango para {variable_name}: variable omitida.")
             skipped_vars.append(
                 {
                     "merge_key": variable_name,
@@ -315,34 +309,22 @@ def _audit_and_correct(
             )
             continue
 
-        for col_i, source_column in enumerate(variable_columns, start=1):
-            _debug_print(
-                f"[DEBUG] Loop variable_columns -> iter={col_i}, columna fuente: {source_column}",
-                col_i,
-            )
-            for row_i, (idx, raw_value) in enumerate(collapsed[source_column].items(), start=1):
-                _debug_print(f"[DEBUG] Loop filas -> iter={row_i}, idx={idx}, columna={source_column}", row_i)
+        for source_column in variable_columns:
+            print(f"[DEBUG] Loop variable_columns -> columna fuente: {source_column}")
+            for idx, raw_value in collapsed[source_column].items():
+                print(f"[DEBUG] Loop filas -> idx={idx}, columna={source_column}")
                 if _is_blank(raw_value):
-                    _debug_print(
-                        f"[DEBUG] Condicional valor en blanco en iter={row_i}, idx={idx}, columna={source_column}.",
-                        row_i,
-                    )
+                    print(f"[DEBUG] Condicional valor en blanco en idx={idx}, columna={source_column}.")
                     continue
 
                 value_text = str(raw_value).strip()
                 if not value_text:
-                    _debug_print(
-                        f"[DEBUG] Condicional value_text vacío en iter={row_i}, idx={idx}, columna={source_column}.",
-                        row_i,
-                    )
+                    print(f"[DEBUG] Condicional value_text vacío en idx={idx}, columna={source_column}.")
                     continue
                 normalized = _normalize_token(value_text)
 
                 if normalized in DROP_VALUE_TOKENS:
-                    _debug_print(
-                        f"[DEBUG] Condicional DROP_VALUE_TOKENS en iter={row_i}, idx={idx}, valor={value_text}.",
-                        row_i,
-                    )
+                    print(f"[DEBUG] Condicional DROP_VALUE_TOKENS en idx={idx}, valor={value_text}.")
                     corrected.at[idx, source_column] = ""
                     findings.append(
                         {
@@ -361,10 +343,7 @@ def _audit_and_correct(
                     continue
 
                 if "|" in value_text:
-                    _debug_print(
-                        f"[DEBUG] Condicional conflicto por pipe en iter={row_i}, idx={idx}, valor={value_text}.",
-                        row_i,
-                    )
+                    print(f"[DEBUG] Condicional conflicto por pipe en idx={idx}, valor={value_text}.")
                     row = collapsed.loc[idx]
                     pipe_conflicts.append(
                         {
@@ -402,26 +381,17 @@ def _audit_and_correct(
                     continue
 
                 if allowed_map:
-                    _debug_print(
-                        f"[DEBUG] Condicional allowed_map activo para {variable_name}, iter={row_i}, idx={idx}.",
-                        row_i,
-                    )
+                    print(f"[DEBUG] Condicional allowed_map activo para {variable_name}, idx={idx}.")
                     corrected_value = value_text
                     is_valid = normalized in allowed_map
                     correction_applied = False
                     method = "exact" if is_valid else "no_match"
 
                     if not is_valid:
-                        _debug_print(
-                            f"[DEBUG] Condicional no_match inicial en iter={row_i}, idx={idx}, buscando fuzzy.",
-                            row_i,
-                        )
+                        print(f"[DEBUG] Condicional no_match inicial en idx={idx}, buscando fuzzy.")
                         fuzzy = _best_fuzzy_match(value_text, set(allowed_map.keys()), cutoff=0.9)
                         if fuzzy is not None:
-                            _debug_print(
-                                f"[DEBUG] Condicional fuzzy_corrected en iter={row_i}, idx={idx}: {value_text} -> {allowed_map[fuzzy]}",
-                                row_i,
-                            )
+                            print(f"[DEBUG] Condicional fuzzy_corrected en idx={idx}: {value_text} -> {allowed_map[fuzzy]}")
                             corrected_value = allowed_map[fuzzy]
                             is_valid = True
                             correction_applied = True
@@ -444,18 +414,12 @@ def _audit_and_correct(
                     )
 
                 if not has_range:
-                    _debug_print(
-                        f"[DEBUG] Condicional sin ANSWER_RANGE para {variable_name}, iter={row_i}, idx={idx}.",
-                        row_i,
-                    )
+                    print(f"[DEBUG] Condicional sin ANSWER_RANGE para {variable_name}, idx={idx}.")
                     continue
 
                 numeric_value = _parse_numeric_value(value_text)
                 if numeric_value is None:
-                    _debug_print(
-                        f"[DEBUG] Condicional valor no numérico para rango en iter={row_i}, idx={idx}: {value_text}",
-                        row_i,
-                    )
+                    print(f"[DEBUG] Condicional valor no numérico para rango en idx={idx}: {value_text}")
                     range_findings.append(
                         {
                             "merge_key": variable_name,
@@ -474,16 +438,10 @@ def _audit_and_correct(
                     and re.fullmatch(r"\d{4}", value_text)
                     and visit_date_col is not None
                 ):
-                    _debug_print(
-                        f"[DEBUG] Condicional TOBACCO_HX_LAST con año detectado en iter={row_i}, idx={idx}: {value_text}",
-                        row_i,
-                    )
+                    print(f"[DEBUG] Condicional TOBACCO_HX_LAST con año detectado en idx={idx}: {value_text}")
                     visit_year = _parse_visit_year(collapsed.at[idx, visit_date_col])
                     if visit_year is not None:
-                        _debug_print(
-                            f"[DEBUG] Condicional corrección por año en iter={row_i}, idx={idx}: visit_year={visit_year}",
-                            row_i,
-                        )
+                        print(f"[DEBUG] Condicional corrección por año en idx={idx}: visit_year={visit_year}")
                         corrected_numeric = visit_year - int(value_text)
                         corrected.at[idx, source_column] = corrected_numeric
                         range_findings.append(
@@ -503,10 +461,7 @@ def _audit_and_correct(
                         numeric_value = float(corrected_numeric)
 
                 if numeric_value < 0:
-                    _debug_print(
-                        f"[DEBUG] Condicional valor negativo en iter={row_i}, idx={idx}: {numeric_value}",
-                        row_i,
-                    )
+                    print(f"[DEBUG] Condicional valor negativo en idx={idx}: {numeric_value}")
                     range_findings.append(
                         {
                             "merge_key": variable_name,
@@ -520,10 +475,7 @@ def _audit_and_correct(
                     )
 
                 if min_allowed is not None and numeric_value < min_allowed:
-                    _debug_print(
-                        f"[DEBUG] Condicional below_min_range en iter={row_i}, idx={idx}: {numeric_value} < {min_allowed}",
-                        row_i,
-                    )
+                    print(f"[DEBUG] Condicional below_min_range en idx={idx}: {numeric_value} < {min_allowed}")
                     range_findings.append(
                         {
                             "merge_key": variable_name,
@@ -536,10 +488,7 @@ def _audit_and_correct(
                         }
                     )
                 if max_allowed is not None and numeric_value > max_allowed:
-                    _debug_print(
-                        f"[DEBUG] Condicional above_max_range en iter={row_i}, idx={idx}: {numeric_value} > {max_allowed}",
-                        row_i,
-                    )
+                    print(f"[DEBUG] Condicional above_max_range en idx={idx}: {numeric_value} > {max_allowed}")
                     range_findings.append(
                         {
                             "merge_key": variable_name,
