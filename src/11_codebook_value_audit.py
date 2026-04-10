@@ -230,10 +230,26 @@ def _parse_answer_range(answer_range_raw: object) -> tuple[float | None, float |
 
 
 def _parse_visit_year(value: object) -> int | None:
-    dt = pd.to_datetime(value, errors="coerce")
-    if pd.isna(dt):
+    if pd.isna(value):
         return None
-    return int(dt.year)
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    years: list[int] = []
+    for token in re.split(r"\|", text):
+        candidate = token.strip()
+        if not candidate:
+            continue
+        dt = pd.to_datetime(candidate, errors="coerce")
+        if pd.isna(dt):
+            continue
+        years.append(int(dt.year))
+
+    if not years:
+        return None
+    return max(years)
 
 
 def _value_from_row(row: pd.Series, *candidates: str) -> object:
