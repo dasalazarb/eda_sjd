@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from common import ANALYTIC_DIR, REPORTS_DIR, print_kv, print_script_overview, print_step, setup_logger
+from common import (
+    ANALYTIC_DIR,
+    REPORTS_DIR,
+    print_kv,
+    print_script_overview,
+    print_step,
+    setup_logger,
+)
 
 BLANK_TOKENS = {"", "nan", "none", "null", "na", "n/a"}
 DROP_VALUE_TOKENS = {"pt_declined_test", "nd", "not_done"}
@@ -275,6 +282,8 @@ def _audit_and_correct(
         base_col = _strip_repeat_suffix(col)
         column_map.setdefault(base_col, []).append(col)
 
+    visit_date_col = "visit_date" if "visit_date" in collapsed.columns else None
+
     for _, cb in codebook_prepared.iterrows():
         variable_name = cb["merge_key"]
         variable_columns = column_map.get(variable_name, [])
@@ -407,18 +416,12 @@ def _audit_and_correct(
                     )
                     continue
 
-                out_of_range = (
-                    (min_allowed is not None and numeric_value < min_allowed)
-                    or (max_allowed is not None and numeric_value > max_allowed)
-                )
-
                 if (
-                    out_of_range
-                    and variable_name == "social_history__TOBACCO_HX_LAST"
+                    variable_name == "social_history__TOBACCO_HX_LAST"
                     and re.fullmatch(r"\d{4}", value_text)
-                    and "VISIT_DATE" in collapsed.columns
+                    and visit_date_col is not None
                 ):
-                    visit_year = _parse_visit_year(collapsed.at[idx, "VISIT_DATE"])
+                    visit_year = _parse_visit_year(collapsed.at[idx, visit_date_col])
                     if visit_year is not None:
                         corrected_numeric = visit_year - int(value_text)
                         corrected.at[idx, source_column] = corrected_numeric
@@ -431,7 +434,7 @@ def _audit_and_correct(
                                 "answer_range": cb.get("ANSWER_RANGE", ""),
                                 "issue_type": "year_to_delta_corrected",
                                 "issue_detail": (
-                                    f"Valor de 4 dígitos corregido usando VISIT_DATE: "
+                                    f"Valor de 4 dígitos corregido usando {visit_date_col}: "
                                     f"{visit_year} - {value_text} = {corrected_numeric}."
                                 ),
                             }
