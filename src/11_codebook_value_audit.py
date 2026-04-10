@@ -417,7 +417,7 @@ def _audit_and_correct(
                     continue
 
                 if (
-                    variable_name == "social_history__TOBACCO_HX_LAST"
+                    variable_name == "social_history__tobacco_hx_last"
                     and re.fullmatch(r"\d{4}", value_text)
                     and visit_date_col is not None
                 ):
