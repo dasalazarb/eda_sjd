@@ -21,6 +21,8 @@ from common import (
 )
 
 MISSING_TOKEN_UPPER = {str(token).upper() for token in MISSING_TOKENS}
+ANS_PREFIX = "ans__"
+AUTO_PREFIX = "autonomic_nervous_system_questionnaire__"
 ANALYSIS_EXCLUDED_VARS = {
     "row_id_raw",
     "visit_datetime",
@@ -106,6 +108,60 @@ def _collapse_column(series: pd.Series):
 
     # Explicit conflict representation (e.g., "yes | no").
     return " | ".join(unique_values)
+
+
+def _tokenize_cell(value: object) -> list[str]:
+    if pd.isna(value):
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    parts = [part.strip() for part in text.split("|")]
+    return [part for part in parts if part]
+
+
+def _merge_cell_values(values: list[object]) -> object:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for token in _tokenize_cell(value):
+            key = token.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(token)
+    if not merged:
+        return pd.NA
+    if len(merged) == 1:
+        return merged[0]
+    return " | ".join(merged)
+
+
+def _prefix_map(columns: list[str], prefix: str) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for col in columns:
+        if col.startswith(prefix):
+            suffix = col[len(prefix) :]
+            out.setdefault(suffix, []).append(col)
+    return out
+
+
+def _merge_ans_autonomic_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    out = df.copy()
+    colnames = [str(c) for c in out.columns]
+    ans_map = _prefix_map(colnames, ANS_PREFIX)
+    auto_map = _prefix_map(colnames, AUTO_PREFIX)
+    shared_suffixes = sorted(set(ans_map).intersection(auto_map))
+
+    for suffix in shared_suffixes:
+        source_cols = [*ans_map[suffix], *auto_map[suffix]]
+        merged_col = f"{ANS_PREFIX}{suffix}"
+        out[merged_col] = out[source_cols].apply(lambda row: _merge_cell_values(row.tolist()), axis=1)
+        drop_cols = [c for c in source_cols if c != merged_col]
+        if drop_cols:
+            out = out.drop(columns=drop_cols)
+
+    return out, len(shared_suffixes)
 
 
 def _build_variable_audit(
@@ -284,17 +340,24 @@ def main() -> None:
             if col not in group_cols
         }
         collapsed = sorted_visits.groupby(group_cols, as_index=False).agg(aggregated)
+        collapsed, merged_suffix_pairs = _merge_ans_autonomic_columns(collapsed)
         collapsed.to_parquet(ANALYTIC_DIR / "visits_long_collapsed_by_interval.parquet", index=False)
         collapsed.to_csv(ANALYTIC_DIR / "visits_long_collapsed_by_interval.csv", index=False)
         logger.info("Saved collapsed visits to data_analytic/visits_long_collapsed_by_interval.{parquet,csv}")
+        logger.info(
+            "Merged ans/autonomic columns by shared suffix. merged_pairs=%d",
+            merged_suffix_pairs,
+        )
     else:
         collapsed = None
+        merged_suffix_pairs = 0
 
     metrics = {
         "rows_original": len(visits),
         "groups_subject_interval": visits.groupby(group_cols).ngroups,
         "groups_with_repeated_rows": len(repeated_groups),
         "collapse_requested": config.collapse,
+        "ans_autonomic_merged_pairs": merged_suffix_pairs,
     }
     print_kv("Interval collapse audit", metrics)
     print_step(7, "Append targeted EDA for visits/collapsed outputs to unified workbook")
