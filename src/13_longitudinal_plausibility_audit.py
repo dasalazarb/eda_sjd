@@ -551,6 +551,9 @@ def main() -> None:
 
     print_step(2, "Compute per-variable longitudinal plausibility metrics")
     summary = run_audit(df, min_obs_for_longitudinal=config.min_obs_for_longitudinal)
+    subject_col = _resolve_subject_col(df)
+    interval_col = resolve_canonical_column(df, "interval_name")
+    filtered_df = _select_patients_with_11d_and_15d(df.copy(), subject_col, interval_col)
 
     print_step(3, "Persist outputs")
     config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -563,6 +566,8 @@ def main() -> None:
     label_counts = summary["ml_longitudinal_label"].value_counts(dropna=False).rename_axis("label").reset_index(name="n_variables")
     labels_path = config.output_dir / "longitudinal_variable_label_counts.csv"
     label_counts.to_csv(labels_path, index=False)
+    filtered_df_path = config.output_dir / "patients_with_11d_and_15d.csv"
+    filtered_df.to_csv(filtered_df_path, index=False)
 
     print_kv(
         "Longitudinal plausibility audit",
@@ -570,9 +575,11 @@ def main() -> None:
             "input_path": str(config.input_path),
             "n_rows": len(df),
             "n_columns": df.shape[1],
+            "n_rows_patients_with_11d_and_15d": len(filtered_df),
             "n_variables_audited": len(summary),
             "summary_csv": str(summary_path),
             "label_counts_csv": str(labels_path),
+            "patients_with_11d_and_15d_csv": str(filtered_df_path),
         },
     )
     logger.info("Longitudinal plausibility audit completed: variables=%d", len(summary))
