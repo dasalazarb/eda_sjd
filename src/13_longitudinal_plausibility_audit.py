@@ -160,24 +160,18 @@ def _resolve_visit_time_col(df: pd.DataFrame) -> str:
 
 
 def _select_patients_with_11d_and_15d(df: pd.DataFrame, subject_col: str, interval_col: str) -> pd.DataFrame:
-    tmp = df[[subject_col, interval_col]].copy()
-    tmp["interval_norm"] = tmp[interval_col].astype("string").str.strip().str.lower()
+    interval_source_col = "ids__interval_name" if "ids__interval_name" in df.columns else interval_col
+    tmp = df[[subject_col, interval_source_col]].copy()
+    tmp["interval_txt"] = tmp[interval_source_col].astype("string")
 
-    is_11d = tmp["interval_norm"].str.startswith("11d", na=False)
-    is_15d = tmp["interval_norm"].str.startswith("15d", na=False)
-    is_optional_15d = is_15d & tmp["interval_norm"].str.contains("optional|opcional", na=False)
+    has_natural = tmp["interval_txt"].str.contains(r"\bnatural\b", case=False, na=False)
+    has_phase = tmp["interval_txt"].str.contains(r"\bphase\s*1\b|\bphase\s*2\b", case=False, na=False)
+    keep_row = has_natural | has_phase
 
-    per_patient = (
-        tmp.assign(is_11d=is_11d, is_15d_required=(is_15d & ~is_optional_15d))
-        .groupby(subject_col)[["is_11d", "is_15d_required"]]
-        .any()
-    )
-    eligible = per_patient.index[per_patient["is_11d"] & per_patient["is_15d_required"]]
+    per_patient = tmp.assign(has_phase=has_phase).groupby(subject_col)["has_phase"].any()
+    eligible = per_patient.index[per_patient]
 
-    work = df[df[subject_col].isin(eligible)].copy()
-    work_interval = work[interval_col].astype("string").str.strip().str.lower()
-    keep_mask = ~(work_interval.str.startswith("15d") & work_interval.str.contains("optional|opcional", na=False))
-    return work.loc[keep_mask].copy()
+    return df[df[subject_col].isin(eligible) & keep_row].copy()
 
 
 def _extract_category(variable_name: str) -> str | None:
