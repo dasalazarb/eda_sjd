@@ -110,6 +110,40 @@ def _collapse_column(series: pd.Series):
     return " | ".join(unique_values)
 
 
+def _parse_numeric_token(token: str) -> float | None:
+    candidate = token.strip().replace(",", ".")
+    if not candidate:
+        return None
+    try:
+        return float(candidate)
+    except ValueError:
+        return None
+
+
+def _format_numeric(value: float) -> object:
+    if pd.isna(value):
+        return pd.NA
+    if float(value).is_integer():
+        return int(value)
+    return float(value)
+
+
+def _collapse_age_at_visit_column(series: pd.Series):
+    normalized = _normalize_missing_values(series)
+    numeric_values: list[float] = []
+
+    for value in normalized.dropna():
+        for token in _tokenize_cell(value):
+            parsed = _parse_numeric_token(token)
+            if parsed is not None:
+                numeric_values.append(parsed)
+
+    if numeric_values:
+        return _format_numeric(max(numeric_values))
+
+    return _collapse_column(series)
+
+
 def _tokenize_cell(value: object) -> list[str]:
     if pd.isna(value):
         return []
@@ -162,6 +196,18 @@ def _merge_ans_autonomic_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
             out = out.drop(columns=drop_cols)
 
     return out, len(shared_suffixes)
+
+
+def _build_aggregated_columns(sorted_visits: pd.DataFrame, group_cols: list[str]) -> dict[str, object]:
+    aggregated: dict[str, object] = {}
+    for col in sorted_visits.columns:
+        if col in group_cols:
+            continue
+        if str(col).endswith("age_at_visit"):
+            aggregated[col] = _collapse_age_at_visit_column
+        else:
+            aggregated[col] = _collapse_column
+    return aggregated
 
 
 def _build_variable_audit(
@@ -334,11 +380,7 @@ def main() -> None:
         sort_cols = [c for c in sort_cols if c in visits.columns]
         sorted_visits = visits.sort_values(sort_cols)
 
-        aggregated = {
-            col: _collapse_column
-            for col in sorted_visits.columns
-            if col not in group_cols
-        }
+        aggregated = _build_aggregated_columns(sorted_visits, group_cols)
         collapsed = sorted_visits.groupby(group_cols, as_index=False).agg(aggregated)
         collapsed, merged_suffix_pairs = _merge_ans_autonomic_columns(collapsed)
         collapsed.to_parquet(ANALYTIC_DIR / "visits_long_collapsed_by_interval.parquet", index=False)
