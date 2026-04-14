@@ -17,16 +17,82 @@ class AuditConfig:
     min_obs_for_longitudinal: int
 
 
-KEY_CANONICALS = {
-    "subject_number",
-    "patient_record_number",
-    "interval_name",
-    "visit_date",
-    "visit_datetime",
-    "source_protocol",
-    "source_file",
-    "row_id_raw",
+CODEBOOK_DOMAINS = {
+    "clinical_disease_evaluation": {
+        "essdai": 13,
+        "essdai-_r": 13,
+        "esspri_questionnaire": 18,
+        "visit_summary_-_2016_classification_criteria": 26,
+        "visit_summary_form": 11,
+        "sjogrens_syndrome_history": 29,
+        "sjogrens_syndrome_disease_damage_index": 15,
+        "subjective_part_of_ea_criteria": 6,
+    },
+    "ocular_and_oral": {
+        "eye_examination": 16,
+        "oral_exam_form": 180,
+        "patient_dry_mouth_questionnaire": 37,
+        "salivary_flow_form": 40,
+        "wus_only": 4,
+    },
+    "imaging_and_biopsy": {
+        "biopsy_pathology": 23,
+        "sg-us_grading_scale_theander_mandl_2014": 12,
+        "sgus_grading_scale_jousse-joulin_2017": 45,
+        "sgus_grading_scale_omeract_2021": 10,
+        "scintigraphy_technetium_scan": 9,
+        "ultrasound": 2,
+        "mucosal_biopsy": 2,
+        "skin_biopsy": 3,
+        "buccal_swab_form": 3,
+    },
+    "fatigue_and_functional_symptoms": {
+        "multidimensional_assessment_of_fatigue_scale": 28,
+        "profile_of_fatigue_and_discomfort": 19,
+        "mood_questionnaire": 20,
+        "sf-36_health_survey": 36,
+        "ans": 52,
+        "ansar": 141,
+    },
+    "medical_history_and_background": {
+        "past_medical_history": 109,
+        "family_history": 33,
+        "reproductive_history": 10,
+        "social_history": 55,
+        "medications": 60,
+        "rheumatological_comorbidities": 57,
+    },
+    "specimens_and_procedures": {
+        "adverse_events": 303,
+        "oral_rinse_plaque_collection": 4,
+        "oral_rinse": 1,
+        "plaque_collection": 2,
+        "parotid_saline_irrigation": 2,
+        "dna_form": 4,
+        "ipscs_specimen": 2,
+    },
+    "administrative_and_protocol": {
+        "physical_examination": 145,
+        "physical_examination-initial_evaluation": 192,
+        "systems_review_for_physician": 161,
+        "vital_signs": 9,
+        "inclusion_exclusion_checklist": 5,
+        "inclusion_exclusion_criteria": 9,
+        "protocol_deviations": 5,
+        "unanticipated_problem": 13,
+        "patient_death_documentation": 3,
+        "ccgo": 1,
+        "cris_lab_form": 2,
+        "range_validation_form": 3,
+    },
 }
+
+CATEGORY_TO_DOMAIN = {
+    category: domain
+    for domain, categories in CODEBOOK_DOMAINS.items()
+    for category in categories
+}
+RELEVANT_CATEGORIES = set(CATEGORY_TO_DOMAIN)
 
 
 def _parse_args() -> AuditConfig:
@@ -91,6 +157,32 @@ def _resolve_visit_time_col(df: pd.DataFrame) -> str:
         col = resolve_canonical_column(df, "visit_date")
         df[col] = pd.to_datetime(df[col], errors="coerce")
         return col
+
+
+def _select_patients_with_11d_and_15d(df: pd.DataFrame, subject_col: str, interval_col: str) -> pd.DataFrame:
+    interval_source_col = "ids__interval_name" if "ids__interval_name" in df.columns else interval_col
+    tmp = df[[subject_col, interval_source_col]].copy()
+    tmp["interval_txt"] = tmp[interval_source_col].astype("string")
+
+    has_natural = tmp["interval_txt"].str.contains(r"\bnatural\b", case=False, na=False)
+    has_phase = tmp["interval_txt"].str.contains(r"\bphase\s*1\b|\bphase\s*2\b", case=False, na=False)
+    keep_row = has_natural | has_phase
+
+    per_patient = tmp.assign(has_phase=has_phase).groupby(subject_col)["has_phase"].any()
+    eligible = per_patient.index[per_patient]
+
+    return df[df[subject_col].isin(eligible) & keep_row].copy()
+
+
+def _extract_category(variable_name: str) -> str | None:
+    if "__" not in str(variable_name):
+        return None
+    return str(variable_name).split("__", 1)[0]
+
+
+def _is_relevant_clinical_variable(variable_name: str) -> bool:
+    category = _extract_category(variable_name)
+    return bool(category and category in RELEVANT_CATEGORIES)
 
 
 def _build_base_order(df: pd.DataFrame, subject_col: str, interval_col: str, visit_time_col: str) -> pd.DataFrame:
@@ -355,7 +447,7 @@ def run_audit(df: pd.DataFrame, min_obs_for_longitudinal: int = 2) -> pd.DataFra
     interval_col = resolve_canonical_column(df, "interval_name")
     visit_time_col = _resolve_visit_time_col(df)
 
-    work = df.copy()
+    work = _select_patients_with_11d_and_15d(df.copy(), subject_col, interval_col)
     work[visit_time_col] = pd.to_datetime(work[visit_time_col], errors="coerce")
     ordered = _build_base_order(work, subject_col, interval_col, visit_time_col)
     work = work.loc[ordered.index].copy()
@@ -364,7 +456,7 @@ def run_audit(df: pd.DataFrame, min_obs_for_longitudinal: int = 2) -> pd.DataFra
     total_patients = int(work[subject_col].nunique(dropna=True))
     total_visits = int(len(work))
 
-    candidate_vars = [c for c in df.columns if c not in KEY_CANONICALS and not str(c).startswith("ids__")]
+    candidate_vars = [c for c in work.columns if _is_relevant_clinical_variable(c) and not str(c).startswith("ids__")]
     # Ensure deterministic order
     candidate_vars = sorted(dict.fromkeys(candidate_vars))
 
@@ -403,8 +495,11 @@ def run_audit(df: pd.DataFrame, min_obs_for_longitudinal: int = 2) -> pd.DataFra
 
         consistency = extra.get("consistency_score", np.nan)
 
+        category = _extract_category(var)
         row = {
             "variable": var,
+            "category": category,
+            "major_category": CATEGORY_TO_DOMAIN.get(category),
             "variable_type": var_type,
             "patients_with_ge1": ge1,
             "pct_patients_ge1": round(100 * ge1 / total_patients, 2) if total_patients else np.nan,
