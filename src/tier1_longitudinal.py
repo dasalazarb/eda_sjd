@@ -115,7 +115,18 @@ def build_tier1_panel(df: pd.DataFrame) -> pd.DataFrame:
 
     panel = panel.sort_values(["ids__patient_record_number", "time_years"]).reset_index(drop=True)
     assert (panel["time_years"] >= 0).all(), "time_years must be non-negative"
-    assert not panel.duplicated(["ids__patient_record_number", "visit_order"]).any(), "Duplicate patient/visit_order"
+    dups = panel.duplicated(["ids__patient_record_number", "visit_order"], keep=False)
+    if dups.any():
+        LOGGER.warning(
+            "%d rows share a (patient_record_number, visit_order) pair — "
+            "keeping last occurrence per pair. Review source data for duplicates.",
+            dups.sum(),
+        )
+        panel = (
+            panel.sort_values(["ids__patient_record_number", "visit_order"])
+            .drop_duplicates(["ids__patient_record_number", "visit_order"], keep="last")
+            .reset_index(drop=True)
+        )
     return panel
 
 
@@ -209,11 +220,13 @@ def run_lmm_salivary(
 
     re_rows: list[dict[str, Any]] = []
     for pid, re in result.random_effects.items():
+        # statsmodels MixedLM with re_formula="~time_years" labels the random
+        # intercept "Intercept" and the slope "time_years" in the returned Series.
         re_rows.append(
             {
                 "patient_id": pid,
-                "re_intercept": float(re.get("Group", np.nan)) if hasattr(re, "get") else float(re.iloc[0]),
-                "re_slope_time_years": float(re.get("time_years", np.nan)) if hasattr(re, "get") else float(re.iloc[-1]),
+                "re_intercept": float(re.get("Intercept", re.iloc[0])),
+                "re_slope_time_years": float(re.get("time_years", re.iloc[-1])),
             }
         )
     re_df = pd.DataFrame(re_rows)
@@ -479,11 +492,19 @@ def run_km_time_to_event(panel: pd.DataFrame, event_definitions: dict[str, dict[
             continue
         kmf = KaplanMeierFitter(label=name)
         kmf.fit(durations=ev_df["duration"], event_observed=ev_df["event"])
-        ci = kmf.confidence_interval_survival_function_.copy()
+        med = float(kmf.median_survival_time_)
+        # CI at the median: find the row in the CI table closest to the median
+        ci_table = kmf.confidence_interval_survival_function_
+        idx_at_med = ci_table.index[ci_table.index <= med]
+        if len(idx_at_med) > 0:
+            ci_row = ci_table.loc[idx_at_med[-1]]
+            median_ci = (float(ci_row.iloc[0]), float(ci_row.iloc[1]))
+        else:
+            median_ci = (np.nan, np.nan)
         out[name] = {
             "kmf": kmf,
-            "median_time_years": float(kmf.median_survival_time_),
-            "median_ci": (float(ci.iloc[:, 0].min()), float(ci.iloc[:, 1].max())),
+            "median_time_years": med,
+            "median_ci": median_ci,
             "n_events": int(ev_df["event"].sum()),
             "n_censored": int((1 - ev_df["event"]).sum()),
         }
@@ -496,6 +517,7 @@ def plot_tier1_results(
     gee_results: dict[str, Any],
     cluster_df: pd.DataFrame,
     km_results: dict[str, Any],
+    eye_lmm_re_df: pd.DataFrame | None = None,
     output_dir: str = "./figures",
 ) -> None:
     """Create and save Tier 1 visualizations.
@@ -504,8 +526,10 @@ def plot_tier1_results(
         panel: Derived panel.
         lmm_results: LMM output for whole unstimulated flow.
         gee_results: GEE output for Schirmer pair.
-        cluster_df: Cluster assignments.
+        cluster_df: Cluster assignments (salivary trajectories).
         km_results: KM outputs.
+        eye_lmm_re_df: Per-patient random effects from LMM on sch_l (for FIG6).
+                       If None, FIG6 is skipped.
         output_dir: Figure output folder.
     """
     out = Path(output_dir)
@@ -524,7 +548,7 @@ def plot_tier1_results(
         pids = cluster_df.loc[cluster_df["cluster_label"] == c, "patient_id"]
         sub = panel[panel["ids__patient_record_number"].isin(pids)]
         sns.lineplot(data=sub, x="time_years", y="salivary_flow_form__flow_whole_unstim", units="ids__patient_record_number", estimator=None, alpha=0.25, color="gray", ax=ax)
-        sns.lineplot(data=sub, x="time_years", y="salivary_flow_form__flow_whole_unstim", estimator="mean", ci=95, color="blue", ax=ax)
+        sns.lineplot(data=sub, x="time_years", y="salivary_flow_form__flow_whole_unstim", estimator="mean", errorbar=("ci", 95), color="blue", ax=ax)
         ax.set_title(f"{c} (n={pids.nunique()})")
     fig.tight_layout(); fig.savefig(out / "trajectory_clusters.png", dpi=300); plt.close(fig)
 
@@ -552,14 +576,36 @@ def plot_tier1_results(
         add_at_risk_counts(*kmfs, ax=ax)
     fig.tight_layout(); fig.savefig(out / "km_curves.png", dpi=300); plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    x = cluster_df["re_slope_time_years"]
-    y = cluster_df["re_slope_time_years"]
-    sns.scatterplot(x=x, y=y, hue=cluster_df["cluster_label"], ax=ax)
-    rho, pval = spearmanr(x, y, nan_policy="omit")
-    ax.text(0.05, 0.95, f"Spearman r={rho:.3f}, p={pval:.3g}", transform=ax.transAxes, va="top")
-    ax.set_xlabel("Salivary slope"); ax.set_ylabel("Schirmer slope")
-    fig.tight_layout(); fig.savefig(out / "salivary_eye_correlation.png", dpi=300); plt.close(fig)
+    # FIG 6 — salivary slope vs Schirmer slope per patient
+    if eye_lmm_re_df is not None and not eye_lmm_re_df.empty:
+        merged_slopes = cluster_df[["patient_id", "re_slope_time_years", "cluster_label"]].merge(
+            eye_lmm_re_df[["patient_id", "re_slope_time_years"]].rename(
+                columns={"re_slope_time_years": "re_slope_sch_l"}
+            ),
+            on="patient_id",
+            how="inner",
+        )
+        fig, ax = plt.subplots(figsize=(8, 6))
+        sns.scatterplot(
+            data=merged_slopes,
+            x="re_slope_time_years",
+            y="re_slope_sch_l",
+            hue="cluster_label",
+            ax=ax,
+        )
+        valid = merged_slopes[["re_slope_time_years", "re_slope_sch_l"]].dropna()
+        if len(valid) >= 3:
+            rho, pval = spearmanr(valid["re_slope_time_years"], valid["re_slope_sch_l"])
+            ax.text(0.05, 0.95, f"Spearman r={rho:.3f}, p={pval:.3g}", transform=ax.transAxes, va="top")
+        ax.set_xlabel("Salivary slope (flow_whole_unstim, per year)")
+        ax.set_ylabel("Schirmer slope (sch_l, mm/year)")
+        ax.set_title("Salivary vs. lacrimal rate of change per patient")
+        fig.tight_layout()
+        fig.savefig(out / "salivary_eye_correlation.png", dpi=300)
+        plt.close(fig)
+        LOGGER.info("FIG6 saved: salivary_eye_correlation.png (%d patients plotted)", len(merged_slopes))
+    else:
+        LOGGER.warning("FIG6 skipped: eye_lmm_re_df not provided. Run run_lmm_salivary on sch_l and pass the result.")
 
 
 def main(input_path: str, output_dir: str = "./tier1_output") -> None:
@@ -617,8 +663,22 @@ def main(input_path: str, output_dir: str = "./tier1_output") -> None:
 
     km_results = run_km_time_to_event(panel)
 
+    # Run a separate LMM on sch_l to obtain per-patient Schirmer slopes for FIG6.
+    # GEE only yields population-level slopes; we need individual random effects here.
+    LOGGER.info("Running LMM on sch_l for per-patient eye slopes (FIG6)...")
+    lmm_sch = run_lmm_salivary(
+        panel,
+        outcome="eye_examination__sch_l",
+        covariates=["ids__age_at_visit", "ids__sex"],
+    )
+    eye_lmm_re_df = lmm_sch["random_effects_df"] if lmm_sch is not None else None
+
     sch_gee = gee_all.get(("eye_examination__sch_l", "eye_examination__sch_r")) or {}
-    plot_tier1_results(panel, primary_lmm, sch_gee, cluster_df, km_results, output_dir=str(outdir / "figures"))
+    plot_tier1_results(
+        panel, primary_lmm, sch_gee, cluster_df, km_results,
+        eye_lmm_re_df=eye_lmm_re_df,
+        output_dir=str(outdir / "figures"),
+    )
 
     if fixed_rows:
         pd.concat(fixed_rows, ignore_index=True).to_csv(outdir / "lmm_fixed_effects_all.csv", index=False)
@@ -626,6 +686,6 @@ def main(input_path: str, output_dir: str = "./tier1_output") -> None:
 
 
 if __name__ == "__main__":
-    DEFAULT_INPUT = "data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet"
+    DEFAULT_INPUT = "reports/longitudinal_plausibility/patients_with_11d_and_15d.parquet"
     DEFAULT_OUTPUT = "./tier1_output"
     main(DEFAULT_INPUT, DEFAULT_OUTPUT)
