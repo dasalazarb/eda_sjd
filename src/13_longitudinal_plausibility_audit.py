@@ -29,6 +29,83 @@ KEY_CANONICALS = {
 }
 
 
+CODEBOOK_DOMAINS = {
+    "clinical_disease_evaluation": {
+        "essdai": 13,
+        "essdai-_r": 13,
+        "esspri_questionnaire": 18,
+        "visit_summary_-_2016_classification_criteria": 26,
+        "visit_summary_form": 11,
+        "sjogrens_syndrome_history": 29,
+        "sjogrens_syndrome_disease_damage_index": 15,
+        "subjective_part_of_ea_criteria": 6,
+    },
+    "ocular_and_oral": {
+        "eye_examination": 16,
+        "oral_exam_form": 180,
+        "patient_dry_mouth_questionnaire": 37,
+        "salivary_flow_form": 40,
+        "wus_only": 4,
+    },
+    "imaging_and_biopsy": {
+        "biopsy_pathology": 23,
+        "sg-us_grading_scale_theander_mandl_2014": 12,
+        "sgus_grading_scale_jousse-joulin_2017": 45,
+        "sgus_grading_scale_omeract_2021": 10,
+        "scintigraphy_technetium_scan": 9,
+        "ultrasound": 2,
+        "mucosal_biopsy": 2,
+        "skin_biopsy": 3,
+        "buccal_swab_form": 3,
+    },
+    "fatigue_and_functional_symptoms": {
+        "multidimensional_assessment_of_fatigue_scale": 28,
+        "profile_of_fatigue_and_discomfort": 19,
+        "mood_questionnaire": 20,
+        "sf-36_health_survey": 36,
+        "ans": 52,
+        "ansar": 141,
+    },
+    "medical_history_and_background": {
+        "past_medical_history": 109,
+        "family_history": 33,
+        "reproductive_history": 10,
+        "social_history": 55,
+        "medications": 60,
+        "rheumatological_comorbidities": 57,
+    },
+    "specimens_and_procedures": {
+        "adverse_events": 303,
+        "oral_rinse_plaque_collection": 4,
+        "oral_rinse": 1,
+        "plaque_collection": 2,
+        "parotid_saline_irrigation": 2,
+        "dna_form": 4,
+        "ipscs_specimen": 2,
+    },
+    "administrative_and_protocol": {
+        "physical_examination": 145,
+        "physical_examination-initial_evaluation": 192,
+        "systems_review_for_physician": 161,
+        "vital_signs": 9,
+        "inclusion_exclusion_checklist": 5,
+        "inclusion_exclusion_criteria": 9,
+        "protocol_deviations": 5,
+        "unanticipated_problem": 13,
+        "patient_death_documentation": 3,
+        "ccgo": 1,
+        "cris_lab_form": 2,
+        "range_validation_form": 3,
+    },
+}
+
+LONGITUDINAL_PREFIXES = tuple(
+    prefix
+    for domain_prefixes in CODEBOOK_DOMAINS.values()
+    for prefix in domain_prefixes
+)
+
+
 def _parse_args() -> AuditConfig:
     parser = argparse.ArgumentParser(
         description=(
@@ -76,6 +153,32 @@ def _load_table(path: Path) -> pd.DataFrame:
     if suffix in {".xlsx", ".xls", ".xlsm"}:
         return pd.read_excel(path)
     raise ValueError(f"Unsupported input format: {path}")
+
+
+def _is_target_interval(interval_value: object, target: str) -> bool:
+    txt = str(interval_value).strip().lower()
+    if txt == "" or txt == "nan":
+        return False
+    if target == "11d":
+        return txt.startswith("11d")
+    if target == "15d":
+        return txt.startswith("15d") and "optional" not in txt
+    return False
+
+
+def _filter_subjects_in_11d_and_15d(df: pd.DataFrame, subject_col: str, interval_col: str) -> pd.DataFrame:
+    tmp = df[[subject_col, interval_col]].copy()
+    tmp["is_11d"] = tmp[interval_col].map(lambda x: _is_target_interval(x, "11d"))
+    tmp["is_15d"] = tmp[interval_col].map(lambda x: _is_target_interval(x, "15d"))
+
+    eligible_subjects = tmp.groupby(subject_col).agg(has_11d=("is_11d", "any"), has_15d=("is_15d", "any"))
+    eligible_subjects = eligible_subjects[eligible_subjects["has_11d"] & eligible_subjects["has_15d"]].index
+    return df[df[subject_col].isin(eligible_subjects)].copy()
+
+
+def _is_longitudinal_variable(variable_name: str) -> bool:
+    lower_name = str(variable_name).lower()
+    return any(lower_name.startswith(prefix) for prefix in LONGITUDINAL_PREFIXES)
 
 
 def _resolve_subject_col(df: pd.DataFrame) -> str:
@@ -355,7 +458,9 @@ def run_audit(df: pd.DataFrame, min_obs_for_longitudinal: int = 2) -> pd.DataFra
     interval_col = resolve_canonical_column(df, "interval_name")
     visit_time_col = _resolve_visit_time_col(df)
 
-    work = df.copy()
+    work = _filter_subjects_in_11d_and_15d(df, subject_col, interval_col)
+    if work.empty:
+        return pd.DataFrame()
     work[visit_time_col] = pd.to_datetime(work[visit_time_col], errors="coerce")
     ordered = _build_base_order(work, subject_col, interval_col, visit_time_col)
     work = work.loc[ordered.index].copy()
@@ -364,7 +469,9 @@ def run_audit(df: pd.DataFrame, min_obs_for_longitudinal: int = 2) -> pd.DataFra
     total_patients = int(work[subject_col].nunique(dropna=True))
     total_visits = int(len(work))
 
-    candidate_vars = [c for c in df.columns if c not in KEY_CANONICALS and not str(c).startswith("ids__")]
+    candidate_vars = [
+        c for c in work.columns if c not in KEY_CANONICALS and not str(c).startswith("ids__") and _is_longitudinal_variable(str(c))
+    ]
     # Ensure deterministic order
     candidate_vars = sorted(dict.fromkeys(candidate_vars))
 
