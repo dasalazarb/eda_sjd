@@ -626,6 +626,6 @@ def main(input_path: str, output_dir: str = "./tier1_output") -> None:
 
 
 if __name__ == "__main__":
-    DEFAULT_INPUT = "visits_long_collapsed_by_interval_codebook_corrected.parquet"
+    DEFAULT_INPUT = "data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet"
     DEFAULT_OUTPUT = "./tier1_output"
     main(DEFAULT_INPUT, DEFAULT_OUTPUT)
