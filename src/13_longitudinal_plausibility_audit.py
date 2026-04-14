@@ -568,6 +568,8 @@ def main() -> None:
     label_counts.to_csv(labels_path, index=False)
     filtered_df_path = config.output_dir / "patients_with_11d_and_15d.csv"
     filtered_df.to_csv(filtered_df_path, index=False)
+    filtered_df_parquet_path = config.output_dir / "patients_with_11d_and_15d.parquet"
+    filtered_df.to_parquet(filtered_df_parquet_path, index=False)
 
     print_kv(
         "Longitudinal plausibility audit",
@@ -580,6 +582,7 @@ def main() -> None:
             "summary_csv": str(summary_path),
             "label_counts_csv": str(labels_path),
             "patients_with_11d_and_15d_csv": str(filtered_df_path),
+            "patients_with_11d_and_15d_parquet": str(filtered_df_parquet_path),
         },
     )
     logger.info("Longitudinal plausibility audit completed: variables=%d", len(summary))
