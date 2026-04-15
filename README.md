@@ -68,6 +68,9 @@ python src/13_longitudinal_plausibility_audit.py \
   --input-path data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet
 python src/16_missingness_patterns.py \
   --input-path data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet
+python src/18_recode_longitudinal_values_by_type.py \
+  --input-path data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet \
+  --variable-summary-path reports/longitudinal_plausibility/longitudinal_variable_summary.csv
 ```
 
 Every script:
@@ -140,6 +143,11 @@ Each script prints an English, step-by-step console narrative with numbered step
    - Evalúa faltantes por variable y por categoría a partir de la convención `{categoria}_{variable}` o `{categoria}__{variable}`.
    - Identifica patrones de missingness globales y por categoría (top patrones más frecuentes).
    - Exporta top variables con más/menos faltantes y recomendaciones adicionales para análisis de calidad de datos.
+14. `18_recode_longitudinal_values_by_type.py`
+   - Recodifica los valores reales de `visits_long_collapsed_by_interval_codebook_corrected` usando `reports/longitudinal_plausibility/longitudinal_variable_summary.csv` (columna `variable_type`).
+   - En `_patient_record_number` genera identificadores secuenciales (`pt1`, `pt2`, ...).
+   - En `_interval_name` normaliza intervalos principales (`v1`..`v6`) y opcionales (`v1 opt #`, `opt #`).
+   - Guarda un dataset recodificado en `data_analytic/visits_long_collapsed_by_interval_codebook_type_recode.parquet`.
 
 ## Operational definitions encoded in the pipeline
 
@@ -201,6 +209,7 @@ Reports:
 - `reports/missingness/variables_most_missing_top.csv`
 - `reports/missingness/variables_least_missing_top.csv`
 - `reports/missingness/missingness_report.xlsx`
+- `data_analytic/visits_long_collapsed_by_interval_codebook_type_recode.parquet`
 
 ## EDA unificada (`reports/eda_unificado.xlsx`)
 
