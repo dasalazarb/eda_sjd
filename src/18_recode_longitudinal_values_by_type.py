@@ -67,24 +67,23 @@ def _load_table(path: Path) -> pd.DataFrame:
 def _save_table(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     suffix = path.suffix.lower()
+    csv_path = path.with_suffix(".csv")
 
     if suffix == ".parquet":
         df.to_parquet(path, index=False)
-        csv_path = path.with_suffix(".csv")
         df.to_csv(csv_path, index=False)
-        return
-
-    if suffix == ".csv":
+    elif suffix == ".csv":
         df.to_csv(path, index=False)
         parquet_path = path.with_suffix(".parquet")
         df.to_parquet(parquet_path, index=False)
-        return
-
-    if suffix in {".xlsx", ".xls", ".xlsm"}:
+    elif suffix in {".xlsx", ".xls", ".xlsm"}:
         df.to_excel(path, index=False)
-        return
+    else:
+        raise ValueError(f"Formato de salida no soportado: {suffix}")
 
-    raise ValueError(f"Formato de salida no soportado: {suffix}")
+    # Siempre exportar también a CSV para facilitar inspección/intercambio.
+    if suffix != ".csv":
+        df.to_csv(csv_path, index=False)
 
 
 def _resolve_special_column(df: pd.DataFrame, preferred_names: list[str], suffixes: list[str]) -> str | None:
@@ -300,6 +299,7 @@ def main() -> None:
             "interval_values_changed": n_interval_changes,
             "columns_recoded_by_variable_type": recoded_columns,
             "output_path": cfg.output_path,
+            "output_csv_path": cfg.output_path.with_suffix(".csv"),
         },
     )
 
