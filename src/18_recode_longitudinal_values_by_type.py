@@ -232,104 +232,6 @@ def _apply_variable_type_recode(df: pd.DataFrame, variable_type_map: dict[str, s
     return recoded_columns
 
 
-def _is_integer_token(text: str) -> bool:
-    return bool(re.fullmatch(r"[+-]?\d+", text))
-
-
-def _is_numeric_token(text: str) -> bool:
-    return bool(re.fullmatch(r"[+-]?\d+(\.\d+)?", text))
-
-
-def _normalize_boolean_token(text: str) -> str:
-    return text.strip().lower().replace("_", "").replace("-", "")
-
-
-def _is_boolean_token(text: str) -> bool:
-    token = _normalize_boolean_token(text)
-    valid = {
-        "0",
-        "1",
-        "true",
-        "false",
-        "t",
-        "f",
-        "yes",
-        "no",
-        "y",
-        "n",
-        "si",
-        "s",
-    }
-    return token in valid
-
-
-def _infer_unmapped_structure(series: pd.Series) -> str:
-    non_missing = series[_non_missing_mask(series)]
-    if non_missing.empty:
-        return "unknown"
-
-    as_text = non_missing.astype("string").str.strip()
-    if bool(as_text.map(_is_boolean_token).all()):
-        return "boolean"
-    if bool(as_text.map(_is_integer_token).all()):
-        return "integer"
-    if bool(as_text.map(_is_numeric_token).all()):
-        return "numeric"
-
-    parsed_dates = pd.to_datetime(as_text, errors="coerce", utc=False)
-    if float(parsed_dates.notna().mean()) >= 0.95:
-        return "date"
-
-    return "string"
-
-
-def _replace_invalid_unmapped_values(series: pd.Series, inferred_structure: str) -> tuple[pd.Series, int]:
-    out = series.copy()
-    non_missing = _non_missing_mask(series)
-    if not bool(non_missing.any()):
-        return out, 0
-
-    values = series[non_missing].astype("string").str.strip()
-    invalid_mask = pd.Series(False, index=series.index)
-
-    if inferred_structure == "boolean":
-        invalid_mask.loc[values.index] = ~values.map(_is_boolean_token)
-    elif inferred_structure == "integer":
-        invalid_mask.loc[values.index] = ~values.map(_is_integer_token)
-    elif inferred_structure == "numeric":
-        invalid_mask.loc[values.index] = ~values.map(_is_numeric_token)
-    elif inferred_structure == "date":
-        parsed_dates = pd.to_datetime(values, errors="coerce", utc=False)
-        invalid_mask.loc[values.index] = parsed_dates.isna()
-    else:
-        # Para texto/unknown no invalidamos por patrón: solo limpieza de blancos.
-        invalid_mask.loc[values.index] = False
-
-    replaced = int(invalid_mask.sum())
-    if replaced > 0:
-        out.loc[invalid_mask] = pd.NA
-    return out, replaced
-
-
-def _clean_unmapped_columns(df: pd.DataFrame, variable_type_map: dict[str, str], excluded_columns: set[str]) -> tuple[int, int]:
-    cleaned_columns = 0
-    replaced_values = 0
-
-    for col in df.columns.astype(str):
-        if col in excluded_columns or col in variable_type_map:
-            continue
-
-        inferred = _infer_unmapped_structure(df[col])
-        cleaned, replaced = _replace_invalid_unmapped_values(df[col], inferred)
-        df[col] = cleaned
-
-        if replaced > 0:
-            cleaned_columns += 1
-            replaced_values += replaced
-
-    return cleaned_columns, replaced_values
-
-
 def main() -> None:
     cfg = _parse_args()
     logger = setup_logger("18_recode_longitudinal_values_by_type")
@@ -387,14 +289,7 @@ def main() -> None:
     print_step(4, "Recodificando el resto de variables según variable_type")
     recoded_columns = _apply_variable_type_recode(df, variable_type_map, excluded_columns={patient_col, interval_col})
 
-    print_step(5, "Evaluando estructura de variables no mapeadas y reemplazando valores no válidos")
-    cleaned_unmapped_cols, replaced_unmapped_values = _clean_unmapped_columns(
-        df,
-        variable_type_map,
-        excluded_columns={patient_col, interval_col},
-    )
-
-    print_step(6, "Guardando dataset recodificado")
+    print_step(5, "Guardando dataset recodificado")
     _save_table(df, cfg.output_path)
 
     print_kv(
@@ -403,26 +298,18 @@ def main() -> None:
             "patient_ids_created": n_patients,
             "interval_values_changed": n_interval_changes,
             "columns_recoded_by_variable_type": recoded_columns,
-            "unmapped_columns_cleaned": cleaned_unmapped_cols,
-            "unmapped_invalid_values_replaced": replaced_unmapped_values,
             "output_path": cfg.output_path,
             "output_csv_path": cfg.output_path.with_suffix(".csv"),
         },
     )
 
     logger.info(
-        (
-            "Recodificación completada | input=%s | output=%s | n_patients=%d | "
-            "interval_changes=%d | cols_by_type=%d | unmapped_cols_cleaned=%d | "
-            "unmapped_values_replaced=%d"
-        ),
+        "Recodificación completada | input=%s | output=%s | n_patients=%d | interval_changes=%d | cols_by_type=%d",
         cfg.input_path,
         cfg.output_path,
         n_patients,
         n_interval_changes,
         recoded_columns,
-        cleaned_unmapped_cols,
-        replaced_unmapped_values,
     )
 
 
