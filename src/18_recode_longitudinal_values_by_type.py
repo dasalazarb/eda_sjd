@@ -27,7 +27,7 @@ def _parse_args() -> RecodeConfig:
     parser.add_argument(
         "--input-path",
         type=Path,
-        default=ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_corrected.parquet",
+        default=REPORTS_DIR / "longitudinal_plausibility" / "patients_with_11d_and_15d.csv",
         help="Ruta de entrada del dataset longitudinal (parquet/csv/xlsx).",
     )
     parser.add_argument(
