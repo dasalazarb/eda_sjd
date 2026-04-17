@@ -93,10 +93,10 @@ def _normalize_id(value: object) -> str:
 
 
 def _build_patient_id_set(df: pd.DataFrame) -> set[str]:
-    required_col = "ids_patient_record_number"
+    required_col = "ids__patient_record_number"
     if required_col not in df.columns:
         raise KeyError(
-            "No se encontró la columna requerida 'ids_patient_record_number' en el archivo de pacientes."
+            "No se encontró la columna requerida 'ids__patient_record_number' en el archivo de pacientes."
         )
 
     patient_ids = df[required_col].map(_normalize_id)
