@@ -37,10 +37,7 @@ def _parse_args() -> FilterConfig:
         "--patients-path",
         type=Path,
         default=REPORTS_DIR / "longitudinal_plausibility" / "patients_with_11d_and_15d.parquet",
-        help=(
-            "Ruta al parquet/csv con la columna ids_patient_record_number. "
-            "Si no existe, se intenta automáticamente en data_raw/."
-        ),
+        help="Ruta al parquet/csv con la columna ids_patient_record_number.",
     )
     parser.add_argument(
         "--unique-ordersets-path",
@@ -74,14 +71,7 @@ def _parse_args() -> FilterConfig:
 def _resolve_patients_path(preferred_path: Path) -> Path:
     if preferred_path.exists():
         return preferred_path
-
-    fallback = RAW_DIR / "patients_with_11d_and_15d.parquet"
-    if fallback.exists():
-        return fallback
-
-    raise FileNotFoundError(
-        "No se encontró patients_with_11d_and_15d.parquet en la ruta indicada ni en data_raw/."
-    )
+    raise FileNotFoundError(f"No existe el archivo de pacientes: {preferred_path}")
 
 
 def _load_patients_table(path: Path) -> pd.DataFrame:
@@ -178,7 +168,7 @@ def _iter_csv_files(input_dirs: list[Path]) -> list[Path]:
     for input_dir in input_dirs:
         if not input_dir.exists():
             continue
-        files.extend(sorted(input_dir.glob("*.csv")))
+        files.extend(sorted(input_dir.rglob("*.csv")))
     return files
 
 
