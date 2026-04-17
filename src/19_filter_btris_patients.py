@@ -92,6 +92,18 @@ def _normalize_id(value: object) -> str:
     return text
 
 
+def _normalize_patient_record_number(value: object) -> set[str]:
+    normalized = _normalize_id(value)
+    if not normalized:
+        return set()
+
+    normalized_variants = {normalized}
+    if normalized.startswith("0"):
+        without_leading_zeros = normalized.lstrip("0") or "0"
+        normalized_variants.add(without_leading_zeros)
+    return normalized_variants
+
+
 def _normalize_column_name(name: object) -> str:
     text = str(name) if name is not None else ""
     # Limpieza de BOM y espacios frecuentes invisibles en encabezados de Excel/CSV.
@@ -117,9 +129,10 @@ def _build_patient_id_set(df: pd.DataFrame) -> set[str]:
             "No se encontró la columna requerida 'ids__patient_record_number' en el archivo de pacientes."
         )
 
-    patient_ids = df[source_col].map(_normalize_id)
-    patient_ids = patient_ids[patient_ids != ""]
-    return set(patient_ids.tolist())
+    patient_ids: set[str] = set()
+    for value in df[source_col].tolist():
+        patient_ids.update(_normalize_patient_record_number(value))
+    return patient_ids
 
 
 def _load_allowed_order_names(path: Path) -> set[str]:
