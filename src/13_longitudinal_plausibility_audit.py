@@ -159,6 +159,16 @@ def _resolve_visit_time_col(df: pd.DataFrame) -> str:
         return col
 
 
+def _exclude_healthy_volunteers(df: pd.DataFrame) -> pd.DataFrame:
+    subject_role_col = "ids__subject_role"
+    if subject_role_col not in df.columns:
+        return df
+
+    role = df[subject_role_col].astype("string").str.strip().str.lower()
+    hv_mask = role.isin({"healthy volunteer", "hv"})
+    return df.loc[~hv_mask].copy()
+
+
 def _select_patients_with_11d_and_15d(df: pd.DataFrame, subject_col: str, interval_col: str) -> pd.DataFrame:
     interval_source_col = "ids__interval_name" if "ids__interval_name" in df.columns else interval_col
     tmp = df[[subject_col, interval_source_col]].copy()
@@ -443,6 +453,7 @@ def _classify(row: pd.Series) -> str:
 
 
 def run_audit(df: pd.DataFrame, min_obs_for_longitudinal: int = 2) -> pd.DataFrame:
+    df = _exclude_healthy_volunteers(df)
     subject_col = _resolve_subject_col(df)
     interval_col = resolve_canonical_column(df, "interval_name")
     visit_time_col = _resolve_visit_time_col(df)
@@ -548,6 +559,7 @@ def main() -> None:
 
     print_step(1, "Load source dataset")
     df = _load_table(config.input_path)
+    df = _exclude_healthy_volunteers(df)
 
     print_step(2, "Compute per-variable longitudinal plausibility metrics")
     summary = run_audit(df, min_obs_for_longitudinal=config.min_obs_for_longitudinal)
