@@ -33,6 +33,7 @@ PREFIX_TO_DATE_COLUMNS: dict[str, list[str]] = {
 }
 
 IGNORED_PREFIXES = {"demographics"}
+TARGET_INTERVAL_15D = "Natural History Protocol 478 Interval"
 
 
 def _parse_args() -> MatchConfig:
@@ -145,6 +146,9 @@ def _load_patients(path: Path) -> pd.DataFrame:
                     "patient_id": patient_id,
                     "ids__interval_name": row["ids__interval_name"],
                     "ids__visit_date": visit_date,
+                    "expected_protocol": (
+                        "15D" if str(row["ids__interval_name"]).strip() == TARGET_INTERVAL_15D else "11D"
+                    ),
                 }
             )
 
@@ -178,8 +182,8 @@ def _build_btris_matches(patients_expanded: pd.DataFrame, btris_root: Path, logg
     if patients_expanded.empty:
         return pd.DataFrame()
 
-    patient_date_map = (
-        patients_expanded.groupby("patient_id")["ids__visit_date"]
+    patient_date_map_by_protocol = (
+        patients_expanded.groupby(["patient_id", "expected_protocol"])["ids__visit_date"]
         .apply(lambda s: set(s.tolist()))
         .to_dict()
     )
@@ -220,7 +224,7 @@ def _build_btris_matches(patients_expanded: pd.DataFrame, btris_root: Path, logg
             patient_id = _normalize_patient_id(row[mrn_col])
             if not patient_id:
                 continue
-            candidate_dates = patient_date_map.get(patient_id)
+            candidate_dates = patient_date_map_by_protocol.get((patient_id, protocol))
             if not candidate_dates:
                 continue
 
@@ -243,6 +247,7 @@ def _build_btris_matches(patients_expanded: pd.DataFrame, btris_root: Path, logg
 
             patient_intervals = patients_expanded[
                 (patients_expanded["patient_id"] == patient_id)
+                & (patients_expanded["expected_protocol"] == protocol)
                 & (patients_expanded["ids__visit_date"].isin(matched_dates_unique))
             ][["ids__interval_name", "ids__visit_date"]].drop_duplicates()
 
