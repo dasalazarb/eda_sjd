@@ -92,14 +92,32 @@ def _normalize_id(value: object) -> str:
     return text
 
 
+def _normalize_column_name(name: object) -> str:
+    text = str(name) if name is not None else ""
+    # Limpieza de BOM y espacios frecuentes invisibles en encabezados de Excel/CSV.
+    text = text.replace("\ufeff", "").replace("\u00a0", " ").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text.lower()
+
+
+def _resolve_column_name(columns: pd.Index, expected_name: str) -> str:
+    normalized_expected = _normalize_column_name(expected_name)
+    for col in columns:
+        if _normalize_column_name(col) == normalized_expected:
+            return str(col)
+    raise KeyError
+
+
 def _build_patient_id_set(df: pd.DataFrame) -> set[str]:
     required_col = "ids__patient_record_number"
-    if required_col not in df.columns:
+    try:
+        source_col = _resolve_column_name(df.columns, required_col)
+    except KeyError:
         raise KeyError(
             "No se encontró la columna requerida 'ids__patient_record_number' en el archivo de pacientes."
         )
 
-    patient_ids = df[required_col].map(_normalize_id)
+    patient_ids = df[source_col].map(_normalize_id)
     patient_ids = patient_ids[patient_ids != ""]
     return set(patient_ids.tolist())
 
@@ -109,12 +127,14 @@ def _load_allowed_order_names(path: Path) -> set[str]:
         raise FileNotFoundError(f"No existe unique_OrderSets.xlsx: {path}")
 
     orders_df = pd.read_excel(path)
-    if "Order Name" not in orders_df.columns:
+    try:
+        order_col = _resolve_column_name(orders_df.columns, "Order Name")
+    except KeyError:
         raise KeyError("El archivo unique_OrderSets.xlsx no tiene la columna 'Order Name'.")
 
     return {
         str(v).strip().lower()
-        for v in orders_df["Order Name"].dropna().tolist()
+        for v in orders_df[order_col].dropna().tolist()
         if str(v).strip()
     }
 
@@ -130,11 +150,13 @@ def _filter_single_csv(
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     df = pd.read_csv(file_path)
 
-    if "MRN" not in df.columns:
+    try:
+        mrn_col = _resolve_column_name(df.columns, "MRN")
+    except KeyError:
         raise KeyError(f"El archivo {file_path} no contiene la columna MRN.")
 
     working = df.copy()
-    working["_mrn_normalized"] = working["MRN"].map(_normalize_id)
+    working["_mrn_normalized"] = working[mrn_col].map(_normalize_id)
 
     patient_mask = working["_mrn_normalized"].isin(patient_ids)
     filtered = working.loc[patient_mask].copy()
@@ -142,10 +164,12 @@ def _filter_single_csv(
     lab_order_filter_applied = False
     if _is_lab_file(file_path):
         lab_order_filter_applied = True
-        if "Order Name" not in filtered.columns:
+        try:
+            order_col = _resolve_column_name(filtered.columns, "Order Name")
+        except KeyError:
             raise KeyError(f"El archivo Lab {file_path} no contiene la columna 'Order Name'.")
 
-        order_names_normalized = filtered["Order Name"].astype("string").str.strip().str.lower()
+        order_names_normalized = filtered[order_col].astype("string").str.strip().str.lower()
         filtered = filtered.loc[order_names_normalized.isin(allowed_orders)].copy()
 
     patient_count = int(filtered["_mrn_normalized"].nunique(dropna=True))
