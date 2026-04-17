@@ -42,7 +42,7 @@ def _parse_args() -> FilterConfig:
     parser.add_argument(
         "--unique-ordersets-path",
         type=Path,
-        default=RAW_DIR / "unique_OrderSets.xlsx",
+        default=RAW_DIR / "unique_OrderSets.csv",
         help="Ruta al archivo unique_OrderSets.xlsx (columna 'Order Name').",
     )
     parser.add_argument(
