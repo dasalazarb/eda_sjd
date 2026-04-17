@@ -43,7 +43,7 @@ def _parse_args() -> FilterConfig:
         "--unique-ordersets-path",
         type=Path,
         default=RAW_DIR / "unique_OrderSets.csv",
-        help="Ruta al archivo unique_OrderSets.xlsx (columna 'Order Name').",
+        help="Ruta al archivo unique_OrderSets (.csv/.xlsx) con la columna 'Order Name'.",
     )
     parser.add_argument(
         "--output-root",
@@ -124,13 +124,20 @@ def _build_patient_id_set(df: pd.DataFrame) -> set[str]:
 
 def _load_allowed_order_names(path: Path) -> set[str]:
     if not path.exists():
-        raise FileNotFoundError(f"No existe unique_OrderSets.xlsx: {path}")
+        raise FileNotFoundError(f"No existe unique_OrderSets: {path}")
 
-    orders_df = pd.read_excel(path)
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        orders_df = pd.read_csv(path)
+    elif suffix in {".xlsx", ".xls"}:
+        orders_df = pd.read_excel(path)
+    else:
+        raise ValueError(f"Formato no soportado para unique_OrderSets: {suffix}")
+
     try:
         order_col = _resolve_column_name(orders_df.columns, "Order Name")
     except KeyError:
-        raise KeyError("El archivo unique_OrderSets.xlsx no tiene la columna 'Order Name'.")
+        raise KeyError("El archivo unique_OrderSets no tiene la columna 'Order Name'.")
 
     return {
         str(v).strip().lower()
