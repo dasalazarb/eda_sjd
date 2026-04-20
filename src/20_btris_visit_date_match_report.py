@@ -296,6 +296,56 @@ def _build_multi_measurement_report(matches_df: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values(["file_prefix", "n_rows", "patient_id"], ascending=[True, False, True]).reset_index(drop=True)
 
 
+def _patients_with_multiple_visit_dates(patients_expanded: pd.DataFrame) -> pd.DataFrame:
+    if patients_expanded.empty:
+        return pd.DataFrame(columns=["patient_id", "ids__interval_name", "n_ids_visit_dates"])
+
+    grouped = (
+        patients_expanded.groupby(["patient_id", "ids__interval_name"], dropna=False)
+        .agg(n_ids_visit_dates=("ids__visit_date", "nunique"))
+        .reset_index()
+    )
+    return grouped[grouped["n_ids_visit_dates"] > 1].reset_index(drop=True)
+
+
+def _build_cross_file_multi_measurement_report(
+    matches_df: pd.DataFrame, multi_date_patients: pd.DataFrame
+) -> pd.DataFrame:
+    if matches_df.empty or multi_date_patients.empty:
+        return pd.DataFrame()
+
+    filtered = matches_df.merge(
+        multi_date_patients[["patient_id", "ids__interval_name", "n_ids_visit_dates"]],
+        on=["patient_id", "ids__interval_name"],
+        how="inner",
+    )
+    if filtered.empty:
+        return pd.DataFrame()
+
+    grouped = (
+        filtered.groupby(["patient_id", "ids__interval_name", "file_prefix"], dropna=False)
+        .agg(
+            n_rows=("row_index", "count"),
+            n_distinct_source_files=("file_name", "nunique"),
+            protocols=("protocol", lambda s: "|".join(sorted({str(v) for v in s if str(v)}))),
+            source_files=("file_name", lambda s: "|".join(sorted({str(v) for v in s if str(v)}))),
+            matched_visit_dates=("ids__visit_date", lambda s: "|".join(sorted({str(v) for v in s if str(v)}))),
+            n_matched_visit_dates=("ids__visit_date", "nunique"),
+            n_ids_visit_dates=("n_ids_visit_dates", "max"),
+        )
+        .reset_index()
+    )
+
+    out = grouped[grouped["n_distinct_source_files"] > 1].copy()
+    if out.empty:
+        return out
+
+    return out.sort_values(
+        ["file_prefix", "n_distinct_source_files", "n_rows", "patient_id"],
+        ascending=[True, False, False, True],
+    ).reset_index(drop=True)
+
+
 def main() -> None:
     cfg = _parse_args()
     logger = setup_logger("20_btris_visit_date_match_report")
@@ -319,8 +369,17 @@ def main() -> None:
     print_step(2, "Buscando coincidencias exactas de fecha en BTRIS (ignorando hora)")
     matches_df = _build_btris_matches(patients_expanded, cfg.btris_root, logger)
 
-    print_step(3, "Construyendo reporte de múltiples mediciones por patient_id + interval + entidad")
-    multi_df = _build_multi_measurement_report(matches_df)
+    print_step(3, "Filtrando pacientes con múltiples ids__visit_date por intervalo")
+    multi_date_patients = _patients_with_multiple_visit_dates(patients_expanded)
+
+    print_step(
+        4,
+        (
+            "Construyendo reporte de múltiples mediciones en diferentes archivos para pacientes "
+            "con múltiples ids__visit_date"
+        ),
+    )
+    multi_df = _build_cross_file_multi_measurement_report(matches_df, multi_date_patients)
 
     cfg.report_all_matches_path.parent.mkdir(parents=True, exist_ok=True)
     cfg.report_multi_measurements_path.parent.mkdir(parents=True, exist_ok=True)
@@ -357,6 +416,8 @@ def main() -> None:
                 "protocols",
                 "source_files",
                 "matched_visit_dates",
+                "n_matched_visit_dates",
+                "n_ids_visit_dates",
             ]
         ).to_csv(cfg.report_multi_measurements_path, index=False)
     else:
@@ -364,6 +425,7 @@ def main() -> None:
 
     summary = {
         "n_matches": int(len(matches_df)),
+        "n_patient_interval_with_multiple_ids_visit_dates": int(len(multi_date_patients)),
         "n_multi_measurement_rows": int(len(multi_df)),
         "report_all_matches_path": str(cfg.report_all_matches_path),
         "report_multi_measurements_path": str(cfg.report_multi_measurements_path),
