@@ -9,7 +9,7 @@ from common import ANALYTIC_DIR, REPORTS_DIR, print_kv, print_script_overview, p
 
 
 PREFIX_A = "essdai__"
-PREFIX_B = "essdai-r__"
+DEFAULT_PREFIX_B_CANDIDATES = ("essdai-r__", "essdai_r__")
 MISSING_TOKENS = {"", "nan", "none", "null", "na", "n/a"}
 
 
@@ -32,6 +32,18 @@ def _parse_args() -> argparse.Namespace:
         default=REPORTS_DIR / "essdai_prefix_compare",
         help="Directory where comparison CSV outputs will be saved.",
     )
+    parser.add_argument(
+        "--prefix-a",
+        type=str,
+        default=PREFIX_A,
+        help="Primary ESSDAI prefix to compare.",
+    )
+    parser.add_argument(
+        "--prefix-b-candidates",
+        type=str,
+        default=",".join(DEFAULT_PREFIX_B_CANDIDATES),
+        help="Comma-separated list of alternative prefixes for the ESSDAI-R side.",
+    )
     return parser.parse_args()
 
 
@@ -52,9 +64,29 @@ def _extract_suffix_columns(columns: list[str], prefix: str) -> dict[str, str]:
     return {col[len(prefix) :]: col for col in columns if col.startswith(prefix)}
 
 
+def _extract_suffix_columns_multi_prefix(
+    columns: list[str], prefixes: list[str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    selected: dict[str, str] = {}
+    selected_prefix: dict[str, str] = {}
+
+    for col in columns:
+        for prefix in prefixes:
+            if col.startswith(prefix):
+                suffix = col[len(prefix) :]
+                selected[suffix] = col
+                selected_prefix[suffix] = prefix
+                break
+
+    return selected, selected_prefix
+
+
 def main() -> None:
     args = _parse_args()
     logger = setup_logger("21_compare_essdai_prefixes")
+    prefix_b_candidates = [p.strip() for p in args.prefix_b_candidates.split(",") if p.strip()]
+    if not prefix_b_candidates:
+        raise ValueError("At least one value is required in --prefix-b-candidates")
 
     print_script_overview(
         "21_compare_essdai_prefixes.py",
@@ -77,8 +109,8 @@ def main() -> None:
 
     print_step(2, "Collecting prefixed columns")
     all_cols = [str(c) for c in df.columns]
-    map_a = _extract_suffix_columns(all_cols, PREFIX_A)
-    map_b = _extract_suffix_columns(all_cols, PREFIX_B)
+    map_a = _extract_suffix_columns(all_cols, args.prefix_a)
+    map_b, map_b_prefix = _extract_suffix_columns_multi_prefix(all_cols, prefix_b_candidates)
 
     suffix_a = set(map_a.keys())
     suffix_b = set(map_b.keys())
@@ -90,8 +122,8 @@ def main() -> None:
     print_kv(
         "Prefix counts",
         {
-            PREFIX_A: len(suffix_a),
-            PREFIX_B: len(suffix_b),
+            args.prefix_a: len(suffix_a),
+            ",".join(prefix_b_candidates): len(suffix_b),
             "common_variables": len(common),
             "only_essdai": len(only_a),
             "only_essdai_r": len(only_b),
@@ -115,6 +147,7 @@ def main() -> None:
                 "variable_suffix": suffix,
                 "column_essdai": col_a,
                 "column_essdai_r": col_b,
+                "matched_prefix_essdai_r": map_b_prefix[suffix],
                 "n_unique_essdai": len(values_a),
                 "n_unique_essdai_r": len(values_b),
                 "same_unique_values": len(only_values_a) == 0 and len(only_values_b) == 0,
@@ -125,9 +158,25 @@ def main() -> None:
             }
         )
 
-    value_df = pd.DataFrame(value_rows).sort_values(
-        by=["same_unique_values", "variable_suffix"], ascending=[True, True]
-    )
+    value_df = pd.DataFrame(value_rows)
+    if value_df.empty:
+        value_df = pd.DataFrame(
+            columns=[
+                "variable_suffix",
+                "column_essdai",
+                "column_essdai_r",
+                "matched_prefix_essdai_r",
+                "n_unique_essdai",
+                "n_unique_essdai_r",
+                "same_unique_values",
+                "unique_only_essdai",
+                "unique_only_essdai_r",
+                "n_unique_only_essdai",
+                "n_unique_only_essdai_r",
+            ]
+        )
+    else:
+        value_df = value_df.sort_values(by=["same_unique_values", "variable_suffix"], ascending=[True, True])
 
     print_step(4, "Saving outputs")
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -137,6 +186,8 @@ def main() -> None:
             {
                 "prefix_essdai_variables": len(suffix_a),
                 "prefix_essdai_r_variables": len(suffix_b),
+                "prefix_essdai": args.prefix_a,
+                "prefix_essdai_r_candidates": ",".join(prefix_b_candidates),
                 "common_variables": len(common),
                 "only_essdai_variables": len(only_a),
                 "only_essdai_r_variables": len(only_b),
