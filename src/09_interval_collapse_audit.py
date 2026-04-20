@@ -23,6 +23,8 @@ from common import (
 MISSING_TOKEN_UPPER = {str(token).upper() for token in MISSING_TOKENS}
 ANS_PREFIX = "ans__"
 AUTO_PREFIX = "autonomic_nervous_system_questionnaire__"
+ESSDAI_PREFIX_LEGACY = "essdai-_r__"
+ESSDAI_PREFIX_CURRENT = "essdai_r__"
 ANALYSIS_EXCLUDED_VARS = {
     "row_id_raw",
     "visit_datetime",
@@ -181,15 +183,37 @@ def _prefix_map(columns: list[str], prefix: str) -> dict[str, list[str]]:
 
 
 def _merge_ans_autonomic_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    return _merge_columns_by_shared_suffix(df, [ANS_PREFIX, AUTO_PREFIX], ANS_PREFIX)
+
+
+def _merge_essdai_version_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    return _merge_columns_by_shared_suffix(
+        df,
+        [ESSDAI_PREFIX_LEGACY, ESSDAI_PREFIX_CURRENT],
+        ESSDAI_PREFIX_CURRENT,
+    )
+
+
+def _merge_columns_by_shared_suffix(
+    df: pd.DataFrame,
+    source_prefixes: list[str],
+    merged_prefix: str,
+) -> tuple[pd.DataFrame, int]:
     out = df.copy()
     colnames = [str(c) for c in out.columns]
-    ans_map = _prefix_map(colnames, ANS_PREFIX)
-    auto_map = _prefix_map(colnames, AUTO_PREFIX)
-    shared_suffixes = sorted(set(ans_map).intersection(auto_map))
+    prefix_maps = [_prefix_map(colnames, prefix) for prefix in source_prefixes]
+    if not prefix_maps:
+        return out, 0
 
-    for suffix in shared_suffixes:
-        source_cols = [*ans_map[suffix], *auto_map[suffix]]
-        merged_col = f"{ANS_PREFIX}{suffix}"
+    shared_suffixes = set(prefix_maps[0])
+    for suffix_map in prefix_maps[1:]:
+        shared_suffixes &= set(suffix_map)
+
+    for suffix in sorted(shared_suffixes):
+        source_cols: list[str] = []
+        for suffix_map in prefix_maps:
+            source_cols.extend(suffix_map[suffix])
+        merged_col = f"{merged_prefix}{suffix}"
         out[merged_col] = out[source_cols].apply(lambda row: _merge_cell_values(row.tolist()), axis=1)
         drop_cols = [c for c in source_cols if c != merged_col]
         if drop_cols:
@@ -383,6 +407,7 @@ def main() -> None:
         aggregated = _build_aggregated_columns(sorted_visits, group_cols)
         collapsed = sorted_visits.groupby(group_cols, as_index=False).agg(aggregated)
         collapsed, merged_suffix_pairs = _merge_ans_autonomic_columns(collapsed)
+        collapsed, merged_essdai_pairs = _merge_essdai_version_columns(collapsed)
         collapsed.to_parquet(ANALYTIC_DIR / "visits_long_collapsed_by_interval.parquet", index=False)
         collapsed.to_csv(ANALYTIC_DIR / "visits_long_collapsed_by_interval.csv", index=False)
         logger.info("Saved collapsed visits to data_analytic/visits_long_collapsed_by_interval.{parquet,csv}")
@@ -390,9 +415,14 @@ def main() -> None:
             "Merged ans/autonomic columns by shared suffix. merged_pairs=%d",
             merged_suffix_pairs,
         )
+        logger.info(
+            "Merged ESSDAI legacy/current columns by shared suffix. merged_pairs=%d",
+            merged_essdai_pairs,
+        )
     else:
         collapsed = None
         merged_suffix_pairs = 0
+        merged_essdai_pairs = 0
 
     metrics = {
         "rows_original": len(visits),
@@ -400,6 +430,7 @@ def main() -> None:
         "groups_with_repeated_rows": len(repeated_groups),
         "collapse_requested": config.collapse,
         "ans_autonomic_merged_pairs": merged_suffix_pairs,
+        "essdai_legacy_current_merged_pairs": merged_essdai_pairs,
     }
     print_kv("Interval collapse audit", metrics)
     print_step(7, "Append targeted EDA for visits/collapsed outputs to unified workbook")
