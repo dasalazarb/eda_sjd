@@ -247,22 +247,22 @@ def main() -> None:
 
     print_step(1, "Cargando datos")
     df_original = _load_table(cfg.input_path)
-    print_kv("input_path", cfg.input_path)
-    print_kv("rows_original", len(df_original))
-    print_kv("cols_original", len(df_original.columns))
+    print_kv("input", {"path": cfg.input_path})
+    print_kv("original_df", {"rows": len(df_original), "cols": len(df_original.columns)})
 
     print_step(2, "Construyendo filas condensadas y reporte de cruces")
     condensed_df, report_df = build_condensed_and_report(df_original)
-    print_kv("rows_condensed", len(condensed_df))
-    print_kv("rows_report", len(report_df))
+    print_kv("result_counts", {"rows_condensed": len(condensed_df), "rows_report": len(report_df)})
 
     print_step(3, "Guardando outputs")
     _save_table(df_original, cfg.output_original_copy_path)
     _save_table(condensed_df, cfg.output_condensed_path)
     _save_table(report_df, cfg.output_report_path)
-    print_kv("output_original_copy_path", cfg.output_original_copy_path)
-    print_kv("output_condensed_path", cfg.output_condensed_path)
-    print_kv("output_report_path", cfg.output_report_path)
+    print_kv("outputs", {
+        "original_copy_path": cfg.output_original_copy_path,
+        "condensed_path": cfg.output_condensed_path,
+        "report_path": cfg.output_report_path,
+    })
 
     logger.info(
         "Done merge NH+15D same-year | original=%d condensed=%d report=%d",
