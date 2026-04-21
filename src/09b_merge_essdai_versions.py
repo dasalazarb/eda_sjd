@@ -10,6 +10,11 @@ from common import ANALYTIC_DIR, print_kv, print_script_overview, print_step, se
 
 ESSDAI_PREFIX_LEGACY = "essdai-_r__"
 ESSDAI_PREFIX_CANONICAL = "essdai__"
+ADDITIONAL_MERGE_PAIRS = [
+    ("sjogren's_syndrome_history__arthritis", "systems_review_for_physician__arthritis"),
+    ("systems_review_for_physician__musculo_tndnts", "physical_examination-initial_evaluation__musculo_tndnts"),
+    ("systems_review_for_physician__mouth_drynss", "physical_examination-initial_evaluation__mouth_drynss"),
+]
 
 
 @dataclass(frozen=True)
@@ -22,7 +27,8 @@ def _parse_args() -> MergeConfig:
     parser = argparse.ArgumentParser(
         description=(
             "Merge ESSDAI columns by shared suffix from legacy prefix "
-            "'essdai-_r__' into canonical prefix 'essdai__'."
+            "'essdai-_r__' into canonical prefix 'essdai__', merge selected "
+            "non-ESSDAI aliases, and report/drop fully empty columns."
         )
     )
     parser.add_argument(
@@ -93,6 +99,19 @@ def _prefix_map(columns: list[str], prefix: str) -> dict[str, list[str]]:
     return out
 
 
+def _count_non_empty(series: pd.Series) -> int:
+    return int(series.map(lambda value: len(_tokenize_cell(value)) > 0).sum())
+
+
+def _merge_column_group(df: pd.DataFrame, source_cols: list[str], target_col: str) -> pd.DataFrame:
+    out = df.copy()
+    out[target_col] = out[source_cols].apply(lambda row: _merge_cell_values(row.tolist()), axis=1)
+    drop_cols = [col for col in source_cols if col != target_col]
+    if drop_cols:
+        out = out.drop(columns=drop_cols)
+    return out
+
+
 def _merge_essdai_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     out = df.copy()
     colnames = [str(c) for c in out.columns]
@@ -103,12 +122,36 @@ def _merge_essdai_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     for suffix in shared_suffixes:
         source_cols = [*legacy_map[suffix], *canonical_map[suffix]]
         merged_col = f"{ESSDAI_PREFIX_CANONICAL}{suffix}"
-        out[merged_col] = out[source_cols].apply(lambda row: _merge_cell_values(row.tolist()), axis=1)
-        drop_cols = [col for col in source_cols if col != merged_col]
-        if drop_cols:
-            out = out.drop(columns=drop_cols)
+        out = _merge_column_group(out, source_cols, merged_col)
 
     return out, len(shared_suffixes)
+
+
+def _merge_additional_pairs(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
+    out = df.copy()
+    merged_pairs = 0
+    skipped_pairs = 0
+
+    for left_col, right_col in ADDITIONAL_MERGE_PAIRS:
+        if left_col not in out.columns or right_col not in out.columns:
+            skipped_pairs += 1
+            continue
+
+        left_non_empty = _count_non_empty(out[left_col])
+        right_non_empty = _count_non_empty(out[right_col])
+        target_col = left_col if left_non_empty >= right_non_empty else right_col
+        out = _merge_column_group(out, [left_col, right_col], target_col)
+        merged_pairs += 1
+
+    return out, merged_pairs, skipped_pairs
+
+
+def _drop_fully_empty_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    empty_columns = [col for col in df.columns if _count_non_empty(df[col]) == 0]
+    if not empty_columns:
+        return df.copy(), []
+    out = df.drop(columns=empty_columns)
+    return out, empty_columns
 
 
 def run(config: MergeConfig) -> None:
@@ -124,8 +167,16 @@ def run(config: MergeConfig) -> None:
     print_step(2, "Merge ESSDAI legacy/canonical columns")
     merged, merged_pairs = _merge_essdai_columns(df)
 
-    print_step(3, "Save outputs")
+    print_step(3, "Merge additional requested column pairs")
+    merged, additional_pairs_merged, additional_pairs_skipped = _merge_additional_pairs(merged)
+
+    print_step(4, "Drop fully empty columns and write report")
+    merged, dropped_empty_columns = _drop_fully_empty_columns(merged)
     config.output_base.parent.mkdir(parents=True, exist_ok=True)
+    empty_cols_report_path = config.output_base.parent / f"{config.output_base.name}_dropped_empty_columns.csv"
+    pd.DataFrame({"column_name": dropped_empty_columns}).to_csv(empty_cols_report_path, index=False)
+
+    print_step(5, "Save outputs")
     parquet_path = config.output_base.with_suffix(".parquet")
     csv_path = config.output_base.with_suffix(".csv")
     merged.to_parquet(parquet_path, index=False)
@@ -133,14 +184,19 @@ def run(config: MergeConfig) -> None:
 
     logger.info("Saved merged dataset parquet: %s", parquet_path)
     logger.info("Saved merged dataset csv: %s", csv_path)
+    logger.info("Saved empty-column drop report csv: %s", empty_cols_report_path)
     print_kv(
         "merge_summary",
         {
             "rows": len(merged),
             "columns": len(merged.columns),
             "merged_suffix_pairs": merged_pairs,
+            "additional_pairs_merged": additional_pairs_merged,
+            "additional_pairs_skipped_missing_columns": additional_pairs_skipped,
+            "dropped_fully_empty_columns": len(dropped_empty_columns),
             "parquet_path": str(parquet_path),
             "csv_path": str(csv_path),
+            "empty_columns_report_path": str(empty_cols_report_path),
         },
     )
 
