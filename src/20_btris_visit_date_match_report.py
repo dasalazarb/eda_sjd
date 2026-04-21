@@ -104,6 +104,8 @@ def _split_visit_dates(value: object) -> list[pd.Timestamp]:
         return []
 
     raw = str(value)
+    if "|" not in raw:
+        return []
     parts = [part.strip() for part in raw.split("|") if part and part.strip()]
     out: list[pd.Timestamp] = []
     for part in parts:
