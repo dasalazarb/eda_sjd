@@ -11,8 +11,6 @@ from common import ANALYTIC_DIR, REPORTS_DIR, print_kv, print_script_overview, p
 
 NH_INTERVAL = "Natural History Protocol 478 Interval"
 OPT15D_PREFIX = "15D Optional Evaluation"
-PHASE_PREFIX = "Phase "
-OPTIONAL_PREFIX = "Optional Evaluation"
 KEY_PATIENT = "ids__subject_number"
 KEY_VISIT_DATE = "ids__visit_date"
 KEY_INTERVAL = "ids__interval_name"
@@ -32,7 +30,6 @@ def _parse_args() -> MergeConfig:
         description=(
             "Condensa por paciente-año los intervalos 'Natural History Protocol 478 Interval' "
             "y '15D Optional Evaluation' cuando comparten año de ids__visit_date, "
-            "solo para pacientes que también tienen visitas 'Phase ...' y 'Optional Evaluation ...', "
             "y genera un reporte de cruce por variable."
         )
     )
@@ -127,31 +124,6 @@ def _is_target_interval(interval_name: object) -> bool:
     return txt == NH_INTERVAL.lower() or txt.startswith(OPT15D_PREFIX.lower())
 
 
-def _patients_with_phase_and_optional(df: pd.DataFrame) -> set[str]:
-    if KEY_PATIENT not in df.columns or KEY_INTERVAL not in df.columns:
-        return set()
-
-    normalized_patient = df[KEY_PATIENT].map(_normalize_string)
-    normalized_interval = df[KEY_INTERVAL].map(_normalize_string)
-    base = pd.DataFrame(
-        {
-            KEY_PATIENT: normalized_patient,
-            KEY_INTERVAL: normalized_interval,
-        }
-    )
-    base = base[base[KEY_PATIENT] != ""].copy()
-    if base.empty:
-        return set()
-
-    grouped = base.groupby(KEY_PATIENT, dropna=False)[KEY_INTERVAL]
-    has_phase = grouped.apply(lambda s: s.str.lower().str.startswith(PHASE_PREFIX.lower()).any())
-    has_optional = grouped.apply(
-        lambda s: s.str.lower().str.startswith(OPTIONAL_PREFIX.lower()).any()
-    )
-    eligible = (has_phase & has_optional)
-    return set(eligible[eligible].index.tolist())
-
-
 def _merge_values(left: object, right: object) -> object:
     left_txt = _normalize_string(left)
     right_txt = _normalize_string(right)
@@ -228,9 +200,6 @@ def build_condensed_and_report(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
         raise ValueError(f"Faltan columnas requeridas: {missing}")
 
     work = df.copy()
-    eligible_patients = _patients_with_phase_and_optional(work)
-    work[KEY_PATIENT] = work[KEY_PATIENT].map(_normalize_string)
-    work = work[work[KEY_PATIENT].isin(eligible_patients)].copy()
     work["visit_year"] = _build_year_column(work)
     work = work[work["visit_year"].notna()].copy()
     work = work[work[KEY_INTERVAL].apply(_is_target_interval)].copy()
@@ -269,7 +238,6 @@ def main() -> None:
         "Condensa NH 478 + 15D Optional por paciente-año y reporta cruces por variable",
         [
             "Carga dataset corregido colapsado.",
-            "Restringe a pacientes que tienen al menos un 'Phase ...' y un 'Optional Evaluation ...'.",
             "Filtra intervalos objetivo (NH 478 y 15D Optional Evaluation).",
             "Cruza filas por paciente + mismo año de ids__visit_date.",
             "Genera reporte de variables con valores distintos en ambos lados.",
