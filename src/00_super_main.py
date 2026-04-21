@@ -49,6 +49,8 @@ def _build_pipeline_commands(config: SuperMainConfig) -> list[list[str]]:
         ["python", "src/08_visit_patterns.py"],
         ["python", "src/09_interval_collapse_audit.py", "--collapse", config.collapse],
     ]
+    if config.collapse == "yes":
+        scripts.append(["python", "src/09b_merge_essdai_versions.py"])
     if config.include_plots_10:
         scripts.append(["python", "src/10_interval_collapse_plots.py"])
     return scripts
