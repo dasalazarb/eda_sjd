@@ -9,7 +9,7 @@ import pandas as pd
 from common import ANALYTIC_DIR, print_kv, print_script_overview, print_step, setup_logger
 
 ESSDAI_PREFIX_LEGACY = "essdai-_r__"
-ESSDAI_PREFIX_CURRENT = "essdai_r__"
+ESSDAI_PREFIX_CANONICAL = "essdai__"
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ def _parse_args() -> MergeConfig:
     parser = argparse.ArgumentParser(
         description=(
             "Merge ESSDAI columns by shared suffix from legacy prefix "
-            "'essdai-_r__' into current prefix 'essdai_r__'."
+            "'essdai-_r__' into canonical prefix 'essdai__'."
         )
     )
     parser.add_argument(
@@ -97,12 +97,12 @@ def _merge_essdai_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     out = df.copy()
     colnames = [str(c) for c in out.columns]
     legacy_map = _prefix_map(colnames, ESSDAI_PREFIX_LEGACY)
-    current_map = _prefix_map(colnames, ESSDAI_PREFIX_CURRENT)
-    shared_suffixes = sorted(set(legacy_map).intersection(current_map))
+    canonical_map = _prefix_map(colnames, ESSDAI_PREFIX_CANONICAL)
+    shared_suffixes = sorted(set(legacy_map).intersection(canonical_map))
 
     for suffix in shared_suffixes:
-        source_cols = [*legacy_map[suffix], *current_map[suffix]]
-        merged_col = f"{ESSDAI_PREFIX_CURRENT}{suffix}"
+        source_cols = [*legacy_map[suffix], *canonical_map[suffix]]
+        merged_col = f"{ESSDAI_PREFIX_CANONICAL}{suffix}"
         out[merged_col] = out[source_cols].apply(lambda row: _merge_cell_values(row.tolist()), axis=1)
         drop_cols = [col for col in source_cols if col != merged_col]
         if drop_cols:
@@ -115,13 +115,13 @@ def run(config: MergeConfig) -> None:
     logger = setup_logger("09b_merge_essdai_versions")
     print_script_overview(
         "09b_merge_essdai_versions.py",
-        "Merge ESSDAI legacy/current columns by suffix and export both parquet+csv.",
+        "Merge ESSDAI legacy/canonical columns by suffix and export both parquet+csv.",
     )
 
     print_step(1, "Load input")
     df = _load_table(config.input_path)
 
-    print_step(2, "Merge ESSDAI legacy/current columns")
+    print_step(2, "Merge ESSDAI legacy/canonical columns")
     merged, merged_pairs = _merge_essdai_columns(df)
 
     print_step(3, "Save outputs")
