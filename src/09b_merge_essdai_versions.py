@@ -166,7 +166,7 @@ def _normalize_string(value: object) -> str:
     return str(value).strip()
 
 
-def _patients_to_keep(df: pd.DataFrame) -> set[str]:
+def _patients_to_exclude(df: pd.DataFrame) -> set[str]:
     if KEY_PATIENT not in df.columns or KEY_INTERVAL not in df.columns:
         return set()
 
@@ -183,14 +183,17 @@ def _patients_to_keep(df: pd.DataFrame) -> set[str]:
     grouped = base.groupby(KEY_PATIENT, dropna=False)[KEY_INTERVAL]
 
     def _is_allowed_only_interval(interval: str) -> bool:
-        if not interval:
+        normalized_interval = " ".join(interval.split())
+        if not normalized_interval:
             return True
-        if interval.casefold() == NH_INTERVAL.casefold():
+        if normalized_interval.casefold() == NH_INTERVAL.casefold():
             return True
-        return bool(OPT15D_PATTERN.match(interval))
+        return bool(OPT15D_PATTERN.match(normalized_interval))
 
-    keep_mask = grouped.apply(lambda s: any(not _is_allowed_only_interval(interval) for interval in s))
-    return set(keep_mask[keep_mask].index.tolist())
+    exclude_mask = grouped.apply(
+        lambda s: len(s) > 0 and all(_is_allowed_only_interval(interval) for interval in s)
+    )
+    return set(exclude_mask[exclude_mask].index.tolist())
 
 
 def _filter_patients(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -199,9 +202,9 @@ def _filter_patients(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
     out = df.copy()
     out[KEY_PATIENT] = out[KEY_PATIENT].map(_normalize_string)
-    keep_patients = _patients_to_keep(out)
-    filtered = out[out[KEY_PATIENT].isin(keep_patients)].copy()
-    excluded_patients = out[KEY_PATIENT].nunique(dropna=True) - len(keep_patients)
+    excluded_patients_set = _patients_to_exclude(out)
+    filtered = out[~out[KEY_PATIENT].isin(excluded_patients_set)].copy()
+    excluded_patients = len(excluded_patients_set)
     return filtered, int(excluded_patients)
 
 
