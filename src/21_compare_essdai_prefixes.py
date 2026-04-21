@@ -9,7 +9,7 @@ from common import ANALYTIC_DIR, REPORTS_DIR, print_kv, print_script_overview, p
 
 
 PREFIX_A = "essdai__"
-DEFAULT_PREFIX_B_CANDIDATES = ("essdai-r__", "essdai_r__")
+DEFAULT_PREFIX_B_CANDIDATES = ("essdai-_r__", "essdai_r__")
 MISSING_TOKENS = {"", "nan", "none", "null", "na", "n/a"}
 
 
