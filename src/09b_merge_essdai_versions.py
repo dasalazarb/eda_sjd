@@ -13,7 +13,7 @@ ESSDAI_PREFIX_CANONICAL = "essdai__"
 KEY_PATIENT = "ids__subject_number"
 KEY_INTERVAL = "ids__interval_name"
 NH_INTERVAL = "Natural History Protocol 478 Interval"
-PHASE_PREFIX = "Phase "
+OPT15D_PREFIX = "15D Optional Evaluation"
 ADDITIONAL_MERGE_PAIRS = [
     ("sjogren's_syndrome_history__arthritis", "systems_review_for_physician__arthritis"),
     ("systems_review_for_physician__musculo_tndnts", "physical_examination-initial_evaluation__musculo_tndnts"),
@@ -164,7 +164,7 @@ def _normalize_string(value: object) -> str:
     return str(value).strip()
 
 
-def _patients_with_required_intervals(df: pd.DataFrame) -> set[str]:
+def _patients_to_keep(df: pd.DataFrame) -> set[str]:
     if KEY_PATIENT not in df.columns or KEY_INTERVAL not in df.columns:
         return set()
 
@@ -179,11 +179,16 @@ def _patients_with_required_intervals(df: pd.DataFrame) -> set[str]:
         return set()
 
     grouped = base.groupby(KEY_PATIENT, dropna=False)[KEY_INTERVAL]
-    has_nh = grouped.apply(lambda s: s.str.casefold().eq(NH_INTERVAL.casefold()).any())
-    has_phase = grouped.apply(lambda s: s.str.casefold().str.startswith(PHASE_PREFIX.casefold()).any())
-    # Requerido: NH + Phase. Opcional: 5D/15D Optional Evaluation y/o Optional Evaluation.
-    eligible = has_nh & has_phase
-    return set(eligible[eligible].index.tolist())
+    forbidden = {NH_INTERVAL.casefold()}
+    keep_mask = grouped.apply(
+        lambda s: any(
+            interval
+            and interval not in forbidden
+            and not interval.startswith(OPT15D_PREFIX.casefold())
+            for interval in s.str.casefold()
+        )
+    )
+    return set(keep_mask[keep_mask].index.tolist())
 
 
 def _filter_patients(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -192,9 +197,9 @@ def _filter_patients(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
     out = df.copy()
     out[KEY_PATIENT] = out[KEY_PATIENT].map(_normalize_string)
-    eligible_patients = _patients_with_required_intervals(out)
-    filtered = out[out[KEY_PATIENT].isin(eligible_patients)].copy()
-    excluded_patients = out[KEY_PATIENT].nunique(dropna=True) - len(eligible_patients)
+    keep_patients = _patients_to_keep(out)
+    filtered = out[out[KEY_PATIENT].isin(keep_patients)].copy()
+    excluded_patients = out[KEY_PATIENT].nunique(dropna=True) - len(keep_patients)
     return filtered, int(excluded_patients)
 
 
