@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import pandas as pd
 
@@ -14,6 +15,7 @@ KEY_PATIENT = "ids__subject_number"
 KEY_INTERVAL = "ids__interval_name"
 NH_INTERVAL = "Natural History Protocol 478 Interval"
 OPT15D_PREFIX = "15D Optional Evaluation"
+OPT15D_PATTERN = re.compile(rf"^{re.escape(OPT15D_PREFIX)}(?:\s*\{{?\d+\}}?)?$", re.IGNORECASE)
 ADDITIONAL_MERGE_PAIRS = [
     ("sjogren's_syndrome_history__arthritis", "systems_review_for_physician__arthritis"),
     ("systems_review_for_physician__musculo_tndnts", "physical_examination-initial_evaluation__musculo_tndnts"),
@@ -179,15 +181,15 @@ def _patients_to_keep(df: pd.DataFrame) -> set[str]:
         return set()
 
     grouped = base.groupby(KEY_PATIENT, dropna=False)[KEY_INTERVAL]
-    forbidden = {NH_INTERVAL.casefold()}
-    keep_mask = grouped.apply(
-        lambda s: any(
-            interval
-            and interval not in forbidden
-            and not interval.startswith(OPT15D_PREFIX.casefold())
-            for interval in s.str.casefold()
-        )
-    )
+
+    def _is_allowed_only_interval(interval: str) -> bool:
+        if not interval:
+            return True
+        if interval.casefold() == NH_INTERVAL.casefold():
+            return True
+        return bool(OPT15D_PATTERN.match(interval))
+
+    keep_mask = grouped.apply(lambda s: any(not _is_allowed_only_interval(interval) for interval in s))
     return set(keep_mask[keep_mask].index.tolist())
 
 
