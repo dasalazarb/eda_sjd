@@ -383,9 +383,15 @@ def main() -> None:
         aggregated = _build_aggregated_columns(sorted_visits, group_cols)
         collapsed = sorted_visits.groupby(group_cols, as_index=False).agg(aggregated)
         collapsed, merged_suffix_pairs = _merge_ans_autonomic_columns(collapsed)
-        collapsed.to_parquet(ANALYTIC_DIR / "visits_long_collapsed_by_interval.parquet", index=False)
-        collapsed.to_csv(ANALYTIC_DIR / "visits_long_collapsed_by_interval.csv", index=False)
-        logger.info("Saved collapsed visits to data_analytic/visits_long_collapsed_by_interval.{parquet,csv}")
+        collapsed.to_parquet(
+            ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_not_clean.parquet", index=False
+        )
+        collapsed.to_csv(
+            ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_not_clean.csv", index=False
+        )
+        logger.info(
+            "Saved collapsed visits to data_analytic/visits_long_collapsed_by_interval_codebook_not_clean.{parquet,csv}"
+        )
         logger.info(
             "Merged ans/autonomic columns by shared suffix. merged_pairs=%d",
             merged_suffix_pairs,

@@ -34,13 +34,13 @@ def _parse_args() -> MergeConfig:
     parser.add_argument(
         "--input-path",
         type=Path,
-        default=ANALYTIC_DIR / "visits_long_collapsed_by_interval.parquet",
+        default=ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_not_clean.parquet",
         help="Path to input table (.parquet/.csv/.xlsx).",
     )
     parser.add_argument(
         "--output-base",
         type=Path,
-        default=ANALYTIC_DIR / "visits_long_collapsed_by_interval_essdai_merged",
+        default=ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_corrected",
         help="Output base path (without extension). Script writes both .parquet and .csv.",
     )
     args = parser.parse_args()
