@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import pandas as pd
 
@@ -14,6 +15,7 @@ KEY_PATIENT = "ids__subject_number"
 KEY_INTERVAL = "ids__interval_name"
 NH_INTERVAL = "Natural History Protocol 478 Interval"
 OPT15D_PREFIX = "15D Optional Evaluation"
+OPT15D_PATTERN = re.compile(rf"^{re.escape(OPT15D_PREFIX)}(?:\s*\{{?\d+\}}?)?$", re.IGNORECASE)
 ADDITIONAL_MERGE_PAIRS = [
     ("sjogren's_syndrome_history__arthritis", "systems_review_for_physician__arthritis"),
     ("systems_review_for_physician__musculo_tndnts", "physical_examination-initial_evaluation__musculo_tndnts"),
@@ -164,7 +166,7 @@ def _normalize_string(value: object) -> str:
     return str(value).strip()
 
 
-def _patients_to_keep(df: pd.DataFrame) -> set[str]:
+def _patients_to_exclude(df: pd.DataFrame) -> set[str]:
     if KEY_PATIENT not in df.columns or KEY_INTERVAL not in df.columns:
         return set()
 
@@ -179,16 +181,19 @@ def _patients_to_keep(df: pd.DataFrame) -> set[str]:
         return set()
 
     grouped = base.groupby(KEY_PATIENT, dropna=False)[KEY_INTERVAL]
-    forbidden = {NH_INTERVAL.casefold()}
-    keep_mask = grouped.apply(
-        lambda s: any(
-            interval
-            and interval not in forbidden
-            and not interval.startswith(OPT15D_PREFIX.casefold())
-            for interval in s.str.casefold()
-        )
+
+    def _is_allowed_only_interval(interval: str) -> bool:
+        normalized_interval = " ".join(interval.split())
+        if not normalized_interval:
+            return True
+        if normalized_interval.casefold() == NH_INTERVAL.casefold():
+            return True
+        return bool(OPT15D_PATTERN.match(normalized_interval))
+
+    exclude_mask = grouped.apply(
+        lambda s: len(s) > 0 and all(_is_allowed_only_interval(interval) for interval in s)
     )
-    return set(keep_mask[keep_mask].index.tolist())
+    return set(exclude_mask[exclude_mask].index.tolist())
 
 
 def _filter_patients(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -197,9 +202,9 @@ def _filter_patients(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
     out = df.copy()
     out[KEY_PATIENT] = out[KEY_PATIENT].map(_normalize_string)
-    keep_patients = _patients_to_keep(out)
-    filtered = out[out[KEY_PATIENT].isin(keep_patients)].copy()
-    excluded_patients = out[KEY_PATIENT].nunique(dropna=True) - len(keep_patients)
+    excluded_patients_set = _patients_to_exclude(out)
+    filtered = out[~out[KEY_PATIENT].isin(excluded_patients_set)].copy()
+    excluded_patients = len(excluded_patients_set)
     return filtered, int(excluded_patients)
 
 
