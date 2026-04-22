@@ -223,10 +223,29 @@ def _is_15d_optional(interval: object) -> bool:
     return bool(OPT15D_PATTERN.match(normalized_interval))
 
 
-def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
+def _merge_cell_values_pipe(values: list[object]) -> tuple[object, list[str]]:
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    for value in values:
+        for token in _tokenize_cell(value):
+            key = token.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(token)
+
+    if not merged:
+        return pd.NA, []
+    if len(merged) == 1:
+        return merged[0], merged
+    return "|".join(merged), merged
+
+
+def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int, pd.DataFrame]:
     required = {KEY_PATIENT, KEY_INTERVAL, KEY_VISIT_DATE}
     if any(column not in df.columns for column in required):
-        return df.copy(), 0, 0
+        return df.copy(), 0, 0, pd.DataFrame(columns=[KEY_PATIENT, "visit_year", "variable", "values_found"])
 
     work = df.copy()
     parsed_dates = pd.to_datetime(work[KEY_VISIT_DATE], errors="coerce")
@@ -235,7 +254,7 @@ def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, in
     target_mask = optional_mask & year_mask
 
     if not target_mask.any():
-        return work, 0, 0
+        return work, 0, 0, pd.DataFrame(columns=[KEY_PATIENT, "visit_year", "variable", "values_found"])
 
     targets = work.loc[target_mask].copy()
     targets["_visit_year"] = parsed_dates.loc[target_mask].dt.year.astype("Int64")
@@ -244,24 +263,44 @@ def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, in
     collapsed_groups = 0
     collapsed_rows = 0
     collapsed_records: list[dict[str, object]] = []
+    overlap_report_rows: list[dict[str, object]] = []
 
     for _, group in grouped:
         if len(group) <= 1:
             continue
         collapsed_groups += 1
         collapsed_rows += int(len(group) - 1)
-        merged_row = {column: _merge_cell_values(group[column].tolist()) for column in df.columns}
+        patient_id = _normalize_string(group[KEY_PATIENT].iloc[0])
+        visit_year = int(group["_visit_year"].iloc[0]) if pd.notna(group["_visit_year"].iloc[0]) else pd.NA
+        merged_row: dict[str, object] = {}
+        for column in df.columns:
+            merged_value, merged_tokens = _merge_cell_values_pipe(group[column].tolist())
+            merged_row[column] = merged_value
+            if len(merged_tokens) > 1:
+                overlap_report_rows.append(
+                    {
+                        KEY_PATIENT: patient_id,
+                        "visit_year": visit_year,
+                        "variable": column,
+                        "values_found": "|".join(merged_tokens),
+                    }
+                )
         collapsed_records.append(merged_row)
 
     if not collapsed_records:
-        return work, 0, 0
+        return work, 0, 0, pd.DataFrame(columns=[KEY_PATIENT, "visit_year", "variable", "values_found"])
 
     keep_mask = pd.Series(True, index=work.index)
     keep_mask.loc[targets.index] = False
     surviving = work.loc[keep_mask].copy()
     collapsed_df = pd.DataFrame(collapsed_records, columns=df.columns)
     out = pd.concat([surviving, collapsed_df], ignore_index=True)
-    return out, collapsed_groups, collapsed_rows
+    overlap_report = pd.DataFrame(overlap_report_rows)
+    if not overlap_report.empty:
+        overlap_report = overlap_report.drop_duplicates().sort_values(
+            by=[KEY_PATIENT, "visit_year", "variable"], na_position="last"
+        )
+    return out, collapsed_groups, collapsed_rows, overlap_report
 
 
 def run(config: MergeConfig) -> None:
@@ -278,7 +317,12 @@ def run(config: MergeConfig) -> None:
     filtered, excluded_patients = _filter_patients(df)
 
     print_step(3, "Collapse 15D Optional Evaluation visits in same year by patient")
-    filtered, collapsed_optional_groups, collapsed_optional_rows = _collapse_15d_optional_same_year(filtered)
+    (
+        filtered,
+        collapsed_optional_groups,
+        collapsed_optional_rows,
+        collapsed_optional_overlap_report,
+    ) = _collapse_15d_optional_same_year(filtered)
 
     print_step(4, "Merge ESSDAI legacy/canonical columns")
     merged, merged_pairs = _merge_essdai_columns(filtered)
@@ -291,6 +335,10 @@ def run(config: MergeConfig) -> None:
     config.output_base.parent.mkdir(parents=True, exist_ok=True)
     empty_cols_report_path = config.output_base.parent / f"{config.output_base.name}_dropped_empty_columns.csv"
     pd.DataFrame({"column_name": dropped_empty_columns}).to_csv(empty_cols_report_path, index=False)
+    optional_overlap_report_path = (
+        config.output_base.parent / f"{config.output_base.name}_collapsed_15d_optional_value_overlap_report.xlsx"
+    )
+    collapsed_optional_overlap_report.to_excel(optional_overlap_report_path, index=False)
 
     print_step(7, "Save outputs")
     parquet_path = config.output_base.with_suffix(".parquet")
@@ -301,6 +349,7 @@ def run(config: MergeConfig) -> None:
     logger.info("Saved merged dataset parquet: %s", parquet_path)
     logger.info("Saved merged dataset csv: %s", csv_path)
     logger.info("Saved empty-column drop report csv: %s", empty_cols_report_path)
+    logger.info("Saved 15D Optional overlap report xlsx: %s", optional_overlap_report_path)
     print_kv(
         "merge_summary",
         {
@@ -313,9 +362,11 @@ def run(config: MergeConfig) -> None:
             "additional_pairs_merged": additional_pairs_merged,
             "additional_pairs_skipped_missing_columns": additional_pairs_skipped,
             "dropped_fully_empty_columns": len(dropped_empty_columns),
+            "collapsed_optional_15d_overlap_report_rows": len(collapsed_optional_overlap_report),
             "parquet_path": str(parquet_path),
             "csv_path": str(csv_path),
             "empty_columns_report_path": str(empty_cols_report_path),
+            "optional_overlap_report_path": str(optional_overlap_report_path),
         },
     )
 
