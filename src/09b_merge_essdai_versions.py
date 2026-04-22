@@ -13,6 +13,7 @@ ESSDAI_PREFIX_LEGACY = "essdai-_r__"
 ESSDAI_PREFIX_CANONICAL = "essdai__"
 KEY_PATIENT = "ids__patient_record_number"
 KEY_INTERVAL = "ids__interval_name"
+KEY_VISIT_DATE = "ids__visit_date"
 NH_INTERVAL = "Natural History Protocol 478 Interval"
 OPT15D_PREFIX = "15D Optional Evaluation"
 OPT15D_PATTERN = re.compile(rf"^{re.escape(OPT15D_PREFIX)}(?:\s*\{{?\d+\}}?)?$", re.IGNORECASE)
@@ -215,6 +216,54 @@ def _filter_patients(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return filtered, int(excluded_patients)
 
 
+def _is_15d_optional(interval: object) -> bool:
+    normalized_interval = " ".join(_normalize_string(interval).split())
+    if not normalized_interval:
+        return False
+    return bool(OPT15D_PATTERN.match(normalized_interval))
+
+
+def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
+    required = {KEY_PATIENT, KEY_INTERVAL, KEY_VISIT_DATE}
+    if any(column not in df.columns for column in required):
+        return df.copy(), 0, 0
+
+    work = df.copy()
+    parsed_dates = pd.to_datetime(work[KEY_VISIT_DATE], errors="coerce")
+    optional_mask = work[KEY_INTERVAL].map(_is_15d_optional)
+    year_mask = parsed_dates.notna()
+    target_mask = optional_mask & year_mask
+
+    if not target_mask.any():
+        return work, 0, 0
+
+    targets = work.loc[target_mask].copy()
+    targets["_visit_year"] = parsed_dates.loc[target_mask].dt.year.astype("Int64")
+    grouped = targets.groupby([KEY_PATIENT, "_visit_year"], dropna=False, sort=False)
+
+    collapsed_groups = 0
+    collapsed_rows = 0
+    collapsed_records: list[dict[str, object]] = []
+
+    for _, group in grouped:
+        if len(group) <= 1:
+            continue
+        collapsed_groups += 1
+        collapsed_rows += int(len(group) - 1)
+        merged_row = {column: _merge_cell_values(group[column].tolist()) for column in df.columns}
+        collapsed_records.append(merged_row)
+
+    if not collapsed_records:
+        return work, 0, 0
+
+    keep_mask = pd.Series(True, index=work.index)
+    keep_mask.loc[targets.index] = False
+    surviving = work.loc[keep_mask].copy()
+    collapsed_df = pd.DataFrame(collapsed_records, columns=df.columns)
+    out = pd.concat([surviving, collapsed_df], ignore_index=True)
+    return out, collapsed_groups, collapsed_rows
+
+
 def run(config: MergeConfig) -> None:
     logger = setup_logger("09b_merge_essdai_versions")
     print_script_overview(
@@ -228,19 +277,22 @@ def run(config: MergeConfig) -> None:
     print_step(2, "Filter patients by interval requirements")
     filtered, excluded_patients = _filter_patients(df)
 
-    print_step(3, "Merge ESSDAI legacy/canonical columns")
+    print_step(3, "Collapse 15D Optional Evaluation visits in same year by patient")
+    filtered, collapsed_optional_groups, collapsed_optional_rows = _collapse_15d_optional_same_year(filtered)
+
+    print_step(4, "Merge ESSDAI legacy/canonical columns")
     merged, merged_pairs = _merge_essdai_columns(filtered)
 
-    print_step(4, "Merge additional requested column pairs")
+    print_step(5, "Merge additional requested column pairs")
     merged, additional_pairs_merged, additional_pairs_skipped = _merge_additional_pairs(merged)
 
-    print_step(5, "Drop fully empty columns and write report")
+    print_step(6, "Drop fully empty columns and write report")
     merged, dropped_empty_columns = _drop_fully_empty_columns(merged)
     config.output_base.parent.mkdir(parents=True, exist_ok=True)
     empty_cols_report_path = config.output_base.parent / f"{config.output_base.name}_dropped_empty_columns.csv"
     pd.DataFrame({"column_name": dropped_empty_columns}).to_csv(empty_cols_report_path, index=False)
 
-    print_step(6, "Save outputs")
+    print_step(7, "Save outputs")
     parquet_path = config.output_base.with_suffix(".parquet")
     csv_path = config.output_base.with_suffix(".csv")
     merged.to_parquet(parquet_path, index=False)
@@ -255,6 +307,8 @@ def run(config: MergeConfig) -> None:
             "rows": len(merged),
             "columns": len(merged.columns),
             "excluded_patients_not_meeting_interval_requirements": excluded_patients,
+            "collapsed_optional_15d_patient_year_groups": collapsed_optional_groups,
+            "collapsed_optional_15d_reduced_rows": collapsed_optional_rows,
             "merged_suffix_pairs": merged_pairs,
             "additional_pairs_merged": additional_pairs_merged,
             "additional_pairs_skipped_missing_columns": additional_pairs_skipped,
