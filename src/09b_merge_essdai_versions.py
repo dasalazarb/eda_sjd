@@ -18,6 +18,7 @@ NH_INTERVAL = "Natural History Protocol 478 Interval"
 OPT15D_PREFIX = "15D Optional Evaluation"
 OPT15D_PATTERN = re.compile(rf"^{re.escape(OPT15D_PREFIX)}(?:\s*\{{?\d+\}}?)?$", re.IGNORECASE)
 NATURAL_PATTERN = re.compile(r"^natural(?:\s+history.*)?$", re.IGNORECASE)
+EMPTY_LIKE_LITERALS = {"", "nan", "none", "null", "na", "n/a"}
 ADDITIONAL_MERGE_PAIRS = [
     ("sjogren's_syndrome_history__arthritis", "systems_review_for_physician__arthritis"),
     ("systems_review_for_physician__musculo_tndnts", "physical_examination-initial_evaluation__musculo_tndnts"),
@@ -73,10 +74,10 @@ def _tokenize_cell(value: object) -> list[str]:
     if pd.isna(value):
         return []
     text = str(value).strip()
-    if not text:
+    if text.casefold() in EMPTY_LIKE_LITERALS:
         return []
     parts = [part.strip() for part in text.split("|")]
-    return [part for part in parts if part]
+    return [part for part in parts if part and part.casefold() not in EMPTY_LIKE_LITERALS]
 
 
 def _merge_cell_values(values: list[object]) -> object:
