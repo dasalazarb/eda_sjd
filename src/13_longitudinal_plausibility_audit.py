@@ -20,7 +20,6 @@ class AuditConfig:
 CODEBOOK_DOMAINS = {
     "clinical_disease_evaluation": {
         "essdai": 13,
-        "essdai-_r": 13,
         "esspri_questionnaire": 18,
         "visit_summary_-_2016_classification_criteria": 26,
         "visit_summary_form": 11,
