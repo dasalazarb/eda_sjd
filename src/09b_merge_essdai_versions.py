@@ -13,6 +13,7 @@ ESSDAI_PREFIX_LEGACY = "essdai-_r__"
 ESSDAI_PREFIX_CANONICAL = "essdai__"
 KEY_PATIENT = "ids__patient_record_number"
 KEY_INTERVAL = "ids__interval_name"
+KEY_VISIT_DATE = "ids__visit_date"
 NH_INTERVAL = "Natural History Protocol 478 Interval"
 OPT15D_PREFIX = "15D Optional Evaluation"
 OPT15D_PATTERN = re.compile(rf"^{re.escape(OPT15D_PREFIX)}(?:\s*\{{?\d+\}}?)?$", re.IGNORECASE)
@@ -215,6 +216,106 @@ def _filter_patients(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return filtered, int(excluded_patients)
 
 
+def _is_15d_optional(interval: object) -> bool:
+    normalized_interval = " ".join(_normalize_string(interval).split())
+    if not normalized_interval:
+        return False
+    return bool(OPT15D_PATTERN.match(normalized_interval))
+
+
+def _merge_cell_values_pipe(values: list[object]) -> tuple[object, list[str], bool]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    first_non_empty_raw: object = pd.NA
+    saw_pipe_in_source = False
+
+    for value in values:
+        raw_text = _normalize_string(value)
+        if raw_text and raw_text != "nan" and pd.isna(first_non_empty_raw):
+            first_non_empty_raw = value
+        if isinstance(value, str) and "|" in value:
+            saw_pipe_in_source = True
+        for token in _tokenize_cell(value):
+            key = token.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(token)
+
+    if not merged:
+        return pd.NA, [], False
+    if len(merged) == 1:
+        if not pd.isna(first_non_empty_raw) and not saw_pipe_in_source:
+            return first_non_empty_raw, merged, False
+        return merged[0], merged, False
+    return "|".join(merged), merged, True
+
+
+def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int, pd.DataFrame]:
+    required = {KEY_PATIENT, KEY_INTERVAL, KEY_VISIT_DATE}
+    if any(column not in df.columns for column in required):
+        return df.copy(), 0, 0, pd.DataFrame(columns=[KEY_PATIENT, "visit_year", "variable", "values_found"])
+
+    work = df.copy()
+    parsed_dates = pd.to_datetime(work[KEY_VISIT_DATE], errors="coerce")
+    optional_mask = work[KEY_INTERVAL].map(_is_15d_optional)
+    year_mask = parsed_dates.notna()
+    target_mask = optional_mask & year_mask
+
+    if not target_mask.any():
+        return work, 0, 0, pd.DataFrame(columns=[KEY_PATIENT, "visit_year", "variable", "values_found"])
+
+    targets = work.loc[target_mask].copy()
+    targets["_visit_year"] = parsed_dates.loc[target_mask].dt.year.astype("Int64")
+    grouped = targets.groupby([KEY_PATIENT, "_visit_year"], dropna=False, sort=False)
+
+    collapsed_groups = 0
+    collapsed_rows = 0
+    collapsed_records: list[dict[str, object]] = []
+    overlap_report_rows: list[dict[str, object]] = []
+    columns_with_conflicts: set[str] = set()
+
+    for _, group in grouped:
+        if len(group) <= 1:
+            continue
+        collapsed_groups += 1
+        collapsed_rows += int(len(group) - 1)
+        patient_id = _normalize_string(group[KEY_PATIENT].iloc[0])
+        visit_year = int(group["_visit_year"].iloc[0]) if pd.notna(group["_visit_year"].iloc[0]) else pd.NA
+        merged_row: dict[str, object] = {}
+        for column in df.columns:
+            merged_value, merged_tokens, had_conflict = _merge_cell_values_pipe(group[column].tolist())
+            merged_row[column] = merged_value
+            if had_conflict:
+                columns_with_conflicts.add(column)
+                overlap_report_rows.append(
+                    {
+                        KEY_PATIENT: patient_id,
+                        "visit_year": visit_year,
+                        "variable": column,
+                        "values_found": "|".join(merged_tokens),
+                    }
+                )
+        collapsed_records.append(merged_row)
+
+    if not collapsed_records:
+        return work, 0, 0, pd.DataFrame(columns=[KEY_PATIENT, "visit_year", "variable", "values_found"])
+
+    keep_mask = pd.Series(True, index=work.index)
+    keep_mask.loc[targets.index] = False
+    surviving = work.loc[keep_mask].copy()
+    collapsed_df = pd.DataFrame(collapsed_records, columns=df.columns)
+    out = pd.concat([surviving, collapsed_df], ignore_index=True)
+    for column in columns_with_conflicts:
+        out[column] = out[column].map(lambda value: pd.NA if pd.isna(value) else str(value))
+    overlap_report = pd.DataFrame(overlap_report_rows)
+    if not overlap_report.empty:
+        overlap_report = overlap_report.drop_duplicates().sort_values(
+            by=[KEY_PATIENT, "visit_year", "variable"], na_position="last"
+        )
+    return out, collapsed_groups, collapsed_rows, overlap_report
+
+
 def run(config: MergeConfig) -> None:
     logger = setup_logger("09b_merge_essdai_versions")
     print_script_overview(
@@ -228,19 +329,31 @@ def run(config: MergeConfig) -> None:
     print_step(2, "Filter patients by interval requirements")
     filtered, excluded_patients = _filter_patients(df)
 
-    print_step(3, "Merge ESSDAI legacy/canonical columns")
+    print_step(3, "Collapse 15D Optional Evaluation visits in same year by patient")
+    (
+        filtered,
+        collapsed_optional_groups,
+        collapsed_optional_rows,
+        collapsed_optional_overlap_report,
+    ) = _collapse_15d_optional_same_year(filtered)
+
+    print_step(4, "Merge ESSDAI legacy/canonical columns")
     merged, merged_pairs = _merge_essdai_columns(filtered)
 
-    print_step(4, "Merge additional requested column pairs")
+    print_step(5, "Merge additional requested column pairs")
     merged, additional_pairs_merged, additional_pairs_skipped = _merge_additional_pairs(merged)
 
-    print_step(5, "Drop fully empty columns and write report")
+    print_step(6, "Drop fully empty columns and write report")
     merged, dropped_empty_columns = _drop_fully_empty_columns(merged)
     config.output_base.parent.mkdir(parents=True, exist_ok=True)
     empty_cols_report_path = config.output_base.parent / f"{config.output_base.name}_dropped_empty_columns.csv"
     pd.DataFrame({"column_name": dropped_empty_columns}).to_csv(empty_cols_report_path, index=False)
+    optional_overlap_report_path = (
+        config.output_base.parent / f"{config.output_base.name}_collapsed_15d_optional_value_overlap_report.xlsx"
+    )
+    collapsed_optional_overlap_report.to_excel(optional_overlap_report_path, index=False)
 
-    print_step(6, "Save outputs")
+    print_step(7, "Save outputs")
     parquet_path = config.output_base.with_suffix(".parquet")
     csv_path = config.output_base.with_suffix(".csv")
     merged.to_parquet(parquet_path, index=False)
@@ -249,19 +362,24 @@ def run(config: MergeConfig) -> None:
     logger.info("Saved merged dataset parquet: %s", parquet_path)
     logger.info("Saved merged dataset csv: %s", csv_path)
     logger.info("Saved empty-column drop report csv: %s", empty_cols_report_path)
+    logger.info("Saved 15D Optional overlap report xlsx: %s", optional_overlap_report_path)
     print_kv(
         "merge_summary",
         {
             "rows": len(merged),
             "columns": len(merged.columns),
             "excluded_patients_not_meeting_interval_requirements": excluded_patients,
+            "collapsed_optional_15d_patient_year_groups": collapsed_optional_groups,
+            "collapsed_optional_15d_reduced_rows": collapsed_optional_rows,
             "merged_suffix_pairs": merged_pairs,
             "additional_pairs_merged": additional_pairs_merged,
             "additional_pairs_skipped_missing_columns": additional_pairs_skipped,
             "dropped_fully_empty_columns": len(dropped_empty_columns),
+            "collapsed_optional_15d_overlap_report_rows": len(collapsed_optional_overlap_report),
             "parquet_path": str(parquet_path),
             "csv_path": str(csv_path),
             "empty_columns_report_path": str(empty_cols_report_path),
+            "optional_overlap_report_path": str(optional_overlap_report_path),
         },
     )
 
