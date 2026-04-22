@@ -182,17 +182,21 @@ def _patients_to_exclude(df: pd.DataFrame) -> set[str]:
 
     grouped = base.groupby(KEY_PATIENT, dropna=False)[KEY_INTERVAL]
 
-    def _is_allowed_only_interval(interval: str) -> bool:
+    def _is_natural_or_15d_optional(interval: str) -> bool:
         normalized_interval = " ".join(interval.split())
         if not normalized_interval:
-            return True
+            return False
         if normalized_interval.casefold() == NH_INTERVAL.casefold():
             return True
         return bool(OPT15D_PATTERN.match(normalized_interval))
 
-    exclude_mask = grouped.apply(
-        lambda s: len(s) > 0 and all(_is_allowed_only_interval(interval) for interval in s)
-    )
+    def _exclude_patient(intervals: pd.Series) -> bool:
+        unique_non_empty = {interval for interval in intervals if interval}
+        if not unique_non_empty:
+            return False
+        return all(_is_natural_or_15d_optional(interval) for interval in unique_non_empty)
+
+    exclude_mask = grouped.apply(_exclude_patient)
     return set(exclude_mask[exclude_mask].index.tolist())
 
 
