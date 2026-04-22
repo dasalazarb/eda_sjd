@@ -11,7 +11,7 @@ from common import ANALYTIC_DIR, print_kv, print_script_overview, print_step, se
 
 ESSDAI_PREFIX_LEGACY = "essdai-_r__"
 ESSDAI_PREFIX_CANONICAL = "essdai__"
-KEY_PATIENT = "ids__subject_number"
+KEY_PATIENT = "ids__patient_record_number"
 KEY_INTERVAL = "ids__interval_name"
 NH_INTERVAL = "Natural History Protocol 478 Interval"
 OPT15D_PREFIX = "15D Optional Evaluation"
