@@ -223,11 +223,18 @@ def _is_15d_optional(interval: object) -> bool:
     return bool(OPT15D_PATTERN.match(normalized_interval))
 
 
-def _merge_cell_values_pipe(values: list[object]) -> tuple[object, list[str]]:
+def _merge_cell_values_pipe(values: list[object]) -> tuple[object, list[str], bool]:
     merged: list[str] = []
     seen: set[str] = set()
+    first_non_empty_raw: object = pd.NA
+    saw_pipe_in_source = False
 
     for value in values:
+        raw_text = _normalize_string(value)
+        if raw_text and raw_text != "nan" and pd.isna(first_non_empty_raw):
+            first_non_empty_raw = value
+        if isinstance(value, str) and "|" in value:
+            saw_pipe_in_source = True
         for token in _tokenize_cell(value):
             key = token.casefold()
             if key in seen:
@@ -236,10 +243,12 @@ def _merge_cell_values_pipe(values: list[object]) -> tuple[object, list[str]]:
             merged.append(token)
 
     if not merged:
-        return pd.NA, []
+        return pd.NA, [], False
     if len(merged) == 1:
-        return merged[0], merged
-    return "|".join(merged), merged
+        if not pd.isna(first_non_empty_raw) and not saw_pipe_in_source:
+            return first_non_empty_raw, merged, False
+        return merged[0], merged, False
+    return "|".join(merged), merged, True
 
 
 def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int, pd.DataFrame]:
@@ -264,6 +273,7 @@ def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, in
     collapsed_rows = 0
     collapsed_records: list[dict[str, object]] = []
     overlap_report_rows: list[dict[str, object]] = []
+    columns_with_conflicts: set[str] = set()
 
     for _, group in grouped:
         if len(group) <= 1:
@@ -274,9 +284,10 @@ def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, in
         visit_year = int(group["_visit_year"].iloc[0]) if pd.notna(group["_visit_year"].iloc[0]) else pd.NA
         merged_row: dict[str, object] = {}
         for column in df.columns:
-            merged_value, merged_tokens = _merge_cell_values_pipe(group[column].tolist())
+            merged_value, merged_tokens, had_conflict = _merge_cell_values_pipe(group[column].tolist())
             merged_row[column] = merged_value
-            if len(merged_tokens) > 1:
+            if had_conflict:
+                columns_with_conflicts.add(column)
                 overlap_report_rows.append(
                     {
                         KEY_PATIENT: patient_id,
@@ -295,6 +306,8 @@ def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, in
     surviving = work.loc[keep_mask].copy()
     collapsed_df = pd.DataFrame(collapsed_records, columns=df.columns)
     out = pd.concat([surviving, collapsed_df], ignore_index=True)
+    for column in columns_with_conflicts:
+        out[column] = out[column].map(lambda value: pd.NA if pd.isna(value) else str(value))
     overlap_report = pd.DataFrame(overlap_report_rows)
     if not overlap_report.empty:
         overlap_report = overlap_report.drop_duplicates().sort_values(
