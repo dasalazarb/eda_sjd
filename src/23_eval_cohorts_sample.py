@@ -26,6 +26,8 @@ import sys
 import pandas as pd
 import numpy as np
 
+from common import ANALYTIC_DIR, REPORTS_DIR
+
 # ---------------------------------------------------------------------------
 # CONFIG: columnas clave del codebook
 # Ajustar si la limpieza de datos cambia los nombres de columnas.
@@ -444,13 +446,13 @@ def parse_args():
     )
     p.add_argument(
         "--input", "-i",
-        default="visits_long_collapsed_by_interval_codebook_corrected.csv",
-        help="Ruta al CSV del codebook (default: busca en directorio actual)",
+        default=str(ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_corrected.csv"),
+        help="Ruta al CSV del codebook (default: data_analytic/visits_long_collapsed_by_interval_codebook_corrected.csv)",
     )
     p.add_argument(
         "--output-dir", "-o",
-        default=".",
-        help="Directorio de salida para los CSV de resultados (default: .)",
+        default=str(REPORTS_DIR / "cohort_viability"),
+        help="Directorio de salida para los CSV de resultados (default: reports/cohort_viability)",
     )
     return p.parse_args()
 
