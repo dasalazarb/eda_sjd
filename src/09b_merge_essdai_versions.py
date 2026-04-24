@@ -224,6 +224,15 @@ def _is_15d_optional(interval: object) -> bool:
     return bool(OPT15D_PATTERN.match(normalized_interval))
 
 
+def _is_natural_interval(interval: object) -> bool:
+    normalized_interval = " ".join(_normalize_string(interval).split())
+    if not normalized_interval:
+        return False
+    if normalized_interval.casefold() == NH_INTERVAL.casefold():
+        return True
+    return bool(NATURAL_PATTERN.match(normalized_interval))
+
+
 def _merge_cell_values_pipe(values: list[object]) -> tuple[object, list[str], bool]:
     merged: list[str] = []
     seen: set[str] = set()
@@ -260,8 +269,9 @@ def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, in
     work = df.copy()
     parsed_dates = pd.to_datetime(work[KEY_VISIT_DATE], errors="coerce")
     optional_mask = work[KEY_INTERVAL].map(_is_15d_optional)
+    natural_mask = work[KEY_INTERVAL].map(_is_natural_interval)
     year_mask = parsed_dates.notna()
-    target_mask = optional_mask & year_mask
+    target_mask = (optional_mask | natural_mask) & year_mask
 
     if not target_mask.any():
         return work, 0, 0, pd.DataFrame(columns=[KEY_PATIENT, "visit_year", "variable", "values_found"])
@@ -278,6 +288,8 @@ def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, in
 
     for _, group in grouped:
         if len(group) <= 1:
+            continue
+        if not group[KEY_INTERVAL].map(_is_natural_interval).any():
             continue
         collapsed_groups += 1
         collapsed_rows += int(len(group) - 1)
