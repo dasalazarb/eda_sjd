@@ -153,12 +153,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
     # -----------------------------------------------------------------------
     # C0: Source screening cohort
     # -----------------------------------------------------------------------
-    c0 = set(df[df[ie_cols].notna().any(axis=1)][COL_PATIENT].unique()) \
-         if ie_cols else set(df[COL_PATIENT].unique())
+    c0 = set(df[COL_PATIENT].unique())
     results["C0"] = dict(
         descripcion="Source screening (15-D)",
         objetivo="Obj. Primario 1 — contexto de referral",
-        criterio_inclusion="Todo participante 15-D con criterios IE registrados",
+        criterio_inclusion="Todo participante 15-D (total de pacientes)",
         criterio_tiempo_cero="Primera visita evaluable NIH SjD",
         variables_clave=", ".join(ie_cols[:4]) + "..." if ie_cols else "N/A",
         n=len(c0),
