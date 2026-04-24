@@ -67,23 +67,6 @@ PHASE_LABELS: dict[str, str] = {
     "Phase 2: 5th Full Evaluation":                 "V6 (5th)",
 }
 
-# Canonical inter-phase transitions — ONLY these are shown in kde_by_interval
-# Same-phase transitions (V2→V2, etc.) are explicitly excluded
-CANONICAL_TRANSITIONS: dict[str, str] = {
-    "Natural History Protocol 478 Interval → Phase 1: Initial Full Evaluation":
-        "V1 (Nat.Hist.) → V2 (Initial)",
-    "(missing) → Phase 1: Initial Full Evaluation":
-        "V1 (missing) → V2 (Initial)",
-    "Phase 1: Initial Full Evaluation → Phase 1: Second Full Evaluation":
-        "V2 (Initial) → V3 (Second)",
-    "Phase 1: Second Full Evaluation → Phase 1: Final Full (Third Full) Evaluation":
-        "V3 (Second) → V4 (Final/3rd)",
-    "Phase 1: Final Full (Third Full) Evaluation → Phase 2: 4th Full Evaluation":
-        "V4 (Final/3rd) → V5 (4th)",
-    "Phase 2: 4th Full Evaluation → Phase 2: 5th Full Evaluation":
-        "V5 (4th) → V6 (5th)",
-}
-
 PHASE_TO_STAGE: dict[str, int] = {
     "Natural History Protocol 478 Interval": 1,
     "(missing)": 1,
@@ -158,6 +141,30 @@ def _phase_rank(name: str) -> int:
         return PHASE_ORDER.index(name)
     except ValueError:
         return 98
+
+
+def _transition_order_label(prev_phase: str, next_phase: str) -> str:
+    prev_stage = PHASE_TO_STAGE.get(prev_phase)
+    next_stage = PHASE_TO_STAGE.get(next_phase)
+    if prev_stage is None or next_stage is None:
+        prev_txt = PHASE_LABELS.get(prev_phase, prev_phase)
+        next_txt = PHASE_LABELS.get(next_phase, next_phase)
+        return f"{prev_txt}→{next_txt}"
+    return f"V{prev_stage}→V{next_stage}"
+
+
+def _transition_display_label(transition_interval: str) -> str:
+    prev_phase, next_phase = transition_interval.split(" → ", 1)
+    prev_txt = PHASE_LABELS.get(prev_phase, prev_phase)
+    next_txt = PHASE_LABELS.get(next_phase, next_phase)
+    return f"{_transition_order_label(prev_phase, next_phase)} ({prev_txt} → {next_txt})"
+
+
+def _transition_sort_key(order_label: str) -> tuple[int, int, str]:
+    m = re.match(r"^V(\d+)→V(\d+)$", str(order_label))
+    if m:
+        return (int(m.group(1)), int(m.group(2)), str(order_label))
+    return (999, 999, str(order_label))
 
 
 def _build_visit_sequence(
@@ -253,63 +260,12 @@ def _build_transition_gaps_with_flags(
             ]
         )
 
-    phase_bounds = (
-        canon.groupby([subject_col, "interval_name"], as_index=False)
-        .agg(
-            phase_min_date=(visit_date_col, "min"),
-            phase_max_date=(visit_date_col, "max"),
-            n_visits_in_phase=(visit_date_col, "size"),
-        )
-    )
-
-    gap_frames: list[pd.DataFrame] = []
-    for transition in CANONICAL_TRANSITIONS:
-        prev_phase, next_phase = transition.split(" → ")
-        prev_df = phase_bounds[phase_bounds["interval_name"] == prev_phase].copy()
-        next_df = phase_bounds[phase_bounds["interval_name"] == next_phase].copy()
-        if prev_df.empty or next_df.empty:
-            continue
-        merged = prev_df.merge(
-            next_df,
-            on=subject_col,
-            suffixes=("_prev", "_next"),
-            how="inner",
-        )
-        if merged.empty:
-            continue
-        merged["transition_interval"] = transition
-        prev_stage = PHASE_TO_STAGE.get(prev_phase)
-        next_stage = PHASE_TO_STAGE.get(next_phase)
-        merged["transition_order"] = f"V{prev_stage}→V{next_stage}"
-        merged["prev_phase_max_date"] = merged["phase_max_date_prev"]
-        merged["next_phase_min_date"] = merged["phase_min_date_next"]
-        merged["gap_days"] = (
-            merged["next_phase_min_date"] - merged["prev_phase_max_date"]
-        ).dt.days
-        merged["flag_zero_gap"] = merged["gap_days"].eq(0)
-        merged["flag_negative_gap"] = merged["gap_days"].lt(0)
-        merged["transition_case"] = np.select(
-            [merged["flag_negative_gap"], merged["flag_zero_gap"]],
-            ["negative_gap", "zero_gap_same_day"],
-            default="canonical_positive_gap",
-        )
-        gap_frames.append(
-            merged[
-                [
-                    subject_col,
-                    "transition_order",
-                    "transition_interval",
-                    "prev_phase_max_date",
-                    "next_phase_min_date",
-                    "gap_days",
-                    "transition_case",
-                    "flag_zero_gap",
-                    "flag_negative_gap",
-                ]
-            ]
-        )
-
-    if not gap_frames:
+    canon = canon.sort_values([subject_col, visit_date_col, "phase_rank", "interval_name"]).copy()
+    canon["prev_phase"] = canon.groupby(subject_col)["interval_name"].shift(1)
+    canon["prev_visit_date"] = canon.groupby(subject_col)[visit_date_col].shift(1)
+    trans = canon[canon["prev_phase"].notna()].copy()
+    trans = trans[trans["prev_phase"] != trans["interval_name"]].copy()
+    if trans.empty:
         return pd.DataFrame(
             columns=[
                 subject_col,
@@ -323,7 +279,33 @@ def _build_transition_gaps_with_flags(
                 "flag_negative_gap",
             ]
         )
-    return pd.concat(gap_frames, ignore_index=True)
+    trans["transition_interval"] = trans["prev_phase"] + " → " + trans["interval_name"]
+    trans["transition_order"] = trans.apply(
+        lambda r: _transition_order_label(r["prev_phase"], r["interval_name"]), axis=1
+    )
+    trans["prev_phase_max_date"] = trans["prev_visit_date"]
+    trans["next_phase_min_date"] = trans[visit_date_col]
+    trans["gap_days"] = (trans["next_phase_min_date"] - trans["prev_phase_max_date"]).dt.days
+    trans["flag_zero_gap"] = trans["gap_days"].eq(0)
+    trans["flag_negative_gap"] = trans["gap_days"].lt(0)
+    trans["transition_case"] = np.select(
+        [trans["flag_negative_gap"], trans["flag_zero_gap"]],
+        ["negative_gap", "zero_gap_same_day"],
+        default="canonical_positive_gap",
+    )
+    return trans[
+        [
+            subject_col,
+            "transition_order",
+            "transition_interval",
+            "prev_phase_max_date",
+            "next_phase_min_date",
+            "gap_days",
+            "transition_case",
+            "flag_zero_gap",
+            "flag_negative_gap",
+        ]
+    ].copy()
 
 
 def _add_vref_lines(
@@ -835,30 +817,28 @@ def _plot_kde_hist(gaps: pd.DataFrame, output_path: Path) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Plot 5 — KDE by canonical inter-phase transition
+# Plot 5 — KDE by observed inter-phase transition
 # ─────────────────────────────────────────────────────────────────────
 
 def _plot_kde_by_interval(gaps: pd.DataFrame, output_path: Path) -> None:
     """
-    One KDE curve per canonical inter-phase transition:
-        V1→V2, V2→V3, V3→V4, V4→V5, V5→V6.
-
-    Same-phase transitions (e.g. V2→V2, two records of the same phase
-    on consecutive days) are explicitly excluded by filtering against
-    CANONICAL_TRANSITIONS.
+    One KDE curve per observed inter-phase transition (derived from data).
+    Includes forward and reverse transitions (e.g., V2→V1) when present.
     """
     dist = gaps[gaps["gap_days"].notna() & (gaps["gap_days"] > 0)].copy()
 
-    # Keep ONLY defined canonical inter-phase pairs
-    dist = dist[dist["transition_interval"].isin(CANONICAL_TRANSITIONS.keys())].copy()
-
     if dist.empty:
-        print("  [!] No canonical inter-phase transitions found — skipping kde_by_interval.")
+        print("  [!] No observed inter-phase transitions found — skipping kde_by_interval.")
         return
 
-    # Plot in canonical order
-    present = [t for t in CANONICAL_TRANSITIONS.keys()
-               if t in dist["transition_interval"].unique()]
+    transition_sizes = (
+        dist.groupby(["transition_interval", "transition_order"], as_index=False)
+        .size()
+        .rename(columns={"size": "n"})
+    )
+    transition_sizes["sort_key"] = transition_sizes["transition_order"].map(_transition_sort_key)
+    transition_sizes = transition_sizes.sort_values(["sort_key", "n"], ascending=[True, False])
+    present = transition_sizes["transition_interval"].tolist()
 
     palette = sns.color_palette("tab10", len(present))
 
@@ -873,7 +853,7 @@ def _plot_kde_by_interval(gaps: pd.DataFrame, output_path: Path) -> None:
         log_sub = np.log10(sub.clip(lower=0.5))
         xr = np.linspace(log_sub.min(), log_sub.max(), 400)
         kde = gaussian_kde(log_sub, bw_method=0.3)
-        label = CANONICAL_TRANSITIONS[trans]
+        label = _transition_display_label(trans)
         ax.plot(10**xr, kde(xr), lw=2.2, color=color)
         line_handles.append(
             mlines.Line2D([], [], color=color, lw=2.2,
@@ -894,8 +874,8 @@ def _plot_kde_by_interval(gaps: pd.DataFrame, output_path: Path) -> None:
     ax.set_xlabel("Days between visits (log scale)", labelpad=10)
     ax.set_ylabel("KDE density")
     ax.set_title(
-        "Gap distribution by canonical inter-phase transition\n"
-        "(V1→V2, V2→V3, V3→V4, V4→V5, V5→V6)",
+        "Gap distribution by observed inter-phase transition\n"
+        "(includes forward and reverse transitions present in data)",
         fontsize=12,
     )
     ax.grid(axis="x", linestyle=":", alpha=0.25)
@@ -919,7 +899,7 @@ def _plot_kde_by_interval(gaps: pd.DataFrame, output_path: Path) -> None:
         bbox_to_anchor=(0.5, 0.0),
         ncol=2,
         fontsize=8,
-        title="Canonical transition",
+        title="Observed transition",
         title_fontsize=8.5,
         frameon=True,
         framealpha=0.9,
@@ -1194,9 +1174,7 @@ def main() -> None:
     )
     violin_data = gaps_main.copy()
     kde_hist_data = gaps_main.copy()
-    kde_by_interval_data = gaps_main[
-        gaps_main["transition_interval"].isin(CANONICAL_TRANSITIONS.keys())
-    ].copy()
+    kde_by_interval_data = gaps_main.copy()
     kde_by_interval_special_counts = (
         gaps_special.groupby(["transition_case", "transition_interval"], dropna=False, as_index=False)
         .size()
