@@ -5,18 +5,18 @@ Cohort Viability Analysis — C0 through C12
 =============================================================================
 
 INPUT:  visits_long_collapsed_by_interval_codebook_type_recode.csv
-        (Formato codebook: filas = visitas; celdas no-nulas = dato registrado;
-         la fila 0 del CSV contiene descriptores de tipo y se omite.)
+        (Codebook format: rows = visits; non-null cells = recorded value;
+         CSV row 0 contains type descriptors and is removed.)
 
-OUTPUT: cohort_viability_results.csv   — tabla resumen por cohorte
-        cohort_essdai_distribution.csv — distribución de visitas ESSDAI
-        cohort_esspri_distribution.csv — distribución de visitas ESSPRI
+OUTPUT: cohort_viability_results.csv   — cohort summary table
+        cohort_essdai_distribution.csv — ESSDAI visit distribution
+        cohort_esspri_distribution.csv — ESSPRI visit distribution
 
-USO EN BIOWULF:
+BIOWULF USAGE:
     module load python
-    python cohort_viability_analysis.py --input <ruta_al_csv>
+    python cohort_viability_analysis.py --input <path_to_csv>
 
-Dependencias: pandas, numpy
+Dependencies: pandas, numpy
 =============================================================================
 """
 
@@ -29,33 +29,33 @@ import numpy as np
 from common import ANALYTIC_DIR, REPORTS_DIR
 
 # ---------------------------------------------------------------------------
-# CONFIG: columnas clave del codebook
-# Ajustar si la limpieza de datos cambia los nombres de columnas.
+# CONFIG: key codebook columns
+# Update if data cleaning changes column names.
 # ---------------------------------------------------------------------------
 
 COL_PATIENT    = "ids__patient_record_number"
 COL_INTERVAL   = "ids__interval_name"
 COL_VISIT_DATE = "ids__visit_date"
 
-# Clasificación de enfermedad
+# Disease classification
 COL_SJD_CLASS  = "visit_summary_form__sjogrens_class"
 COL_IE_PRIM_SEC = "inclusion/exclusion_criteria__ic_sjogrens_prim_sec"
 COL_IE_HV       = "inclusion/exclusion_criteria__ic_hv"
 
 # ESSDAI / ESSPRI
 COL_ESSDAI     = "essdai__essdai_total_score"
-COL_ESSPRI_DRY = "esspri_questionnaire__dryness"       # proxy de completitud ESSPRI
+COL_ESSPRI_DRY = "esspri_questionnaire__dryness"       # ESSPRI completeness proxy
 
 # Labs
 COL_LABS       = "cris_lab_form__labs_done"
 
-# Flujo salival (glandular)
+# Salivary flow (glandular)
 COL_SAL_FLOW   = "salivary_flow_form__flow_whole_unstim"
 
-# Examen ocular
+# Eye exam
 COL_EYE        = "eye_examination__eye_exam_done"
 
-# Comorbilidades
+# Comorbidities
 COL_COMORBID   = "rheumatological_comorbidities__comorbid_none"
 COL_PMH_CARDIO = "past_medical_history__cardio_none"
 
@@ -68,10 +68,10 @@ COLS_OVERLAP   = [
     "rheumatological_comorbidities__dermatomyositis",
 ]
 
-# Medicamentos (para C9)
+# Medications (for C9)
 COLS_MEDS      = [f"medications__rx_{i}_name" for i in range(1, 11)]
 
-# Dominios ESSDAI individuales (para C5 — proxy EGM)
+# Individual ESSDAI domains (for C5 — EGM proxy)
 COLS_ESSDAI_DOMAINS = [
     "essdai__constitutional", "essdai__hema_lphdenopthy",
     "essdai__gland_swell",    "essdai__articular_domain",
@@ -81,20 +81,20 @@ COLS_ESSDAI_DOMAINS = [
     "essdai__hematologic",    "essdai__biological_domain",
 ]
 
-# Criterios de inclusión/exclusión (para C0)
-COLS_IE = []   # se detectan dinámicamente
+# Inclusion/exclusion criteria (for C0)
+COLS_IE = []   # dynamically detected
 
 # ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
 
 def load_data(path: str) -> pd.DataFrame:
-    """Carga el CSV omitiendo la fila de descriptores de tipo (fila 0 del CSV)."""
+    """Load CSV and drop the type-descriptor row (CSV row 0)."""
     df = pd.read_csv(path)
-    # La primera fila de datos contiene type-codes ("string","numeric","boolean","date")
-    # cuando ids__subject_number == "numeric" → es la fila de descriptores → eliminar
+    # The first data row contains type codes ("string","numeric","boolean","date")
+    # when ids__subject_number == "numeric" → this is the descriptor row → remove
     mask_type_row = df[COL_PATIENT].isna() | (df.iloc[:, 2].astype(str) == "numeric")
-    # Detectar fila tipo: la columna ids__subject_number == "numeric"
+    # Detect descriptor row: ids__subject_number == "numeric"
     if "ids__subject_number" in df.columns:
         type_rows = df[df["ids__subject_number"].astype(str).str.lower() == "numeric"].index
         df = df.drop(index=type_rows).reset_index(drop=True)
@@ -102,7 +102,7 @@ def load_data(path: str) -> pd.DataFrame:
 
 
 def pts_with_data(df: pd.DataFrame, col: str, min_visits: int = 1) -> set:
-    """Pacientes con >=min_visits observaciones no-nulas en 'col'."""
+    """Patients with >= min_visits non-null observations in `col`."""
     if col not in df.columns:
         return set()
     tmp = df[df[col].notna()].groupby(COL_PATIENT).size()
@@ -110,7 +110,7 @@ def pts_with_data(df: pd.DataFrame, col: str, min_visits: int = 1) -> set:
 
 
 def pts_with_values(df: pd.DataFrame, col: str, values: set) -> set:
-    """Pacientes con al menos una visita donde 'col' está en 'values'."""
+    """Patients with at least one visit where `col` is in `values`."""
     if col not in df.columns:
         return set()
     numeric_col = pd.to_numeric(df[col], errors="coerce")
@@ -120,7 +120,7 @@ def pts_with_values(df: pd.DataFrame, col: str, values: set) -> set:
 
 
 def pts_any_col(df: pd.DataFrame, cols: list) -> set:
-    """Pacientes con al menos UNA celda no-nula en cualquiera de 'cols'."""
+    """Patients with at least ONE non-null cell in any column from `cols`."""
     present = [c for c in cols if c in df.columns]
     if not present:
         return set()
@@ -129,7 +129,7 @@ def pts_any_col(df: pd.DataFrame, cols: list) -> set:
 
 
 def pts_all_cols_same_visit(df: pd.DataFrame, cols: list) -> set:
-    """Pacientes con al menos UNA visita donde TODAS las columnas son no-nulas."""
+    """Patients with at least ONE visit where ALL columns are non-null."""
     present = [c for c in cols if c in df.columns]
     if not present:
         return set()
@@ -143,7 +143,7 @@ def viability_flag(n: int) -> str:
     elif n >= 20:
         return "MARGINAL"
     else:
-        return "INSUFICIENTE"
+        return "INSUFFICIENT"
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +154,7 @@ def run_analysis(df: pd.DataFrame) -> dict:
     total_pts   = df[COL_PATIENT].nunique()
     total_visits = len(df)
 
-    # Detectar columnas IE
+    # Detect IE columns
     ie_cols = [c for c in df.columns
                if "inclusion" in c.lower() or "exclusion" in c.lower()]
 
@@ -165,11 +165,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
     # -----------------------------------------------------------------------
     c0 = set(df[COL_PATIENT].unique())
     results["C0"] = dict(
-        descripcion="Source screening (15-D)",
-        objetivo="Obj. Primario 1 — contexto de referral",
-        criterio_inclusion="Todo participante 15-D (total de pacientes)",
-        criterio_tiempo_cero="Primera visita evaluable NIH SjD",
-        variables_clave=", ".join(ie_cols[:4]) + "..." if ie_cols else "N/A",
+        description="Source screening (15-D)",
+        objective="Primary Objective 1 — referral context",
+        inclusion_criteria="All 15-D participants (total patients)",
+        time_zero_criteria="First evaluable NIH SjD visit",
+        key_variables=", ".join(ie_cols[:4]) + "..." if ie_cols else "N/A",
         n=len(c0),
         pts=c0,
     )
@@ -179,11 +179,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
     # -----------------------------------------------------------------------
     c1 = pts_with_values(df, COL_SJD_CLASS, {1, 2, 4})
     results["C1"] = dict(
-        descripcion="Core SjD master (primary + secondary)",
-        objetivo="Backbone — base de todos los análisis",
-        criterio_inclusion="Clasificación SjD en {1, 2, 4} (pacientes únicos)",
-        criterio_tiempo_cero="Primera visita NIH evaluable; colapsar 15-D y 11-D si ≤30 días",
-        variables_clave=COL_SJD_CLASS,
+        description="Core SjD master (primary + secondary)",
+        objective="Backbone — base for all analyses",
+        inclusion_criteria="SjD classification in {1, 2, 4} (unique patients)",
+        time_zero_criteria="First evaluable NIH visit; collapse 15-D and 11-D if ≤30 days",
+        key_variables=COL_SJD_CLASS,
         n=len(c1),
         pts=c1,
     )
@@ -200,11 +200,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
                     if COL_ESSDAI in df.columns else pd.Series(dtype=int)
 
     results["C2"] = dict(
-        descripcion="Longitudinal ESSDAI (≥2 mediciones)",
-        objetivo="Obj. Primario 2 — progresión de la enfermedad",
-        criterio_inclusion="SjD primaria/secundaria + ≥2 ESSDAI evaluables",
-        criterio_tiempo_cero="Primera visita con ESSDAI registrado",
-        variables_clave=COL_ESSDAI,
+        description="Longitudinal ESSDAI (≥2 measurements)",
+        objective="Primary Objective 2 — disease progression",
+        inclusion_criteria="Primary/secondary SjD + ≥2 evaluable ESSDAI",
+        time_zero_criteria="First visit with recorded ESSDAI",
+        key_variables=COL_ESSDAI,
         n=len(c2),
         pts=c2,
         n_any=len(essdai_any),
@@ -221,11 +221,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
         essdai_numeric = pd.to_numeric(c2_rows[COL_ESSDAI], errors="coerce")
         c3 = set(c2_rows.loc[essdai_numeric < 5, COL_PATIENT].unique())
     results["C3"] = dict(
-        descripcion="Incident severe-risk (ESSDAI < 5 basal)",
-        objetivo="Obj. Primario 4 — tiempo a enfermedad severa",
-        criterio_inclusion="Subconjunto de C2 con ESSDAI total < 5",
-        criterio_tiempo_cero="Primera visita con ESSDAI < 5 documentado",
-        variables_clave=COL_ESSDAI,
+        description="Incident severe-risk (baseline ESSDAI < 5)",
+        objective="Primary Objective 4 — time to severe disease",
+        inclusion_criteria="C2 subset with total ESSDAI < 5",
+        time_zero_criteria="First visit with documented ESSDAI < 5",
+        key_variables=COL_ESSDAI,
         n=len(c3),
         pts=c3,
     )
@@ -236,11 +236,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
     lab_pts = pts_with_data(df, COL_LABS)
     c4 = c2 & lab_pts
     results["C4"] = dict(
-        descripcion="Domain/risk-factor (C2 + labs)",
-        objetivo="Obj. Primario 3 — factores de riesgo clínicos y serológicos",
-        criterio_inclusion="C2 + covariables basales + labs enlazados",
-        criterio_tiempo_cero="Primera visita con datos de dominio ESSDAI + predictores basales",
-        variables_clave=f"{COL_ESSDAI}, {COL_LABS}",
+        description="Domain/risk-factor (C2 + labs)",
+        objective="Primary Objective 3 — clinical and serologic risk factors",
+        inclusion_criteria="C2 + baseline covariates + linked labs",
+        time_zero_criteria="First visit with ESSDAI domain data + baseline predictors",
+        key_variables=f"{COL_ESSDAI}, {COL_LABS}",
         n=len(c4),
         pts=c4,
     )
@@ -254,11 +254,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
     egm_pts   = pts_any_col(df, egm_cols_present)
     c5        = gland_pts & egm_pts
     results["C5"] = dict(
-        descripcion="Glandular-EGM overlap",
-        objetivo="Obj. Primario 5 — co-ocurrencia glandular / extra-glandular",
-        criterio_inclusion="SjD con fenotipo glandular ascertable + datos EGM",
-        criterio_tiempo_cero="Primera visita con ambos componentes medibles",
-        variables_clave=f"{COL_SAL_FLOW}, dominios ESSDAI",
+        description="Glandular-EGM overlap",
+        objective="Primary Objective 5 — glandular / extra-glandular co-occurrence",
+        inclusion_criteria="SjD with ascertainable glandular phenotype + EGM data",
+        time_zero_criteria="First visit with both measurable components",
+        key_variables=f"{COL_SAL_FLOW}, ESSDAI domains",
         n=len(c5),
         pts=c5,
         n_gland=len(gland_pts),
@@ -271,11 +271,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
     # -----------------------------------------------------------------------
     c6 = pts_with_data(df, COL_COMORBID) | pts_with_data(df, COL_PMH_CARDIO)
     results["C6"] = dict(
-        descripcion="Comorbilidades (baseline + follow-up)",
-        objetivo="Obj. Secundario 1 — prevalencia e incidencia de comorbilidades",
-        criterio_inclusion="SjD con documentación de comorbilidades",
-        criterio_tiempo_cero="Primera visita SjD evaluable",
-        variables_clave=f"{COL_COMORBID}, {COL_PMH_CARDIO}",
+        description="Comorbidities (baseline + follow-up)",
+        objective="Secondary Objective 1 — comorbidity prevalence and incidence",
+        inclusion_criteria="SjD with documented comorbidities",
+        time_zero_criteria="First evaluable SjD visit",
+        key_variables=f"{COL_COMORBID}, {COL_PMH_CARDIO}",
         n=len(c6),
         pts=c6,
     )
@@ -290,11 +290,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
     c7 = set(paired_df[COL_PATIENT].unique()) if not paired_df.empty else set()
     paired_visits = paired_df.groupby(COL_PATIENT).size() if not paired_df.empty else pd.Series(dtype=int)
     results["C7"] = dict(
-        descripcion="Phenotype Pop 1-3 (ESSDAI+ESSPRI pareados)",
-        objetivo="Obj. Secundario 2 — proporciones en Pop 1/2/3",
-        criterio_inclusion="≥1 visita con ESSDAI y ESSPRI en ventana ±30 días",
-        criterio_tiempo_cero="Primera evaluación pareada ESSDAI-ESSPRI",
-        variables_clave=f"{COL_ESSDAI}, {COL_ESSPRI_DRY}",
+        description="Phenotype Pop 1-3 (paired ESSDAI+ESSPRI)",
+        objective="Secondary Objective 2 — proportions in Pop 1/2/3",
+        inclusion_criteria="≥1 visit with ESSDAI and ESSPRI within ±30 days",
+        time_zero_criteria="First paired ESSDAI-ESSPRI assessment",
+        key_variables=f"{COL_ESSDAI}, {COL_ESSPRI_DRY}",
         n=len(c7),
         pts=c7,
         n_essdai_any=len(essdai_any),
@@ -308,11 +308,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
     overlap_pts = pts_any_col(df, COLS_OVERLAP)
     c8 = c1 & overlap_pts
     results["C8"] = dict(
-        descripcion="Overlap autoinmune (RA/SLE/SSc/otros)",
-        objetivo="Obj. Secundario 3 — progresión en SjD + overlap",
-        criterio_inclusion="Subconjunto de C1 con enfermedad autoinmune coexistente",
-        criterio_tiempo_cero="Mismo índice que cohorte madre (C1)",
-        variables_clave=", ".join(COLS_OVERLAP[:3]) + "...",
+        description="Autoimmune overlap (RA/SLE/SSc/others)",
+        objective="Secondary Objective 3 — progression in SjD + overlap",
+        inclusion_criteria="C1 subset with coexisting autoimmune disease",
+        time_zero_criteria="Same index as parent cohort (C1)",
+        key_variables=", ".join(COLS_OVERLAP[:3]) + "...",
         n=len(c8),
         pts=c8,
     )
@@ -324,14 +324,14 @@ def run_analysis(df: pd.DataFrame) -> dict:
     treated_pts  = pts_any_col(df, meds_present)
     c9 = treated_pts & c2
     results["C9"] = dict(
-        descripcion="Treatment-response (biológicos vs no-biológicos)",
-        objetivo="Obj. Secundario 4 — efecto del tratamiento sobre actividad sistémica",
-        criterio_inclusion="SjD tratada con fecha de inicio + ≥2 ESSDAI (pre y post)",
-        criterio_tiempo_cero="Fecha de inicio del tratamiento",
-        variables_clave=", ".join(meds_present[:3]) + "..." if meds_present else "N/A",
+        description="Treatment-response (biologics vs non-biologics)",
+        objective="Secondary Objective 4 — treatment effect on systemic activity",
+        inclusion_criteria="Treated SjD with treatment start date + ≥2 ESSDAI (pre/post)",
+        time_zero_criteria="Treatment start date",
+        key_variables=", ".join(meds_present[:3]) + "..." if meds_present else "N/A",
         n=len(c9),
         pts=c9,
-        nota="n muy bajo — revisar completitud de datos de medicación.",
+        note="Very low n — review medication data completeness.",
     )
 
     # -----------------------------------------------------------------------
@@ -339,29 +339,29 @@ def run_analysis(df: pd.DataFrame) -> dict:
     # -----------------------------------------------------------------------
     c10 = pts_with_data(df, COL_ESSPRI_DRY, min_visits=2)
     results["C10"] = dict(
-        descripcion="PRO prospectivo (≥2 ESSPRI ≥6 meses)",
-        objetivo="Obj. Secundario 5 — carga sintomática y calidad de vida",
-        criterio_inclusion="11-D con ≥2 evaluaciones PRO separadas ≥6 meses",
-        criterio_tiempo_cero="Primera visita con PRO registrado",
-        variables_clave=COL_ESSPRI_DRY,
+        description="Prospective PRO (≥2 ESSPRI ≥6 months)",
+        objective="Secondary Objective 5 — symptom burden and quality of life",
+        inclusion_criteria="11-D with ≥2 PRO assessments separated by ≥6 months",
+        time_zero_criteria="First visit with recorded PRO",
+        key_variables=COL_ESSPRI_DRY,
         n=len(c10),
         pts=c10,
-        nota="Separación temporal ≥6 meses no verificable sin fechas reales.",
+        note="Temporal separation ≥6 months cannot be verified without true dates.",
     )
 
     # -----------------------------------------------------------------------
     # C11: ML development cohort
     # -----------------------------------------------------------------------
-    c11 = c2   # base mínima; se enriquece con C4/C7/C10 según endpoint
+    c11 = c2   # minimum base; enrich with C4/C7/C10 per endpoint
     results["C11"] = dict(
-        descripcion="ML development (predicción, transiciones)",
-        objetivo="Obj. Exploratorio — modelos de predicción AI/ML",
-        criterio_inclusion="Dataset longitudinal derivado de C2/C7/C10 según endpoint",
-        criterio_tiempo_cero="Específico por endpoint de predicción",
-        variables_clave=f"{COL_ESSDAI}, {COL_ESSPRI_DRY}, covariables basales",
+        description="ML development (prediction, transitions)",
+        objective="Exploratory Objective — AI/ML prediction models",
+        inclusion_criteria="Longitudinal dataset derived from C2/C7/C10 per endpoint",
+        time_zero_criteria="Prediction-endpoint specific",
+        key_variables=f"{COL_ESSDAI}, {COL_ESSPRI_DRY}, baseline covariates",
         n=len(c11),
         pts=c11,
-        nota="Split train/val debe hacerse a nivel paciente para evitar leakage.",
+        note="Train/val split must be done at patient level to avoid leakage.",
     )
 
     # -----------------------------------------------------------------------
@@ -369,11 +369,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
     # -----------------------------------------------------------------------
     c12 = pts_with_data(df, COL_IE_HV)
     results["C12"] = dict(
-        descripcion="Comparador — voluntarios sanos (HV)",
-        objetivo="Contexto descriptivo / comparativo seleccionado",
-        criterio_inclusion="HV y no-SjD de 15-D",
-        criterio_tiempo_cero="Primera visita evaluable 15-D",
-        variables_clave=COL_IE_HV,
+        description="Comparator — healthy volunteers (HV)",
+        objective="Selected descriptive/comparative context",
+        inclusion_criteria="HV and non-SjD from 15-D",
+        time_zero_criteria="First evaluable 15-D visit",
+        key_variables=COL_IE_HV,
         n=len(c12),
         pts=c12,
     )
@@ -394,15 +394,15 @@ def build_summary_table(results: dict, total_pts: int, total_visits: int) -> pd.
         else:
             flag = viability_flag(n)
         rows.append({
-            "Cohorte":           cohort_id,
-            "Descripcion":       r["descripcion"],
-            "Objetivo":          r["objetivo"],
-            "n_pacientes":       n if n is not None else "TBD",
+            "Cohort":            cohort_id,
+            "Description":       r["description"],
+            "Objective":         r["objective"],
+            "n_patients":        n if n is not None else "TBD",
             "pct_total":         f"{100*n/total_pts:.1f}%" if n is not None else "TBD",
-            "Viabilidad":        flag,
-            "Criterio_T0":       r["criterio_tiempo_cero"],
-            "Variables_clave":   r["variables_clave"],
-            "Notas":             r.get("nota", ""),
+            "Viability":         flag,
+            "T0_Criteria":       r["time_zero_criteria"],
+            "Key_Variables":     r["key_variables"],
+            "Notes":             r.get("note", ""),
         })
     return pd.DataFrame(rows)
 
@@ -412,9 +412,9 @@ def build_essdai_table(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     essdai_v = df[df[COL_ESSDAI].notna()].groupby(COL_PATIENT).size()
     dist = essdai_v.value_counts().sort_index().reset_index()
-    dist.columns = ["n_visitas_ESSDAI", "n_pacientes"]
-    dist["pct"] = (dist["n_pacientes"] / dist["n_pacientes"].sum() * 100).round(1)
-    dist["acumulado_n"] = dist["n_pacientes"][::-1].cumsum()[::-1]  # >= n visitas
+    dist.columns = ["n_ESSDAI_visits", "n_patients"]
+    dist["pct"] = (dist["n_patients"] / dist["n_patients"].sum() * 100).round(1)
+    dist["cumulative_n"] = dist["n_patients"][::-1].cumsum()[::-1]  # >= n visits
     return dist
 
 
@@ -423,9 +423,9 @@ def build_esspri_table(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     esspri_v = df[df[COL_ESSPRI_DRY].notna()].groupby(COL_PATIENT).size()
     dist = esspri_v.value_counts().sort_index().reset_index()
-    dist.columns = ["n_visitas_ESSPRI", "n_pacientes"]
-    dist["pct"] = (dist["n_pacientes"] / dist["n_pacientes"].sum() * 100).round(1)
-    dist["acumulado_n"] = dist["n_pacientes"][::-1].cumsum()[::-1]
+    dist.columns = ["n_ESSPRI_visits", "n_patients"]
+    dist["pct"] = (dist["n_patients"] / dist["n_patients"].sum() * 100).round(1)
+    dist["cumulative_n"] = dist["n_patients"][::-1].cumsum()[::-1]
     return dist
 
 
@@ -433,9 +433,9 @@ def print_summary(results: dict, total_pts: int, total_visits: int):
     print("\n" + "="*70)
     print("  SJÖGREN NATURAL HISTORY PROJECT — COHORT VIABILITY ANALYSIS")
     print("="*70)
-    print(f"  Total pacientes: {total_pts}   |   Total visitas: {total_visits}")
+    print(f"  Total patients: {total_pts}   |   Total visits: {total_visits}")
     print("-"*70)
-    header = f"{'Cohorte':<6} {'n':>6} {'%Total':>7}  {'Viabilidad':<15}  Descripcion"
+    header = f"{'Cohort':<6} {'n':>6} {'%Total':>7}  {'Viability':<15}  Description"
     print(header)
     print("-"*70)
     for cid, r in results.items():
@@ -443,7 +443,7 @@ def print_summary(results: dict, total_pts: int, total_visits: int):
         flag = viability_flag(n) if n is not None else "TBD"
         pct  = f"{100*n/total_pts:.0f}%" if n is not None else "TBD"
         n_str = str(n) if n is not None else "TBD"
-        print(f"  {cid:<5} {n_str:>6} {pct:>7}  {flag:<15}  {r['descripcion']}")
+        print(f"  {cid:<5} {n_str:>6} {pct:>7}  {flag:<15}  {r['description']}")
     print("="*70 + "\n")
 
 
@@ -460,12 +460,12 @@ def parse_args():
     p.add_argument(
         "--input", "-i",
         default=str(ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_corrected.csv"),
-        help="Ruta al CSV del codebook (default: data_analytic/visits_long_collapsed_by_interval_codebook_corrected.csv)",
+        help="Path to the codebook CSV (default: data_analytic/visits_long_collapsed_by_interval_codebook_corrected.csv)",
     )
     p.add_argument(
         "--output-dir", "-o",
         default=str(REPORTS_DIR / "cohort_viability"),
-        help="Directorio de salida para los CSV de resultados (default: reports/cohort_viability)",
+        help="Output directory for result CSV files (default: reports/cohort_viability)",
     )
     return p.parse_args()
 
@@ -474,38 +474,38 @@ def main():
     args = parse_args()
 
     if not os.path.exists(args.input):
-        sys.exit(f"ERROR: No se encontró el archivo: {args.input}")
+        sys.exit(f"ERROR: File not found: {args.input}")
 
-    print(f"\nCargando datos desde: {args.input}")
+    print(f"\nLoading data from: {args.input}")
     df = load_data(args.input)
-    print(f"  → {df[COL_PATIENT].nunique()} pacientes, {len(df)} visitas, {df.shape[1]} columnas")
+    print(f"  → {df[COL_PATIENT].nunique()} patients, {len(df)} visits, {df.shape[1]} columns")
 
     results, total_pts, total_visits = run_analysis(df)
 
-    # Imprimir resumen en consola
+    # Print console summary
     print_summary(results, total_pts, total_visits)
 
-    # Guardar tablas CSV
+    # Save CSV tables
     os.makedirs(args.output_dir, exist_ok=True)
 
     summary = build_summary_table(results, total_pts, total_visits)
     out_summary = os.path.join(args.output_dir, "cohort_viability_results.csv")
     summary.to_csv(out_summary, index=False)
-    print(f"  Tabla resumen guardada: {out_summary}")
+    print(f"  Summary table saved: {out_summary}")
 
     essdai_dist = build_essdai_table(df)
     if not essdai_dist.empty:
         out_essdai = os.path.join(args.output_dir, "cohort_essdai_distribution.csv")
         essdai_dist.to_csv(out_essdai, index=False)
-        print(f"  Distribución ESSDAI guardada: {out_essdai}")
+        print(f"  ESSDAI distribution saved: {out_essdai}")
 
     esspri_dist = build_esspri_table(df)
     if not esspri_dist.empty:
         out_esspri = os.path.join(args.output_dir, "cohort_esspri_distribution.csv")
         esspri_dist.to_csv(out_esspri, index=False)
-        print(f"  Distribución ESSPRI guardada: {out_esspri}")
+        print(f"  ESSPRI distribution saved: {out_esspri}")
 
-    print("\nAnálisis completado.\n")
+    print("\nAnalysis completed.\n")
 
 
 if __name__ == "__main__":
