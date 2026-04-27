@@ -113,8 +113,9 @@ def pts_with_values(df: pd.DataFrame, col: str, values: set) -> set:
     """Pacientes con al menos una visita donde 'col' está en 'values'."""
     if col not in df.columns:
         return set()
-    normalized_values = {str(v).strip() for v in values}
-    mask = df[col].notna() & df[col].astype(str).str.strip().isin(normalized_values)
+    numeric_col = pd.to_numeric(df[col], errors="coerce")
+    valid_values = {v for v in values if pd.notna(v)}
+    mask = numeric_col.isin(valid_values)
     return set(df.loc[mask, COL_PATIENT].unique())
 
 
