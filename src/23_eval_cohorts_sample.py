@@ -43,7 +43,7 @@ COL_IE_PRIM_SEC = "inclusion/exclusion_criteria__ic_sjogrens_prim_sec"
 COL_IE_HV       = "inclusion/exclusion_criteria__ic_hv"
 
 # ESSDAI / ESSPRI
-COL_ESSDAI     = "essdai-_r__essdai_total_score"
+COL_ESSDAI     = "essdai__essdai_total_score"
 COL_ESSPRI_DRY = "esspri_questionnaire__dryness"       # proxy de completitud ESSPRI
 
 # Labs
@@ -109,6 +109,15 @@ def pts_with_data(df: pd.DataFrame, col: str, min_visits: int = 1) -> set:
     return set(tmp[tmp >= min_visits].index)
 
 
+def pts_with_values(df: pd.DataFrame, col: str, values: set) -> set:
+    """Pacientes con al menos una visita donde 'col' está en 'values'."""
+    if col not in df.columns:
+        return set()
+    normalized_values = {str(v).strip() for v in values}
+    mask = df[col].notna() & df[col].astype(str).str.strip().isin(normalized_values)
+    return set(df.loc[mask, COL_PATIENT].unique())
+
+
 def pts_any_col(df: pd.DataFrame, cols: list) -> set:
     """Pacientes con al menos UNA celda no-nula en cualquiera de 'cols'."""
     present = [c for c in cols if c in df.columns]
@@ -167,11 +176,11 @@ def run_analysis(df: pd.DataFrame) -> dict:
     # -----------------------------------------------------------------------
     # C1: Core SjD master cohort
     # -----------------------------------------------------------------------
-    c1 = pts_with_data(df, COL_SJD_CLASS)
+    c1 = pts_with_values(df, COL_SJD_CLASS, {1, 2, 4})
     results["C1"] = dict(
         descripcion="Core SjD master (primary + secondary)",
         objetivo="Backbone — base de todos los análisis",
-        criterio_inclusion="Clasificación SjD registrada (primaria o secundaria)",
+        criterio_inclusion="Clasificación SjD en {1, 2, 4} (pacientes únicos)",
         criterio_tiempo_cero="Primera visita NIH evaluable; colapsar 15-D y 11-D si ≤30 días",
         variables_clave=COL_SJD_CLASS,
         n=len(c1),
@@ -181,11 +190,12 @@ def run_analysis(df: pd.DataFrame) -> dict:
     # -----------------------------------------------------------------------
     # C2: Longitudinal ESSDAI cohort
     # -----------------------------------------------------------------------
-    essdai_any = pts_with_data(df, COL_ESSDAI, min_visits=1)
-    c2         = pts_with_data(df, COL_ESSDAI, min_visits=2)
-    c2_3v      = pts_with_data(df, COL_ESSDAI, min_visits=3)
+    df_c1 = df[df[COL_PATIENT].isin(c1)]
+    essdai_any = pts_with_data(df_c1, COL_ESSDAI, min_visits=1)
+    c2         = pts_with_data(df_c1, COL_ESSDAI, min_visits=2)
+    c2_3v      = pts_with_data(df_c1, COL_ESSDAI, min_visits=3)
 
-    essdai_visits = df[df[COL_ESSDAI].notna()].groupby(COL_PATIENT).size() \
+    essdai_visits = df_c1[df_c1[COL_ESSDAI].notna()].groupby(COL_PATIENT).size() \
                     if COL_ESSDAI in df.columns else pd.Series(dtype=int)
 
     results["C2"] = dict(
@@ -204,16 +214,19 @@ def run_analysis(df: pd.DataFrame) -> dict:
     # -----------------------------------------------------------------------
     # C3: Incident severe-risk cohort
     # -----------------------------------------------------------------------
-    # Requiere valores ESSDAI reales (< 5 al baseline) — no disponibles en este codebook
+    c3 = set()
+    if COL_ESSDAI in df.columns and c2:
+        c2_rows = df[df[COL_PATIENT].isin(c2)].copy()
+        essdai_numeric = pd.to_numeric(c2_rows[COL_ESSDAI], errors="coerce")
+        c3 = set(c2_rows.loc[essdai_numeric < 5, COL_PATIENT].unique())
     results["C3"] = dict(
         descripcion="Incident severe-risk (ESSDAI < 5 basal)",
         objetivo="Obj. Primario 4 — tiempo a enfermedad severa",
-        criterio_inclusion="Subconjunto de C2 con ESSDAI < 5 en visita ancla",
+        criterio_inclusion="Subconjunto de C2 con ESSDAI total < 5",
         criterio_tiempo_cero="Primera visita con ESSDAI < 5 documentado",
-        variables_clave=COL_ESSDAI + " (valor real requerido)",
-        n=None,   # No determinable sin valores ESSDAI reales
-        pts=None,
-        nota="REQUIERE valores ESSDAI reales del CRIS/CTDB. Techo teórico = n(C2).",
+        variables_clave=COL_ESSDAI,
+        n=len(c3),
+        pts=c3,
     )
 
     # -----------------------------------------------------------------------
