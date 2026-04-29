@@ -289,14 +289,28 @@ def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, in
     for _, group in grouped:
         if len(group) <= 1:
             continue
-        if not group[KEY_INTERVAL].map(_is_natural_interval).any():
+        natural_rows = group[KEY_INTERVAL].map(_is_natural_interval)
+        optional_rows = group[KEY_INTERVAL].map(_is_15d_optional)
+        natural_count = int(natural_rows.sum())
+        optional_count = int(optional_rows.sum())
+
+        if natural_count == 0:
             continue
+        # Collapse when the patient-year has at least one Natural History row and
+        # at least one 15D Optional row. This allows one or multiple 15D rows as
+        # long as they belong to the same year as Natural History.
+        if not (natural_count >= 1 and optional_count >= 1):
+            continue
+
         collapsed_groups += 1
         collapsed_rows += int(len(group) - 1)
         patient_id = _normalize_string(group[KEY_PATIENT].iloc[0])
         visit_year = int(group["_visit_year"].iloc[0]) if pd.notna(group["_visit_year"].iloc[0]) else pd.NA
         merged_row: dict[str, object] = {}
         for column in df.columns:
+            if column == KEY_INTERVAL:
+                merged_row[column] = NH_INTERVAL
+                continue
             merged_value, merged_tokens, had_conflict = _merge_cell_values_pipe(group[column].tolist())
             merged_row[column] = merged_value
             if had_conflict:
