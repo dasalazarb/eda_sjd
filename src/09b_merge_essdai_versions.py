@@ -346,6 +346,33 @@ def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, in
     return out, collapsed_groups, collapsed_rows, overlap_report
 
 
+def _renumber_remaining_15d_optional(df: pd.DataFrame) -> pd.DataFrame:
+    if KEY_PATIENT not in df.columns or KEY_INTERVAL not in df.columns:
+        return df.copy()
+
+    out = df.copy()
+    work = out.reset_index().rename(columns={"index": "_orig_index"})
+    work["_patient_norm"] = work[KEY_PATIENT].map(_normalize_string)
+    work["_visit_ts"] = pd.to_datetime(work[KEY_VISIT_DATE], errors="coerce") if KEY_VISIT_DATE in work.columns else pd.NaT
+    optional_mask = work[KEY_INTERVAL].map(_is_15d_optional)
+    optional_rows = work.loc[optional_mask].copy()
+    if optional_rows.empty:
+        return out
+
+    optional_rows = optional_rows.sort_values(
+        by=["_patient_norm", "_visit_ts", "_orig_index"], na_position="last", kind="stable"
+    )
+    optional_rows["_seq"] = optional_rows.groupby("_patient_norm", dropna=False).cumcount() + 1
+    rename_map = {
+        int(row["_orig_index"]): f"{OPT15D_PREFIX} {int(row['_seq'])}" for _, row in optional_rows.iterrows()
+    }
+    work[KEY_INTERVAL] = work.apply(
+        lambda row: rename_map.get(int(row["_orig_index"]), row[KEY_INTERVAL]),
+        axis=1,
+    )
+    return work.drop(columns=["_orig_index", "_patient_norm", "_visit_ts"]).reindex(columns=out.columns)
+
+
 def run(config: MergeConfig) -> None:
     logger = setup_logger("09b_merge_essdai_versions")
     print_script_overview(
@@ -366,6 +393,7 @@ def run(config: MergeConfig) -> None:
         collapsed_optional_rows,
         collapsed_optional_overlap_report,
     ) = _collapse_15d_optional_same_year(filtered)
+    filtered = _renumber_remaining_15d_optional(filtered)
 
     print_step(4, "Merge ESSDAI legacy/canonical columns")
     merged, merged_pairs = _merge_essdai_columns(filtered)
