@@ -151,7 +151,8 @@ def viability_flag(n: int) -> str:
 # ---------------------------------------------------------------------------
 
 def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
-    total_pts   = df[COL_PATIENT].nunique()
+    c0_source = c0_df if c0_df is not None and COL_PATIENT in c0_df.columns else df
+    total_pts   = c0_source[COL_PATIENT].nunique()
     total_visits = len(df)
 
     # Detect IE columns
@@ -163,7 +164,6 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     # -----------------------------------------------------------------------
     # C0: Source screening cohort
     # -----------------------------------------------------------------------
-    c0_source = c0_df if c0_df is not None and COL_PATIENT in c0_df.columns else df
     c0 = set(c0_source[COL_PATIENT].unique())
     results["C0"] = dict(
         description="Source screening (15-D)",
