@@ -283,20 +283,39 @@ def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, in
     collapsed_groups = 0
     collapsed_rows = 0
     collapsed_records: list[dict[str, object]] = []
+    collapsed_source_indices: list[int] = []
     overlap_report_rows: list[dict[str, object]] = []
     columns_with_conflicts: set[str] = set()
 
     for _, group in grouped:
         if len(group) <= 1:
             continue
-        if not group[KEY_INTERVAL].map(_is_natural_interval).any():
+        natural_rows = group[KEY_INTERVAL].map(_is_natural_interval)
+        optional_rows = group[KEY_INTERVAL].map(_is_15d_optional)
+        natural_count = int(natural_rows.sum())
+        optional_count = int(optional_rows.sum())
+
+        collapse_interval_name: str | None = None
+        # Case 1: Natural History + one or more 15D Optional in same patient-year.
+        if natural_count >= 1 and optional_count >= 1:
+            collapse_interval_name = NH_INTERVAL
+        # Case 2: Two or more 15D Optional rows in a year with no Natural History.
+        elif natural_count == 0 and optional_count >= 2:
+            collapse_interval_name = f"{OPT15D_PREFIX} 1"
+
+        if collapse_interval_name is None:
             continue
+
         collapsed_groups += 1
         collapsed_rows += int(len(group) - 1)
+        collapsed_source_indices.extend(group.index.tolist())
         patient_id = _normalize_string(group[KEY_PATIENT].iloc[0])
         visit_year = int(group["_visit_year"].iloc[0]) if pd.notna(group["_visit_year"].iloc[0]) else pd.NA
         merged_row: dict[str, object] = {}
         for column in df.columns:
+            if column == KEY_INTERVAL:
+                merged_row[column] = collapse_interval_name
+                continue
             merged_value, merged_tokens, had_conflict = _merge_cell_values_pipe(group[column].tolist())
             merged_row[column] = merged_value
             if had_conflict:
@@ -314,9 +333,7 @@ def _collapse_15d_optional_same_year(df: pd.DataFrame) -> tuple[pd.DataFrame, in
     if not collapsed_records:
         return work, 0, 0, pd.DataFrame(columns=[KEY_PATIENT, "visit_year", "variable", "values_found"])
 
-    keep_mask = pd.Series(True, index=work.index)
-    keep_mask.loc[targets.index] = False
-    surviving = work.loc[keep_mask].copy()
+    surviving = work.drop(index=collapsed_source_indices).copy()
     collapsed_df = pd.DataFrame(collapsed_records, columns=df.columns)
     out = pd.concat([surviving, collapsed_df], ignore_index=True)
     for column in columns_with_conflicts:
