@@ -433,8 +433,8 @@ def build_esspri_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def export_cohort_subject_ids(df: pd.DataFrame, results: dict, output_dir: str):
-    """Export ids__subject_record_number lists per cohort (c0, c1, ...)."""
-    subject_col = "ids__subject_record_number"
+    """Export ids__patient_record_number lists per cohort (c0, c1, ...)."""
+    subject_col = "ids__patient_record_number"
     if subject_col not in df.columns:
         print(f"  WARNING: column '{subject_col}' not found; cohort subject ID exports skipped.")
         return
@@ -455,7 +455,7 @@ def export_cohort_subject_ids(df: pd.DataFrame, results: dict, output_dir: str):
             .rename(subject_col)
         )
 
-        file_name = f"{cohort_id.lower()}__ids__subject_record_number.csv"
+        file_name = f"{cohort_id.lower()}__ids__patient_record_number.csv"
         out_path = os.path.join(cohort_ids_dir, file_name)
         cohort_subjects.to_frame().to_csv(out_path, index=False)
         print(f"  Cohort IDs saved ({cohort_id}): {out_path}")
