@@ -45,6 +45,7 @@ COL_IE_HV       = "inclusion/exclusion_criteria__ic_hv"
 # ESSDAI / ESSPRI
 COL_ESSDAI     = "essdai__essdai_total_score"
 COL_ESSPRI_DRY = "esspri_questionnaire__dryness"       # ESSPRI completeness proxy
+COL_ESSPRI_FAT = "esspri_questionnaire__fatigue"
 
 # Labs
 COL_LABS       = "cris_lab_form__labs_done"
@@ -61,11 +62,20 @@ COL_PMH_CARDIO = "past_medical_history__cardio_none"
 
 # Autoimmune overlap (para C8)
 COLS_OVERLAP   = [
+    "rheumatological_comorbidities__integ_raynds",
     "rheumatological_comorbidities__ra",
     "rheumatological_comorbidities__sle1",
     "rheumatological_comorbidities__systemic_sclerosis",
     "rheumatological_comorbidities__polymyositis",
     "rheumatological_comorbidities__dermatomyositis",
+    "rheumatological_comorbidities__mixed_connective_tissue_disease",
+    "rheumatological_comorbidities__antiphospholipid_syndrome",
+    "rheumatological_comorbidities__cryoglobulinemia",
+    "rheumatological_comorbidities__fibromyalgia1",
+    "rheumatological_comorbidities__osteoporosis1",
+    "rheumatological_comorbidities__osteopenia",
+    "rheumatological_comorbidities__osteoarthritis",
+    "rheumatological_comorbidities__sarcoidosis",
 ]
 
 # Medications (for C9)
@@ -234,16 +244,16 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     # -----------------------------------------------------------------------
     # C4: Domain/risk-factor cohort
     # -----------------------------------------------------------------------
-    lab_pts = pts_with_data(df, COL_LABS)
-    c4 = c2 & lab_pts
+    c4 = None
     results["C4"] = dict(
         description="Domain/risk-factor (C2 + labs)",
         objective="Primary Objective 3 — clinical and serologic risk factors",
         inclusion_criteria="C2 + baseline covariates + linked labs",
         time_zero_criteria="First visit with ESSDAI domain data + baseline predictors",
         key_variables=f"{COL_ESSDAI}, {COL_LABS}",
-        n=len(c4),
+        n=c4,
         pts=c4,
+        note="Pendiente por integración de datos desde BTRIS.",
     )
 
     # -----------------------------------------------------------------------
@@ -270,32 +280,39 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     # -----------------------------------------------------------------------
     # C6: Comorbidity cohort
     # -----------------------------------------------------------------------
-    c6 = pts_with_data(df, COL_COMORBID) | pts_with_data(df, COL_PMH_CARDIO)
+    c6 = None
     results["C6"] = dict(
         description="Comorbidities (baseline + follow-up)",
         objective="Secondary Objective 1 — comorbidity prevalence and incidence",
         inclusion_criteria="SjD with documented comorbidities",
         time_zero_criteria="First evaluable SjD visit",
         key_variables=f"{COL_COMORBID}, {COL_PMH_CARDIO}",
-        n=len(c6),
+        n=c6,
         pts=c6,
+        note="Pendiente por integración de datos desde BTRIS.",
     )
 
     # -----------------------------------------------------------------------
     # C7: Phenotype population cohort (Pop 1–3)
     # -----------------------------------------------------------------------
-    esspri_any = pts_with_data(df, COL_ESSPRI_DRY)
-    paired_df  = df[df[COL_ESSDAI].notna() & df[COL_ESSPRI_DRY].notna()] \
-                 if (COL_ESSDAI in df.columns and COL_ESSPRI_DRY in df.columns) \
-                 else pd.DataFrame()
+    esspri_mask = pd.Series(False, index=df.index)
+    if COL_ESSPRI_DRY in df.columns:
+        esspri_mask = esspri_mask | df[COL_ESSPRI_DRY].notna()
+    if COL_ESSPRI_FAT in df.columns:
+        esspri_mask = esspri_mask | df[COL_ESSPRI_FAT].notna()
+    esspri_any = set(df.loc[esspri_mask, COL_PATIENT].unique())
+
+    paired_df = df[df[COL_ESSDAI].notna() & esspri_mask] \
+        if COL_ESSDAI in df.columns else pd.DataFrame()
     c7 = set(paired_df[COL_PATIENT].unique()) if not paired_df.empty else set()
+    c7 = c7 & c1
     paired_visits = paired_df.groupby(COL_PATIENT).size() if not paired_df.empty else pd.Series(dtype=int)
     results["C7"] = dict(
         description="Phenotype Pop 1-3 (paired ESSDAI+ESSPRI)",
         objective="Secondary Objective 2 — proportions in Pop 1/2/3",
-        inclusion_criteria="≥1 visit with ESSDAI and ESSPRI within ±30 days",
+        inclusion_criteria="C1 + ≥1 visit with ESSDAI and ESSPRI (fatigue o dryness) within ±30 days",
         time_zero_criteria="First paired ESSDAI-ESSPRI assessment",
-        key_variables=f"{COL_ESSDAI}, {COL_ESSPRI_DRY}",
+        key_variables=f"{COL_ESSDAI}, {COL_ESSPRI_FAT}, {COL_ESSPRI_DRY}",
         n=len(c7),
         pts=c7,
         n_essdai_any=len(essdai_any),
@@ -322,23 +339,22 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     # C9: Treatment-response cohort
     # -----------------------------------------------------------------------
     meds_present = [c for c in COLS_MEDS if c in df.columns]
-    treated_pts  = pts_any_col(df, meds_present)
-    c9 = treated_pts & c2
+    c9 = None
     results["C9"] = dict(
         description="Treatment-response (biologics vs non-biologics)",
         objective="Secondary Objective 4 — treatment effect on systemic activity",
         inclusion_criteria="Treated SjD with treatment start date + ≥2 ESSDAI (pre/post)",
         time_zero_criteria="Treatment start date",
         key_variables=", ".join(meds_present[:3]) + "..." if meds_present else "N/A",
-        n=len(c9),
+        n=c9,
         pts=c9,
-        note="Very low n — review medication data completeness.",
+        note="Pendiente por integración de datos desde BTRIS.",
     )
 
     # -----------------------------------------------------------------------
     # C10: Prospective PRO cohort
     # -----------------------------------------------------------------------
-    c10 = pts_with_data(df, COL_ESSPRI_DRY, min_visits=2)
+    c10 = pts_with_data(df, COL_ESSPRI_DRY, min_visits=2) & c1
     results["C10"] = dict(
         description="Prospective PRO (≥2 ESSPRI ≥6 months)",
         objective="Secondary Objective 5 — symptom burden and quality of life",
@@ -353,7 +369,7 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     # -----------------------------------------------------------------------
     # C11: ML development cohort
     # -----------------------------------------------------------------------
-    c11 = c2   # minimum base; enrich with C4/C7/C10 per endpoint
+    c11 = c2 & c1   # minimum base; enrich with C4/C7/C10 per endpoint
     results["C11"] = dict(
         description="ML development (prediction, transitions)",
         objective="Exploratory Objective — AI/ML prediction models",
