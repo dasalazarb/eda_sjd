@@ -150,7 +150,7 @@ def viability_flag(n: int) -> str:
 # MAIN ANALYSIS
 # ---------------------------------------------------------------------------
 
-def run_analysis(df: pd.DataFrame) -> dict:
+def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     total_pts   = df[COL_PATIENT].nunique()
     total_visits = len(df)
 
@@ -163,7 +163,8 @@ def run_analysis(df: pd.DataFrame) -> dict:
     # -----------------------------------------------------------------------
     # C0: Source screening cohort
     # -----------------------------------------------------------------------
-    c0 = set(df[COL_PATIENT].unique())
+    c0_source = c0_df if c0_df is not None and COL_PATIENT in c0_df.columns else df
+    c0 = set(c0_source[COL_PATIENT].unique())
     results["C0"] = dict(
         description="Source screening (15-D)",
         objective="Primary Objective 1 — referral context",
@@ -480,7 +481,15 @@ def main():
     df = load_data(args.input)
     print(f"  → {df[COL_PATIENT].nunique()} patients, {len(df)} visits, {df.shape[1]} columns")
 
-    results, total_pts, total_visits = run_analysis(df)
+    c0_input = ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_not_clean.parquet"
+    c0_df = None
+    if c0_input.exists():
+        print(f"Loading C0 source from: {c0_input}")
+        c0_df = pd.read_parquet(c0_input)
+    else:
+        print(f"WARNING: C0 source not found at {c0_input}; using --input for C0.")
+
+    results, total_pts, total_visits = run_analysis(df, c0_df=c0_df)
 
     # Print console summary
     print_summary(results, total_pts, total_visits)
