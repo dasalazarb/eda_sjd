@@ -166,7 +166,7 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     # -----------------------------------------------------------------------
     c0 = set(c0_source[COL_PATIENT].unique())
     results["C0"] = dict(
-        description="Source screening (15-D)",
+        description="Source screening (15-D + 11-D)",
         objective="Primary Objective 1 — referral context",
         inclusion_criteria="All 15-D participants (total patients)",
         time_zero_criteria="First evaluable NIH SjD visit",
@@ -180,7 +180,7 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     # -----------------------------------------------------------------------
     c1 = pts_with_values(df, COL_SJD_CLASS, {1, 2, 4})
     results["C1"] = dict(
-        description="Core SjD master (primary + secondary)",
+        description="Core SjD master (1: primary + 2: secondary + 4: incomplete)",
         objective="Backbone — base for all analyses",
         inclusion_criteria="SjD classification in {1, 2, 4} (unique patients)",
         time_zero_criteria="First evaluable NIH visit; collapse 15-D and 11-D if ≤30 days",
@@ -430,6 +430,37 @@ def build_esspri_table(df: pd.DataFrame) -> pd.DataFrame:
     return dist
 
 
+
+
+def export_cohort_subject_ids(df: pd.DataFrame, results: dict, output_dir: str):
+    """Export ids__patient_record_number lists per cohort (c0, c1, ...)."""
+    subject_col = "ids__patient_record_number"
+    if subject_col not in df.columns:
+        print(f"  WARNING: column '{subject_col}' not found; cohort subject ID exports skipped.")
+        return
+
+    cohort_ids_dir = os.path.join(output_dir, "cohort_ids")
+    os.makedirs(cohort_ids_dir, exist_ok=True)
+
+    for cohort_id, cohort_data in results.items():
+        pts = cohort_data.get("pts", set())
+        if pts is None:
+            pts = set()
+
+        cohort_subjects = (
+            df[df[COL_PATIENT].isin(pts)][subject_col]
+            .dropna()
+            .drop_duplicates()
+            .sort_values()
+            .rename(subject_col)
+        )
+
+        file_name = f"{cohort_id.lower()}__ids__patient_record_number.csv"
+        out_path = os.path.join(cohort_ids_dir, file_name)
+        cohort_subjects.to_frame().to_csv(out_path, index=False)
+        print(f"  Cohort IDs saved ({cohort_id}): {out_path}")
+
+
 def print_summary(results: dict, total_pts: int, total_visits: int):
     print("\n" + "="*70)
     print("  SJÖGREN NATURAL HISTORY PROJECT — COHORT VIABILITY ANALYSIS")
@@ -513,6 +544,9 @@ def main():
         out_esspri = os.path.join(args.output_dir, "cohort_esspri_distribution.csv")
         esspri_dist.to_csv(out_esspri, index=False)
         print(f"  ESSPRI distribution saved: {out_esspri}")
+
+
+    export_cohort_subject_ids(df, results, args.output_dir)
 
     print("\nAnalysis completed.\n")
 
