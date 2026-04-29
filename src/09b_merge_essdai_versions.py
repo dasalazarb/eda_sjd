@@ -19,6 +19,24 @@ OPT15D_PREFIX = "15D Optional Evaluation"
 OPT15D_PATTERN = re.compile(rf"^{re.escape(OPT15D_PREFIX)}(?:\s*\{{?\d+\}}?)?$", re.IGNORECASE)
 NATURAL_PATTERN = re.compile(r"^natural(?:\s+history.*)?$", re.IGNORECASE)
 EMPTY_LIKE_LITERALS = {"", "nan", "none", "null", "na", "n/a"}
+
+
+ESSDAI_DOMAIN_WEIGHTS = {
+    "essdai__constitutional": 3,
+    "essdai__hema_lphdenopthy": 4,
+    "essdai__gland_swell": 2,
+    "essdai__articular_domain": 2,
+    "essdai__cutaneous": 3,
+    "essdai__pulmonary": 5,
+    "essdai__renal": 5,
+    "essdai__muscular_domain": 6,
+    "essdai__neuro_peripheral": 5,
+    "essdai__cns": 5,
+    "essdai__hematologic": 2,
+    "essdai__biological_domain": 1,
+}
+ESSDAI_TOTAL_SCORE_COL = "essdai__essdai_total_score"
+
 ADDITIONAL_MERGE_PAIRS = [
     ("sjogren's_syndrome_history__arthritis", "systems_review_for_physician__arthritis"),
     ("systems_review_for_physician__musculo_tndnts", "physical_examination-initial_evaluation__musculo_tndnts"),
@@ -135,6 +153,48 @@ def _merge_essdai_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
     return out, len(shared_suffixes)
 
+
+
+
+def _to_essdai_level(value: object) -> float | None:
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text or text.casefold() in EMPTY_LIKE_LITERALS:
+        return None
+    token = text.split("|")[0].strip()
+    if not token or token.casefold() in EMPTY_LIKE_LITERALS:
+        return None
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _compute_essdai_total_score(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    available_domains = [column for column in ESSDAI_DOMAIN_WEIGHTS if column in out.columns]
+    if not available_domains:
+        return out
+
+    def _row_total(row: pd.Series) -> object:
+        saw_any_domain_value = False
+        total_score = 0.0
+        for domain in available_domains:
+            level = _to_essdai_level(row[domain])
+            if level is None:
+                level = 0.0
+            else:
+                saw_any_domain_value = True
+            total_score += ESSDAI_DOMAIN_WEIGHTS[domain] * level
+        if not saw_any_domain_value:
+            return pd.NA
+        if float(total_score).is_integer():
+            return int(total_score)
+        return total_score
+
+    out[ESSDAI_TOTAL_SCORE_COL] = out.apply(_row_total, axis=1)
+    return out
 
 def _merge_additional_pairs(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
     out = df.copy()
@@ -401,7 +461,10 @@ def run(config: MergeConfig) -> None:
     print_step(5, "Merge additional requested column pairs")
     merged, additional_pairs_merged, additional_pairs_skipped = _merge_additional_pairs(merged)
 
-    print_step(6, "Drop fully empty columns and write report")
+    print_step(6, "Compute ESSDAI weighted total score")
+    merged = _compute_essdai_total_score(merged)
+
+    print_step(7, "Drop fully empty columns and write report")
     merged, dropped_empty_columns = _drop_fully_empty_columns(merged)
     config.output_base.parent.mkdir(parents=True, exist_ok=True)
     empty_cols_report_path = config.output_base.parent / f"{config.output_base.name}_dropped_empty_columns.csv"
@@ -411,7 +474,7 @@ def run(config: MergeConfig) -> None:
     )
     collapsed_optional_overlap_report.to_excel(optional_overlap_report_path, index=False)
 
-    print_step(7, "Save outputs")
+    print_step(8, "Save outputs")
     parquet_path = config.output_base.with_suffix(".parquet")
     csv_path = config.output_base.with_suffix(".csv")
     merged.to_parquet(parquet_path, index=False)
