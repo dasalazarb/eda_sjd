@@ -384,13 +384,13 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     # -----------------------------------------------------------------------
     # C12: Comparator cohort (healthy volunteers)
     # -----------------------------------------------------------------------
-    c12 = pts_with_data(df, COL_IE_HV)
+    c12 = pts_with_values(c0_source, COL_SJD_CLASS, {5})
     results["C12"] = dict(
         description="Comparator — healthy volunteers (HV)",
         objective="Selected descriptive/comparative context",
-        inclusion_criteria="HV and non-SjD from 15-D",
+        inclusion_criteria="C0 subset with Sjögren's class = 5",
         time_zero_criteria="First evaluable 15-D visit",
-        key_variables=COL_IE_HV,
+        key_variables=COL_SJD_CLASS,
         n=len(c12),
         pts=c12,
     )
