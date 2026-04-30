@@ -26,6 +26,11 @@ def _parse_args() -> argparse.Namespace:
         default=str(ANALYTIC_DIR / "patients_one_row_collapsed.parquet"),
         help="Output parquet path.",
     )
+    parser.add_argument(
+        "--unique-values-output-path",
+        default=str(ANALYTIC_DIR / "patients_one_row_unique_values_by_column.csv"),
+        help="Output CSV path with unique values found per column after collapsing.",
+    )
     return parser.parse_args()
 
 
@@ -56,6 +61,26 @@ def _collapse_series(values: pd.Series):
     if len(tokens) == 1:
         return tokens[0]
     return " | ".join(tokens)
+
+
+def _build_unique_values_report(df: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for col in df.columns:
+        collapsed_value = _collapse_series(df[col])
+        if pd.isna(collapsed_value):
+            unique_values = ""
+            n_unique = 0
+        else:
+            unique_values = str(collapsed_value)
+            n_unique = len([token for token in unique_values.split(" | ") if token.strip()])
+        rows.append(
+            {
+                "column_name": col,
+                "n_unique_values": n_unique,
+                "unique_values_pipe_joined": unique_values,
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["n_unique_values", "column_name"], ascending=[False, True])
 
 
 def main() -> None:
@@ -97,11 +122,14 @@ def main() -> None:
     output_path = args.output_path
     collapsed.to_parquet(output_path, index=False)
     collapsed.to_csv(output_path.replace(".parquet", ".csv"), index=False)
+    unique_values_report = _build_unique_values_report(collapsed)
+    unique_values_report.to_csv(args.unique_values_output_path, index=False)
     print_kv(
         "outputs",
         {
             "saved_parquet": output_path,
             "saved_csv": output_path.replace('.parquet', '.csv'),
+            "saved_unique_values_csv": args.unique_values_output_path,
         },
     )
 
