@@ -64,14 +64,12 @@ def main() -> None:
 
     print_script_overview(
         script_name="19_collapse_patients_one_row.py",
-        objective="Collapse all lines to one line per patient using ' | ' for overlapping values.",
+        description="Collapse all lines to one line per patient using ' | ' for overlapping values.",
     )
 
     print_step(1, "Loading source dataset")
     df = pd.read_parquet(args.input_path)
-    print_kv("input_path", args.input_path)
-    print_kv("rows", len(df))
-    print_kv("cols", len(df.columns))
+    print_kv("input", {"input_path": args.input_path, "rows": len(df), "cols": len(df.columns)})
 
     subject_col = "subject_number" if "subject_number" in df.columns else "ids__subject_number"
     if subject_col not in df.columns:
@@ -84,14 +82,19 @@ def main() -> None:
         .agg(agg_map)
         .reset_index()
     )
-    print_kv("patients", len(collapsed))
+    print_kv("collapse_summary", {"patients": len(collapsed)})
 
     print_step(3, "Saving output")
     output_path = args.output_path
     collapsed.to_parquet(output_path, index=False)
     collapsed.to_csv(output_path.replace(".parquet", ".csv"), index=False)
-    print_kv("saved_parquet", output_path)
-    print_kv("saved_csv", output_path.replace('.parquet', '.csv'))
+    print_kv(
+        "outputs",
+        {
+            "saved_parquet": output_path,
+            "saved_csv": output_path.replace('.parquet', '.csv'),
+        },
+    )
 
     logger.info("Collapsed to one row per patient | input=%s output=%s rows=%d", args.input_path, output_path, len(collapsed))
 
