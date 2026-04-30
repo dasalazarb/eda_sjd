@@ -471,7 +471,7 @@ def export_cohort_subject_ids(df: pd.DataFrame, results: dict, output_dir: str):
             .rename(subject_col)
         )
 
-        file_name = f"{cohort_id.lower()}__ids__patient_record_number.csv"
+        file_name = f"{cohort_id.lower()}.csv"
         out_path = os.path.join(cohort_ids_dir, file_name)
         cohort_subjects.to_frame().to_csv(out_path, index=False)
         print(f"  Cohort IDs saved ({cohort_id}): {out_path}")
