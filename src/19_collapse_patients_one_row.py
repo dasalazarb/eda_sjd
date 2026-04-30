@@ -71,9 +71,18 @@ def main() -> None:
     df = pd.read_parquet(args.input_path)
     print_kv("input", {"input_path": args.input_path, "rows": len(df), "cols": len(df.columns)})
 
-    subject_col = "subject_number" if "subject_number" in df.columns else "ids__subject_number"
-    if subject_col not in df.columns:
-        raise KeyError("Could not find patient identifier column: subject_number or ids__subject_number")
+    group_col_candidates = [
+        "ids__patient_record_number",
+        "patient_record_number",
+        "subject_number",
+        "ids__subject_number",
+    ]
+    subject_col = next((col for col in group_col_candidates if col in df.columns), None)
+    if subject_col is None:
+        raise KeyError(
+            "Could not find grouping column. Checked: "
+            "ids__patient_record_number, patient_record_number, subject_number, ids__subject_number"
+        )
 
     print_step(2, "Collapsing all rows into one row per patient")
     agg_map = {col: _collapse_series for col in df.columns if col != subject_col}
@@ -82,7 +91,7 @@ def main() -> None:
         .agg(agg_map)
         .reset_index()
     )
-    print_kv("collapse_summary", {"patients": len(collapsed)})
+    print_kv("collapse_summary", {"rows_collapsed": len(collapsed), "grouping_column": subject_col})
 
     print_step(3, "Saving output")
     output_path = args.output_path
