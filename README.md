@@ -71,6 +71,7 @@ python src/16_missingness_patterns.py \
 python src/18_recode_longitudinal_values_by_type.py \
   --input-path data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet \
   --variable-summary-path reports/longitudinal_plausibility/longitudinal_variable_summary.csv
+python src/24_protocol_flow_table.py
 ```
 
 Every script:
@@ -210,6 +211,16 @@ Reports:
 - `reports/missingness/variables_least_missing_top.csv`
 - `reports/missingness/missingness_report.xlsx`
 - `data_analytic/visits_long_collapsed_by_interval_codebook_type_recode.parquet`
+- `reports/protocol_flow/protocol_flow_table.csv`
+- `reports/protocol_flow/protocol_flow_table.xlsx`
+- `reports/protocol_flow/protocol_flow_table_long.csv`
+
+
+### Protocol flow table (`reports/protocol_flow/protocol_flow_table.csv`)
+
+`src/24_protocol_flow_table.py` creates the requested protocol-by-protocol analytic flow table with columns `Indicador`, `Protocolo A`, `Protocolo B`, and `Total único`. By default, Protocolo A maps to 11D and Protocolo B maps to 15D. The script reads the richest available visit-level analytic dataset, preferring the type-recoded or codebook-corrected collapsed files when present, and falls back to `data_analytic/visits_long.parquet`.
+
+The table includes raw records, unique patients after linkage/deduplication, SjD eligibility, baseline plus follow-up availability, repeated ESSDAI/ESSPRI-PRO coverage, follow-up years, visits per patient, index ESSDAI <5, and later ESSDAI ≥5 events. Percentages for the repeated ESSDAI and ESSPRI/PRO rows use the eligible SjD patients in the corresponding protocol/unique-total column as denominators.
 
 ## EDA unificada (`reports/eda_unificado.xlsx`)
 
