@@ -218,7 +218,7 @@ Reports:
 
 ### Protocol flow table (`reports/protocol_flow/protocol_flow_table.csv`)
 
-`src/24_protocol_flow_table.py` creates the requested protocol-by-protocol analytic flow table with columns `Indicador`, `Protocolo A`, `Protocolo B`, and `Total único`. By default, Protocolo A maps to 11D and Protocolo B maps to 15D. The script reads the richest available visit-level analytic dataset, preferring the type-recoded or codebook-corrected collapsed files when present, and falls back to `data_analytic/visits_long.parquet`.
+`src/24_protocol_flow_table.py` creates the requested protocol-by-protocol analytic flow table with columns `Indicador`, `Protocolo A`, `Protocolo B`, and `Total único`. By default, Protocolo A maps to 11D and Protocolo B maps to 15D. The script reads the richest available value-preserving visit-level analytic dataset, preferring the codebook-corrected collapsed file when present and falling back to `data_analytic/visits_long.parquet`. It intentionally does not auto-select `visits_long_collapsed_by_interval_codebook_type_recode.parquet`, because that file stores codebook type placeholders rather than clinical values needed for ESSDAI/ESSPRI/event calculations.
 
 The table includes raw records, unique patients after linkage/deduplication, SjD eligibility, baseline plus follow-up availability, repeated ESSDAI/ESSPRI-PRO coverage, follow-up years, visits per patient, index ESSDAI <5, and later ESSDAI ≥5 events. Percentages for the repeated ESSDAI and ESSPRI/PRO rows use the eligible SjD patients in the corresponding protocol/unique-total column as denominators.
 

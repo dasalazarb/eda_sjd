@@ -23,11 +23,11 @@ PROTOCOL_A = "11D"
 PROTOCOL_B = "15D"
 PROTOCOLS = [PROTOCOL_A, PROTOCOL_B]
 DEFAULT_INPUT_CANDIDATES = [
-    ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_type_recode.parquet",
     ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_corrected.parquet",
     ANALYTIC_DIR / "visits_long_collapsed_by_interval.parquet",
     ANALYTIC_DIR / "visits_long.parquet",
 ]
+TYPE_PLACEHOLDER_VALUES = {"numeric", "datetime", "date", "string", "boolean"}
 
 ESSDAI_COLUMNS = [
     "essdai__essdai_total_score",
@@ -84,6 +84,49 @@ def _read_table(path: Path) -> pd.DataFrame:
     if path.suffix.lower() in {".xls", ".xlsx"}:
         return pd.read_excel(path)
     raise ValueError(f"Unsupported input extension for {path}")
+
+
+def _type_placeholder_columns(df: pd.DataFrame) -> list[str]:
+    clinical_columns = [
+        col
+        for col in [*ESSDAI_COLUMNS, *ESSPRI_COLUMNS, *SJD_CLASSIFICATION_COLUMNS]
+        if col in df.columns
+    ]
+    clinical_columns.extend(
+        col
+        for col in sorted(
+            set(_candidate_columns(df, ["acr"]))
+            | set(_candidate_columns(df, ["eular"]))
+            | set(_candidate_columns(df, ["aecg"]))
+            | set(_candidate_columns(df, ["classification", "criteria"]))
+        )
+        if col not in clinical_columns
+    )
+
+    placeholder_columns = []
+    for col in clinical_columns:
+        values = df[col].dropna().astype("string").str.strip().str.lower()
+        if values.empty:
+            continue
+        if set(values.unique()).issubset(TYPE_PLACEHOLDER_VALUES):
+            placeholder_columns.append(col)
+    return placeholder_columns
+
+
+def _validate_value_preserving_input(df: pd.DataFrame, path: Path) -> None:
+    placeholder_columns = _type_placeholder_columns(df)
+    if not placeholder_columns:
+        return
+
+    examples = ", ".join(placeholder_columns[:8])
+    suffix = "" if len(placeholder_columns) <= 8 else ", ..."
+    raise ValueError(
+        "Protocol flow table requires value-preserving clinical data, but "
+        f"{path} appears to contain codebook type placeholders in clinical columns "
+        f"({examples}{suffix}). Use "
+        "data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet "
+        "or another value-preserving visit-level file instead of the type-recoded output."
+    )
 
 
 def _choose_input_path(explicit_path: Path | None) -> Path:
@@ -475,6 +518,7 @@ def main() -> None:
     print_step(1, "Load visit-level analytic table and raw protocol tables")
     input_path = _choose_input_path(args.input_path)
     visits = _read_table(input_path)
+    _validate_value_preserving_input(visits, input_path)
     raw11 = _load_raw_protocol(INTERMEDIATE_DIR / "11d_raw_enriched.parquet")
     raw15 = _load_raw_protocol(INTERMEDIATE_DIR / "15d_raw_enriched.parquet")
 
