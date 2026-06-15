@@ -321,7 +321,105 @@ def _index_low_and_later_event(
     return low_index, later_event
 
 
-def _build_metric_rows(df: pd.DataFrame, raw11: pd.DataFrame, raw15: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _format_detail_value(series: pd.Series, patient: object) -> float | int | None:
+    if patient not in series.index:
+        return None
+    value = series.loc[patient]
+    if pd.isna(value):
+        return None
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    return value
+
+
+def _build_calculation_tables(
+    all_patients: set,
+    protocol_sets: dict[str, set],
+    eligible_total: set,
+    eligible_by_protocol: dict[str, set],
+    followup_by_protocol: dict[str, set],
+    essdai_by_protocol: dict[str, set],
+    esspri_by_protocol: dict[str, set],
+    low_index_by_protocol: dict[str, set],
+    event_by_protocol: dict[str, set],
+    followup_years_by_protocol: dict[str, pd.Series],
+    visit_counts_by_protocol: dict[str, pd.Series],
+    total_followup: set,
+    total_essdai: set,
+    total_esspri: set,
+    total_low_index: set,
+    total_event: set,
+    total_followup_years: pd.Series,
+    total_visit_counts: pd.Series,
+) -> dict[str, pd.DataFrame]:
+    """Build auditable patient-level tables used to calculate the summary metrics."""
+    patient_rows = []
+    for patient in sorted(all_patients, key=lambda value: str(value)):
+        row = {
+            "patient_record_number": patient,
+            "in_protocol_11d": patient in protocol_sets[PROTOCOL_A],
+            "in_protocol_15d": patient in protocol_sets[PROTOCOL_B],
+            "sjd_eligible_total_unique": patient in eligible_total,
+            "has_baseline_plus_followup_total_unique": patient in total_followup,
+            "has_2plus_essdai_total_unique": patient in total_essdai,
+            "has_2plus_esspri_total_unique": patient in total_esspri,
+            "essdai_lt5_at_index_total_unique": patient in total_low_index,
+            "later_essdai_ge5_event_total_unique": patient in total_event,
+            "total_unique_visit_count": _format_detail_value(total_visit_counts, patient),
+            "total_unique_followup_years": _format_detail_value(total_followup_years, patient),
+        }
+        for protocol in PROTOCOLS:
+            suffix = protocol.lower()
+            row.update(
+                {
+                    f"sjd_eligible_{suffix}": patient in eligible_by_protocol[protocol],
+                    f"has_baseline_plus_followup_{suffix}": patient in followup_by_protocol[protocol],
+                    f"has_2plus_essdai_{suffix}": patient in essdai_by_protocol[protocol],
+                    f"has_2plus_esspri_{suffix}": patient in esspri_by_protocol[protocol],
+                    f"essdai_lt5_at_index_{suffix}": patient in low_index_by_protocol[protocol],
+                    f"later_essdai_ge5_event_{suffix}": patient in event_by_protocol[protocol],
+                    f"visit_count_{suffix}": _format_detail_value(visit_counts_by_protocol[protocol], patient),
+                    f"followup_years_{suffix}": _format_detail_value(followup_years_by_protocol[protocol], patient),
+                }
+            )
+        patient_rows.append(row)
+
+    patient_flags = pd.DataFrame(patient_rows)
+    protocol_membership = patient_flags[
+        [
+            "patient_record_number",
+            "in_protocol_11d",
+            "in_protocol_15d",
+            "sjd_eligible_11d",
+            "sjd_eligible_15d",
+            "sjd_eligible_total_unique",
+        ]
+    ].copy()
+    followup_stats = patient_flags[
+        [
+            "patient_record_number",
+            "visit_count_11d",
+            "followup_years_11d",
+            "visit_count_15d",
+            "followup_years_15d",
+            "total_unique_visit_count",
+            "total_unique_followup_years",
+        ]
+    ].copy()
+    return {
+        "calculation_patient_flags": patient_flags,
+        "calculation_protocol_membership": protocol_membership,
+        "calculation_followup_stats": followup_stats,
+    }
+
+
+def _build_metric_rows(
+    df: pd.DataFrame,
+    raw11: pd.DataFrame,
+    raw15: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
     patient_col = resolve_canonical_column(df, "patient_record_number")
     protocol_col = resolve_canonical_column(df, "source_protocol")
     visit_date_col = _resolve_optional_column(df, "visit_datetime") or _resolve_optional_column(df, "visit_date")
@@ -497,7 +595,27 @@ def _build_metric_rows(df: pd.DataFrame, raw11: pd.DataFrame, raw15: pd.DataFram
             ]
         ]
     )
-    return wide, long
+    calculation_tables = _build_calculation_tables(
+        total_patient_set,
+        protocol_sets,
+        eligible_total,
+        eligible_by_protocol,
+        followup_by_protocol,
+        essdai_by_protocol,
+        esspri_by_protocol,
+        low_index_by_protocol,
+        event_by_protocol,
+        followup_years_by_protocol,
+        visit_counts_by_protocol,
+        total_followup,
+        total_essdai,
+        total_esspri,
+        total_low_index,
+        total_event,
+        total_followup_years,
+        total_visit_counts,
+    )
+    return wide, long, calculation_tables
 
 
 def _load_raw_protocol(path: Path) -> pd.DataFrame:
@@ -523,21 +641,31 @@ def main() -> None:
     raw15 = _load_raw_protocol(INTERMEDIATE_DIR / "15d_raw_enriched.parquet")
 
     print_step(2, "Compute protocol flow metrics")
-    wide, long = _build_metric_rows(visits, raw11, raw15)
+    wide, long, calculation_tables = _build_metric_rows(visits, raw11, raw15)
 
-    print_step(3, "Save wide and long protocol flow tables")
+    print_step(3, "Save protocol flow summary and calculation tables")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     wide_csv = args.output_dir / "protocol_flow_table.csv"
     long_csv = args.output_dir / "protocol_flow_table_long.csv"
     xlsx_path = args.output_dir / "protocol_flow_table.xlsx"
     wide.to_csv(wide_csv, index=False)
     long.to_csv(long_csv, index=False)
+    calculation_paths = {}
+    for table_name, table in calculation_tables.items():
+        table_path = args.output_dir / f"{table_name}.csv"
+        table.to_csv(table_path, index=False)
+        calculation_paths[table_name] = table_path
+
     with pd.ExcelWriter(xlsx_path) as writer:
         wide.to_excel(writer, sheet_name="protocol_flow_table", index=False)
         long.to_excel(writer, sheet_name="protocol_flow_long", index=False)
+        for table_name, table in calculation_tables.items():
+            table.to_excel(writer, sheet_name=table_name[:31], index=False)
 
     logger.info("Saved protocol flow table: %s", wide_csv)
     logger.info("Saved protocol flow long table: %s", long_csv)
+    for table_name, table_path in calculation_paths.items():
+        logger.info("Saved protocol flow calculation table %s: %s", table_name, table_path)
     logger.info("Saved protocol flow workbook: %s", xlsx_path)
     print_kv(
         "Protocol flow outputs",
@@ -545,6 +673,7 @@ def main() -> None:
             "input_path": input_path,
             "wide_csv": wide_csv,
             "long_csv": long_csv,
+            **calculation_paths,
             "xlsx": xlsx_path,
         },
     )
