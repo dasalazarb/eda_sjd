@@ -507,61 +507,61 @@ def _build_metric_rows(
 
     metrics = [
         (
-            "Registros brutos",
+            "Raw records",
             _metric_n(len(raw11)),
             _metric_n(len(raw15)),
             _metric_n(len(raw11) + len(raw15)),
         ),
         (
-            "Pacientes únicos tras linkage/deduplicación",
+            "Unique patients after linkage/deduplication",
             _metric_n(len(protocol_sets[PROTOCOL_A])),
             _metric_n(len(protocol_sets[PROTOCOL_B])),
             _metric_n(len(total_patient_set)),
         ),
         (
-            "SjD elegible según ACR/EULAR y/o AECG",
+            "SjD eligible according to ACR/EULAR and/or AECG",
             _metric_n(len(eligible_by_protocol[PROTOCOL_A])),
             _metric_n(len(eligible_by_protocol[PROTOCOL_B])),
             _metric_n(len(eligible_total)),
         ),
         (
-            "Con basal + ≥1 seguimiento",
+            "With baseline + ≥1 follow-up",
             _metric_n(len(followup_by_protocol[PROTOCOL_A])),
             _metric_n(len(followup_by_protocol[PROTOCOL_B])),
             _metric_n(len(total_followup)),
         ),
         (
-            "Con ≥2 ESSDAI",
+            "With ≥2 ESSDAI",
             _metric_n_pct(len(essdai_by_protocol[PROTOCOL_A]), len(eligible_by_protocol[PROTOCOL_A])),
             _metric_n_pct(len(essdai_by_protocol[PROTOCOL_B]), len(eligible_by_protocol[PROTOCOL_B])),
             _metric_n_pct(len(total_essdai), len(eligible_total)),
         ),
         (
-            "Con ≥2 ESSPRI/PRO comparables",
+            "With ≥2 comparable ESSPRI/PRO",
             _metric_n_pct(len(esspri_by_protocol[PROTOCOL_A]), len(eligible_by_protocol[PROTOCOL_A])),
             _metric_n_pct(len(esspri_by_protocol[PROTOCOL_B]), len(eligible_by_protocol[PROTOCOL_B])),
             _metric_n_pct(len(total_esspri), len(eligible_total)),
         ),
         (
-            "Seguimiento, mediana (IQR), años",
+            "Follow-up, median (IQR), years",
             _format_median_iqr(followup_years_by_protocol[PROTOCOL_A], 1),
             _format_median_iqr(followup_years_by_protocol[PROTOCOL_B], 1),
             _format_median_iqr(total_followup_years, 1),
         ),
         (
-            "Visitas por paciente, mediana (IQR)",
+            "Visits per patient, median (IQR)",
             _format_median_iqr(visit_counts_by_protocol[PROTOCOL_A], 0),
             _format_median_iqr(visit_counts_by_protocol[PROTOCOL_B], 0),
             _format_median_iqr(total_visit_counts, 0),
         ),
         (
-            "ESSDAI <5 al índice",
+            "ESSDAI <5 at index",
             _metric_n(len(low_index_by_protocol[PROTOCOL_A])),
             _metric_n(len(low_index_by_protocol[PROTOCOL_B])),
             _metric_n(len(total_low_index)),
         ),
         (
-            "Evento posterior ESSDAI ≥5",
+            "Subsequent ESSDAI ≥5 event",
             _metric_n(len(event_by_protocol[PROTOCOL_A])),
             _metric_n(len(event_by_protocol[PROTOCOL_B])),
             _metric_n(len(total_event)),
@@ -571,10 +571,10 @@ def _build_metric_rows(
     wide = pd.DataFrame(
         [
             {
-                "Indicador": label,
-                "Protocolo A": a.display_value,
-                "Protocolo B": b.display_value,
-                "Total único": total.display_value,
+                "Indicator": label,
+                "Protocol A": a.display_value,
+                "Protocol B": b.display_value,
+                "Unique total": total.display_value,
             }
             for label, a, b, total in metrics
         ]
@@ -582,16 +582,16 @@ def _build_metric_rows(
     long = pd.DataFrame(
         [
             {
-                "indicador": label,
-                "columna": column,
-                "valor_crudo": metric.raw_value,
-                "valor_formateado": metric.display_value,
+                "indicator": label,
+                "column": column,
+                "raw_value": metric.raw_value,
+                "formatted_value": metric.display_value,
             }
             for label, a, b, total in metrics
             for column, metric in [
-                ("Protocolo A", a),
-                ("Protocolo B", b),
-                ("Total único", total),
+                ("Protocol A", a),
+                ("Protocol B", b),
+                ("Unique total", total),
             ]
         ]
     )
