@@ -119,11 +119,18 @@ def _resolve_first(columns: pd.Index, candidates: list[str]) -> Optional[str]:
 
 
 def _normalize_patient_id(series: pd.Series) -> pd.Series:
-    return (
-        series.astype(str).str.strip()
+    """Normalize patient record numbers for matching across CTDB and BTRIS.
+
+    Separators and whitespace are removed first; then any leading zeroes are
+    stripped so CTDB IDs like ``012345`` match BTRIS IDs like ``12345``.
+    """
+    normalized = (
+        series.astype(str)
+        .str.strip()
         .str.replace(r"[-/\\\s]", "", regex=True)
-        .replace("nan", pd.NA).replace("", pd.NA)
+        .str.replace(r"^0+", "", regex=True)
     )
+    return normalized.replace("nan", pd.NA).replace("", pd.NA)
 
 
 def _parse_dates_to_date_only(series: pd.Series) -> pd.Series:
@@ -236,8 +243,8 @@ def _build_patient_qual_table(path: Path) -> pd.DataFrame:
     rows: list[dict] = []
     for _, row in df.iterrows():
         raw_mrn = str(row["ids__patient_record_number"]).strip()
-        patient_id = re.sub(r"[-/\\\s]", "", raw_mrn)
-        if not patient_id or patient_id == "nan":
+        patient_id = _normalize_patient_id(pd.Series([raw_mrn])).iloc[0]
+        if pd.isna(patient_id):
             continue
 
         interval_name = str(row["ids__interval_name"]).strip()
