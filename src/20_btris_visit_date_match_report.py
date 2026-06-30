@@ -25,7 +25,14 @@ from typing import Optional
 
 import pandas as pd
 
-from common import ANALYTIC_DIR, INTERMEDIATE_DIR, REPORTS_DIR, print_kv, print_script_overview, print_step, setup_logger
+from common import (
+    ANALYTIC_DIR,
+    INTERMEDIATE_DIR,
+    print_kv,
+    print_script_overview,
+    print_step,
+    setup_logger,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -56,6 +63,9 @@ MICRO_TEST_COL_CANDIDATES = ["Event Name", "Test Name"]
 OBS_VALUE_CANDIDATES: list[str] = ["Observation Value", "Result Value", "Value", "Numeric Value"]
 
 SKIP_PREFIXES: set[str] = {"demographics"}
+
+SJOGRENS_CLASS_COL = "visit_summary_form__sjogrens_class"
+SJOGRENS_CLASS_KEEP_VALUES = {"1", "2", "4"}
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +236,54 @@ def _select_qualifying_dates(raw: str) -> tuple[list[date], str]:
 # ---------------------------------------------------------------------------
 
 
+def _has_target_sjogrens_class(value: object) -> bool:
+    """Return whether a Sjögren's class value contains 1, 2, or 4.
+
+    Values in the corrected codebook parquet may arrive as numeric values,
+    strings, or pipe-delimited multi-values. This helper normalizes those
+    representations before filtering patient-level eligibility.
+    """
+    if pd.isna(value):
+        return False
+
+    parts = [part.strip() for part in str(value).split("|") if part.strip()]
+    for part in parts:
+        numeric = pd.to_numeric(part, errors="coerce")
+        if pd.notna(numeric) and str(int(numeric)) in SJOGRENS_CLASS_KEEP_VALUES:
+            return True
+        if part in SJOGRENS_CLASS_KEEP_VALUES:
+            return True
+    return False
+
+
+def _filter_patients_by_sjogrens_class(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep patients with at least one Sjögren's class of 1, 2, or 4.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Collapsed visit dataframe loaded from the corrected codebook parquet.
+
+    Returns
+    -------
+    pd.DataFrame
+        Rows for patients who have at least one qualifying Sjögren's class.
+    """
+    if SJOGRENS_CLASS_COL not in df.columns:
+        raise KeyError(f"Falta columna requerida: '{SJOGRENS_CLASS_COL}'")
+
+    qualifying_patient_ids = set(
+        _normalize_patient_id(
+            df.loc[
+                df[SJOGRENS_CLASS_COL].map(_has_target_sjogrens_class),
+                "ids__patient_record_number",
+            ]
+        ).dropna()
+    )
+    normalized_ids = _normalize_patient_id(df["ids__patient_record_number"])
+    return df.loc[normalized_ids.isin(qualifying_patient_ids)].copy()
+
+
 def _build_patient_qual_table(path: Path) -> pd.DataFrame:
     """
     Carga parquet y expande ids__visit_date en qualifying dates.
@@ -235,10 +293,17 @@ def _build_patient_qual_table(path: Path) -> pd.DataFrame:
         raise FileNotFoundError(f"No encontrado: {path}")
     df = pd.read_parquet(path) if path.suffix.lower() == ".parquet" else pd.read_csv(path)
 
-    required = ["ids__patient_record_number", "ids__interval_name", "ids__visit_date"]
+    required = [
+        "ids__patient_record_number",
+        "ids__interval_name",
+        "ids__visit_date",
+        SJOGRENS_CLASS_COL,
+    ]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise KeyError(f"Faltan columnas: {missing}")
+
+    df = _filter_patients_by_sjogrens_class(df)
 
     rows: list[dict] = []
     for _, row in df.iterrows():
