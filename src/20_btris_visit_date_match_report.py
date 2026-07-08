@@ -62,6 +62,8 @@ MICRO_TEST_COL_CANDIDATES = ["Event Name", "Test Name"]
 
 OBS_VALUE_CANDIDATES: list[str] = ["Observation Value", "Result Value", "Value", "Numeric Value"]
 
+MATCH_WINDOW_DAYS = 10
+
 SKIP_PREFIXES: set[str] = {"demographics"}
 
 SJOGRENS_CLASS_COL = "visit_summary_form__sjogrens_class"
@@ -365,7 +367,7 @@ def _match_file(
 ) -> Optional[pd.DataFrame]:
     """
     Retorna todos los registros BTRIS que coincidan con
-    (patient_id, qualifying_date) para el protocolo del archivo.
+    (patient_id, qualifying_date ± MATCH_WINDOW_DAYS) para el protocolo del archivo.
     """
     prefix = _get_prefix(csv_path.name)
     if prefix is None:
@@ -419,6 +421,7 @@ def _match_file(
     )
 
     working = df.copy()
+    working["_orig_idx"] = range(len(working))
     working["_btris_date"] = _parse_dates_to_date_only(working[resolved_col])
     working = working.dropna(subset=["_patient_id", "_btris_date"])
     if working.empty:
@@ -426,21 +429,39 @@ def _match_file(
 
     combined = working.merge(
         lookup,
-        left_on=["_patient_id", "_btris_date"],
-        right_on=["patient_id", "qualifying_date"],
+        left_on="_patient_id",
+        right_on="patient_id",
         how="inner",
     )
     if combined.empty:
         return None
 
+    btris_dates = pd.to_datetime(combined["_btris_date"], errors="coerce")
+    qualifying_dates = pd.to_datetime(combined["qualifying_date"], errors="coerce")
+    combined["ids__btris_date_diff_days"] = (btris_dates - qualifying_dates).dt.days
+    combined = combined[
+        combined["ids__btris_date_diff_days"].abs() <= MATCH_WINDOW_DAYS
+    ].copy()
+    if combined.empty:
+        return None
+
+    combined["_abs_date_diff_days"] = combined["ids__btris_date_diff_days"].abs()
+    combined = (
+        combined.sort_values(["_orig_idx", "_abs_date_diff_days", "qualifying_date"])
+        .drop_duplicates(subset=["_orig_idx"], keep="first")
+        .reset_index(drop=True)
+    )
     combined["ids__btris_date_col"] = resolved_col
+    combined["ids__btris_observation_date"] = combined["_btris_date"]
 
     meta_cols    = [
         "ids__patient_record_number", "ids__interval_name",
-        "ids__visit_date_raw", "qualifying_date", "resolution_rule",
-        "ids__btris_date_col",
+        "ids__visit_date_raw", "qualifying_date", "ids__btris_observation_date",
+        "ids__btris_date_diff_days", "resolution_rule", "ids__btris_date_col",
     ]
-    drop_internal = {"_patient_id", "_orig_idx", "_btris_date", "patient_id"}
+    drop_internal = {
+        "_patient_id", "_orig_idx", "_btris_date", "patient_id", "_abs_date_diff_days"
+    }
     btris_cols    = [c for c in combined.columns if c not in set(meta_cols) | drop_internal]
 
     result = combined[meta_cols + btris_cols].copy()
@@ -915,8 +936,8 @@ def main() -> None:
     print_script_overview(
         "20_btris_visit_date_match_report.py",
         (
-            "Qualifying dates por clustering → extrae registros BTRIS → "
-            "guarda por protocolo/prefijo → analiza tests repetidos por interval_name."
+            "Qualifying dates por clustering → extrae registros BTRIS dentro de "
+            "±10 días → guarda por protocolo/prefijo → analiza tests repetidos."
         ),
     )
 
