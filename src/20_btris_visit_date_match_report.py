@@ -459,6 +459,140 @@ def _match_file(
     return result.reset_index(drop=True)
 
 
+def _candidate_cluster_label(raw_dates: object, visit_date: object) -> str:
+    """Map a visit date to its candidate year-cluster label."""
+    ts = pd.to_datetime(visit_date, errors="coerce")
+    if pd.isna(ts):
+        return ""
+    return _cluster_lookup_for_raw_dates(str(raw_dates)).get(ts.year, str(ts.year))
+
+
+def _choose_cluster_labels(
+    patients_expanded: pd.DataFrame,
+    all_matched: pd.DataFrame,
+) -> dict[tuple[str, str, str, str], str]:
+    """Select one date cluster per pending patient interval.
+
+    For rows with a gap of at least two years, clusters are selected using BTRIS
+    evidence from all explored dataframes.  If only one cluster has matched
+    records, that cluster is used; if more than one cluster has records, the
+    earliest cluster is used.  If no cluster has records, the earliest candidate
+    cluster is retained so downstream missing-date reporting remains finite.
+    """
+    pending = patients_expanded[
+        patients_expanded["resolution_rule"] == "cluster_candidates_pending_btris"
+    ]
+    if pending.empty:
+        return {}
+
+    matched_clusters: dict[tuple[str, str, str, str], set[str]] = defaultdict(set)
+    if not all_matched.empty:
+        for _, row in all_matched.iterrows():
+            key = (
+                str(row["ids__patient_record_number"]),
+                str(row["ids__interval_name"]),
+                str(row["ids__visit_date_raw"]),
+                _detect_protocol_from_interval(str(row["ids__interval_name"])),
+            )
+            label = _candidate_cluster_label(
+                row["ids__visit_date_raw"], row["ids__visit_date"]
+            )
+            if label:
+                matched_clusters[key].add(label)
+
+    selected: dict[tuple[str, str, str, str], str] = {}
+    for key_cols, rows in pending.groupby(
+        [
+            "ids__patient_record_number",
+            "ids__interval_name",
+            "ids__visit_date_raw",
+            "expected_protocol",
+        ],
+        dropna=False,
+    ):
+        key = tuple(str(part) for part in key_cols)
+        candidate_labels = sorted(
+            {
+                _candidate_cluster_label(row["ids__visit_date_raw"], row["qualifying_date"])
+                for _, row in rows.iterrows()
+            }
+        )
+        candidate_labels = [label for label in candidate_labels if label]
+        labels_with_data = sorted(matched_clusters.get(key, set()))
+        selected[key] = (labels_with_data or candidate_labels)[0]
+    return selected
+
+
+def _detect_protocol_from_interval(interval_name: str) -> str:
+    """Return expected protocol from an interval name using the script convention."""
+    return "15D" if interval_name == TARGET_INTERVAL_15D else "11D"
+
+
+def _apply_btris_informed_cluster_selection(
+    patients_expanded: pd.DataFrame,
+    results_by_proto_prefix: dict[tuple[str, str], pd.DataFrame],
+) -> tuple[pd.DataFrame, dict[tuple[str, str], pd.DataFrame]]:
+    """Filter pending multi-year clusters using matches across explored BTRIS dfs."""
+    all_matched = (
+        pd.concat(list(results_by_proto_prefix.values()), ignore_index=True)
+        if results_by_proto_prefix else pd.DataFrame()
+    )
+    selected = _choose_cluster_labels(patients_expanded, all_matched)
+    if not selected:
+        return patients_expanded, results_by_proto_prefix
+
+    def keep_patient_row(row: pd.Series) -> bool:
+        if row["resolution_rule"] != "cluster_candidates_pending_btris":
+            return True
+        key = (
+            str(row["ids__patient_record_number"]),
+            str(row["ids__interval_name"]),
+            str(row["ids__visit_date_raw"]),
+            str(row["expected_protocol"]),
+        )
+        label = _candidate_cluster_label(
+            row["ids__visit_date_raw"], row["qualifying_date"]
+        )
+        return label == selected.get(key)
+
+    filtered_patients = patients_expanded.loc[
+        patients_expanded.apply(keep_patient_row, axis=1)
+    ].copy()
+    filtered_patients.loc[
+        filtered_patients["resolution_rule"] == "cluster_candidates_pending_btris",
+        "resolution_rule",
+    ] = "btris_informed_earliest_cluster_with_data"
+
+    filtered_results: dict[tuple[str, str], pd.DataFrame] = {}
+    for key, df in results_by_proto_prefix.items():
+        if df.empty:
+            filtered_results[key] = df
+            continue
+
+        def keep_result_row(row: pd.Series) -> bool:
+            if row["resolution_rule"] != "cluster_candidates_pending_btris":
+                return True
+            selection_key = (
+                str(row["ids__patient_record_number"]),
+                str(row["ids__interval_name"]),
+                str(row["ids__visit_date_raw"]),
+                _detect_protocol_from_interval(str(row["ids__interval_name"])),
+            )
+            label = _candidate_cluster_label(
+                row["ids__visit_date_raw"], row["ids__visit_date"]
+            )
+            return label == selected.get(selection_key)
+
+        filtered_df = df.loc[df.apply(keep_result_row, axis=1)].copy()
+        filtered_df.loc[
+            filtered_df["resolution_rule"] == "cluster_candidates_pending_btris",
+            "resolution_rule",
+        ] = "btris_informed_earliest_cluster_with_data"
+        filtered_results[key] = filtered_df.reset_index(drop=True)
+
+    return filtered_patients.reset_index(drop=True), filtered_results
+
+
 # ---------------------------------------------------------------------------
 # Repeated-tests analysis — merge rules
 # ---------------------------------------------------------------------------
@@ -1005,6 +1139,10 @@ def main() -> None:
     results_by_proto_prefix: dict[tuple[str, str], pd.DataFrame] = {}
     for (proto, prefix), frames in accum.items():
         results_by_proto_prefix[(proto, prefix)] = pd.concat(frames, ignore_index=True)
+
+    patients_expanded, results_by_proto_prefix = _apply_btris_informed_cluster_selection(
+        patients_expanded, results_by_proto_prefix
+    )
 
     # ── Step 5: Clasificar repetidos en Lab y Microbiology ────────────────────
     print_step(
