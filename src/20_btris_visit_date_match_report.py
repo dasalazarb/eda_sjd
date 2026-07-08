@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import datetime
 import re
-from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -181,6 +180,17 @@ def _cluster_years(unique_years: list[int]) -> list[list[int]]:
     return clusters
 
 
+def _parse_pipe_delimited_dates(raw: str) -> list[date]:
+    """Parse a pipe-delimited visit-date value into unique sorted dates."""
+    parts = [p.strip() for p in str(raw).split("|") if p.strip()]
+    dates: list[date] = []
+    for p in parts:
+        ts = pd.to_datetime(p, errors="coerce", dayfirst=False)
+        if not pd.isna(ts):
+            dates.append(ts.normalize().date())
+    return sorted(set(dates))
+
+
 def _select_qualifying_dates(raw: str) -> tuple[list[date], str]:
     """
     Retorna (lista de fechas calificadoras, etiqueta de regla).
@@ -189,25 +199,17 @@ def _select_qualifying_dates(raw: str) -> tuple[list[date], str]:
       · 1 fecha única            → esa fecha,  'single_date'
       · todos mismo año          → todas,       'same_year_all'
       · span ≤ 1 año             → todas,       'consecutive_years_all'
-      · span ≥ 2 → clustering:
-          - 1 cluster dominante  → solo ese,    'dominant_cluster_YYYY'
-          - empate               → más antiguo, 'tie_earliest_cluster_YYYY'
+      · span ≥ 2 → todas las fechas de todos los clusters de años,
+        'multi_year_clusters_all'
     """
-    parts = [p.strip() for p in str(raw).split("|") if p.strip()]
-    dates: list[date] = []
-    for p in parts:
-        ts = pd.to_datetime(p, errors="coerce", dayfirst=False)
-        if not pd.isna(ts):
-            dates.append(ts.normalize().date())
-    dates = sorted(set(dates))
+    dates = _parse_pipe_delimited_dates(raw)
 
     if not dates:
         return [], "no_valid_dates"
     if len(dates) == 1:
         return dates, "single_date"
 
-    year_counts   = Counter(d.year for d in dates)
-    unique_years  = sorted(year_counts.keys())
+    unique_years = sorted({d.year for d in dates})
 
     if len(unique_years) == 1:
         return dates, "same_year_all"
@@ -215,22 +217,9 @@ def _select_qualifying_dates(raw: str) -> tuple[list[date], str]:
     if unique_years[-1] - unique_years[0] <= 1:
         return dates, "consecutive_years_all"
 
-    # gap ≥ 2: clustering
-    clusters = _cluster_years(unique_years)
-    cluster_counts = [(cl, sum(year_counts[y] for y in cl)) for cl in clusters]
-    max_count  = max(c for _, c in cluster_counts)
-    dominant   = [cl for cl, c in cluster_counts if c == max_count]
-
-    if len(dominant) == 1:
-        winning_years = set(dominant[0])
-        y_label = (str(dominant[0][0]) if len(dominant[0]) == 1
-                   else f"{dominant[0][0]}-{dominant[0][-1]}")
-        rule = f"dominant_cluster_{y_label}"
-    else:
-        winning_years = set(dominant[0])
-        rule = f"tie_earliest_cluster_{dominant[0][0]}"
-
-    return [d for d in dates if d.year in winning_years], rule
+    # gap ≥ 2: bring BTRIS records for every candidate date across all year
+    # clusters instead of collapsing to a single cluster.
+    return dates, "multi_year_clusters_all"
 
 
 # ---------------------------------------------------------------------------
@@ -1018,7 +1007,11 @@ def main() -> None:
         results_by_proto_prefix[(proto, prefix)] = pd.concat(frames, ignore_index=True)
 
     # ── Step 5: Clasificar repetidos en Lab y Microbiology ────────────────────
-    print_step(5, "Clasificando tests repetidos (mismo valor → colapsar / distinto → discrepancia)")
+    print_step(
+        5,
+        "Clasificando tests repetidos "
+        "(mismo valor → colapsar / distinto → discrepancia)",
+    )
 
     all_merged:   list[pd.DataFrame] = []
     all_separate: list[pd.DataFrame] = []
