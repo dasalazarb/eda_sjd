@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import datetime
 import re
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -192,28 +191,6 @@ def _parse_pipe_delimited_dates(raw: str) -> list[date]:
     return sorted(set(dates))
 
 
-def _format_year_cluster(cluster: list[int]) -> str:
-    """Return a stable label for a year cluster."""
-    return str(cluster[0]) if len(cluster) == 1 else f"{cluster[0]}-{cluster[-1]}"
-
-
-def _cluster_lookup_for_raw_dates(raw: str) -> dict[int, str]:
-    """Return {year: cluster_label} for a raw pipe-delimited date field."""
-    dates = _parse_pipe_delimited_dates(raw)
-    unique_years = sorted({d.year for d in dates})
-    if not unique_years:
-        return {}
-    if unique_years[-1] - unique_years[0] <= 1:
-        return {year: _format_year_cluster(unique_years) for year in unique_years}
-
-    lookup: dict[int, str] = {}
-    for cluster in _cluster_years(unique_years):
-        label = _format_year_cluster(cluster)
-        for year in cluster:
-            lookup[year] = label
-    return lookup
-
-
 def _select_qualifying_dates(raw: str) -> tuple[list[date], str]:
     """
     Retorna (lista de fechas calificadoras, etiqueta de regla).
@@ -222,8 +199,8 @@ def _select_qualifying_dates(raw: str) -> tuple[list[date], str]:
       · 1 fecha única            → esa fecha,  'single_date'
       · todos mismo año          → todas,       'same_year_all'
       · span ≤ 1 año             → todas,       'consecutive_years_all'
-      · span ≥ 2 → se retienen todas las fechas candidatas para evaluar
-        qué cluster tiene información en los dataframes BTRIS explorados.
+      · span ≥ 2 → todas las fechas de todos los clusters de años,
+        'multi_year_clusters_all'
     """
     dates = _parse_pipe_delimited_dates(raw)
 
@@ -240,9 +217,9 @@ def _select_qualifying_dates(raw: str) -> tuple[list[date], str]:
     if unique_years[-1] - unique_years[0] <= 1:
         return dates, "consecutive_years_all"
 
-    # gap ≥ 2: keep all candidate clusters for now.  The final cluster is
-    # selected after BTRIS files are explored, based on which cluster has data.
-    return dates, "cluster_candidates_pending_btris"
+    # gap ≥ 2: bring BTRIS records for every candidate date across all year
+    # clusters instead of collapsing to a single cluster.
+    return dates, "multi_year_clusters_all"
 
 
 # ---------------------------------------------------------------------------
