@@ -23,6 +23,16 @@ from common import (
 MISSING_TOKEN_UPPER = {str(token).upper() for token in MISSING_TOKENS}
 ANS_PREFIX = "ans__"
 AUTO_PREFIX = "autonomic_nervous_system_questionnaire__"
+NH_INTERVAL = "Natural History Protocol 478 Interval"
+SAME_DATE_PREFERRED_COLUMNS = {
+    "ids__patient_record_number", "ids__interval_name", "ids__subject_number", "ids__site_name",
+    "ids__dob", "ids__race", "ids__ethnicity", "ids__sex", "ids__age_at_visit",
+    "ids__visit_date", "ids__time_24_hour", "visit_summary_form__sjogrens_class",
+    "vital_signs__bp_systolic__", "vital_signs__bp_diastolic__", "vital_signs__pulse",
+    "vital_signs__respiratory_rate", "vital_signs__temp", "visit_date", "time_24_hour",
+    "visit_datetime", "source_protocol", "source_file", "row_id_raw", "dup_rank",
+    "duplicate_group_id", "visit_datetime_adjustment_seconds", "comparison_type",
+}
 ANALYSIS_EXCLUDED_VARS = {
     "row_id_raw",
     "visit_datetime",
@@ -196,6 +206,146 @@ def _merge_ans_autonomic_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
             out = out.drop(columns=drop_cols)
 
     return out, len(shared_suffixes)
+
+
+def _date_tokens(value: object) -> set[str]:
+    """Return normalized calendar-date tokens from a possibly merged cell."""
+    normalized_dates: set[str] = set()
+    for token in _tokenize_cell(value):
+        date = pd.to_datetime(token, errors="coerce")
+        if not pd.isna(date):
+            normalized_dates.add(date.strftime("%Y-%m-%d"))
+    return normalized_dates
+
+
+def _is_natural_history_interval(value: object) -> bool:
+    """Return whether an interval cell contains only the Natural History label."""
+    return _tokenize_cell(value) == [NH_INTERVAL]
+
+
+def _merge_same_date_intervals(
+    collapsed: pd.DataFrame,
+    subject_col: str,
+    interval_col: str,
+    visit_date_col: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Merge Natural History rows into a non-Natural-History row sharing a date.
+
+    A date match is an exact intersection between normalized date tokens, so a row
+    with a pipe-delimited date cell can match a row containing any one of its dates.
+    Candidate pairs with two Natural History rows or two non-Natural-History rows
+    are retained and recorded without being merged.
+    """
+    output_rows: list[pd.Series] = []
+    report_rows: list[dict[str, object]] = []
+
+    for subject, subject_rows in collapsed.groupby(
+        subject_col, sort=False, dropna=False
+    ):
+        rows = [
+            (index, row.copy(), _date_tokens(row[visit_date_col]))
+            for index, row in subject_rows.iterrows()
+        ]
+        consumed_indices: set[object] = set()
+
+        for nh_index, nh_row, nh_dates in rows:
+            if nh_index in consumed_indices or not _is_natural_history_interval(
+                nh_row[interval_col]
+            ):
+                continue
+
+            matches = [
+                (index, row, dates)
+                for index, row, dates in rows
+                if index != nh_index and dates.intersection(nh_dates)
+            ]
+            non_nh_matches = [
+                match
+                for match in matches
+                if not _is_natural_history_interval(match[1][interval_col])
+            ]
+
+            if len(non_nh_matches) == 1:
+                target_index, target_row, target_dates = non_nh_matches[0]
+                if target_index not in consumed_indices:
+                    merged_row = target_row.copy()
+                    for col in collapsed.columns:
+                        if col in SAME_DATE_PREFERRED_COLUMNS:
+                            continue
+                        merged_row[col] = _collapse_column(
+                            pd.Series([target_row[col], nh_row[col]])
+                        )
+                    output_rows.append(merged_row)
+                    consumed_indices.update({nh_index, target_index})
+                    report_rows.append(
+                        {
+                            subject_col: subject,
+                            "natural_history_interval": nh_row[interval_col],
+                            "other_interval": target_row[interval_col],
+                            "shared_visit_dates": " | ".join(
+                                sorted(nh_dates.intersection(target_dates))
+                            ),
+                            "action": "merged_prefer_non_natural_history",
+                        }
+                    )
+                    continue
+
+            for _, matched_row, matched_dates in matches:
+                action = (
+                    "not_merged_both_natural_history"
+                    if _is_natural_history_interval(matched_row[interval_col])
+                    else (
+                        "not_merged_multiple_non_natural_history_matches"
+                        if len(non_nh_matches) > 1
+                        else "not_merged_no_non_natural_history_match"
+                    )
+                )
+                report_rows.append(
+                    {
+                        subject_col: subject,
+                        "natural_history_interval": nh_row[interval_col],
+                        "other_interval": matched_row[interval_col],
+                        "shared_visit_dates": " | ".join(
+                            sorted(nh_dates.intersection(matched_dates))
+                        ),
+                        "action": action,
+                    }
+                )
+
+        for index, row, _ in rows:
+            if index not in consumed_indices:
+                output_rows.append(row)
+
+        for left_position, (_, left_row, left_dates) in enumerate(rows):
+            if _is_natural_history_interval(left_row[interval_col]):
+                continue
+            for _, right_row, right_dates in rows[left_position + 1 :]:
+                if _is_natural_history_interval(right_row[interval_col]):
+                    continue
+                shared_dates = left_dates.intersection(right_dates)
+                if shared_dates:
+                    report_rows.append(
+                        {
+                            subject_col: subject,
+                            "natural_history_interval": pd.NA,
+                            "other_interval": _merge_cell_values(
+                                [left_row[interval_col], right_row[interval_col]]
+                            ),
+                            "shared_visit_dates": " | ".join(sorted(shared_dates)),
+                            "action": "not_merged_no_natural_history_interval",
+                        }
+                    )
+
+    report_columns = [
+        subject_col,
+        "natural_history_interval",
+        "other_interval",
+        "shared_visit_dates",
+        "action",
+    ]
+    return pd.DataFrame(output_rows, columns=collapsed.columns), pd.DataFrame(
+        report_rows, columns=report_columns
+    )
 
 
 def _build_aggregated_columns(sorted_visits: pd.DataFrame, group_cols: list[str]) -> dict[str, object]:
@@ -383,6 +533,15 @@ def main() -> None:
         aggregated = _build_aggregated_columns(sorted_visits, group_cols)
         collapsed = sorted_visits.groupby(group_cols, as_index=False).agg(aggregated)
         collapsed, merged_suffix_pairs = _merge_ans_autonomic_columns(collapsed)
+        collapsed, same_date_merge_report = _merge_same_date_intervals(
+            collapsed,
+            subject_col=subject_col,
+            interval_col=interval_col,
+            visit_date_col=visit_date_col,
+        )
+        same_date_merge_report.to_csv(
+            REPORTS_DIR / "09_same_date_interval_merge_report.csv", index=False
+        )
         collapsed.to_parquet(
             ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_not_clean.parquet", index=False
         )
@@ -396,9 +555,14 @@ def main() -> None:
             "Merged ans/autonomic columns by shared suffix. merged_pairs=%d",
             merged_suffix_pairs,
         )
+        logger.info(
+            "Applied same-date interval merge. report_rows=%d",
+            len(same_date_merge_report),
+        )
     else:
         collapsed = None
         merged_suffix_pairs = 0
+        same_date_merge_report = pd.DataFrame()
 
     metrics = {
         "rows_original": len(visits),
@@ -406,6 +570,7 @@ def main() -> None:
         "groups_with_repeated_rows": len(repeated_groups),
         "collapse_requested": config.collapse,
         "ans_autonomic_merged_pairs": merged_suffix_pairs,
+        "same_date_interval_merge_report_rows": len(same_date_merge_report),
     }
     print_kv("Interval collapse audit", metrics)
     print_step(7, "Append targeted EDA for visits/collapsed outputs to unified workbook")
