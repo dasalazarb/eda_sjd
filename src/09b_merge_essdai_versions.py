@@ -139,7 +139,30 @@ def _merge_column_group(df: pd.DataFrame, source_cols: list[str], target_col: st
     return out
 
 
+def _select_essdai_value(legacy_value: object, canonical_value: object) -> object:
+    """Choose the ESSDAI-R value only when it conflicts with ESSDAI.
+
+    Empty values fall back to the non-empty version. When both versions contain
+    the same values, the canonical ESSDAI representation is retained. This
+    prevents values from the two versions being concatenated with ``" | "``.
+    """
+    legacy_tokens = _tokenize_cell(legacy_value)
+    canonical_tokens = _tokenize_cell(canonical_value)
+
+    if not legacy_tokens:
+        return canonical_value
+    if not canonical_tokens:
+        return legacy_value
+
+    legacy_normalized = {token.casefold() for token in legacy_tokens}
+    canonical_normalized = {token.casefold() for token in canonical_tokens}
+    if legacy_normalized != canonical_normalized:
+        return legacy_value
+    return canonical_value
+
+
 def _merge_essdai_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Merge matched ESSDAI columns, preferring ESSDAI-R for conflicts."""
     out = df.copy()
     colnames = [str(c) for c in out.columns]
     legacy_map = _prefix_map(colnames, ESSDAI_PREFIX_LEGACY)
@@ -147,9 +170,19 @@ def _merge_essdai_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     shared_suffixes = sorted(set(legacy_map).intersection(canonical_map))
 
     for suffix in shared_suffixes:
-        source_cols = [*legacy_map[suffix], *canonical_map[suffix]]
         merged_col = f"{ESSDAI_PREFIX_CANONICAL}{suffix}"
-        out = _merge_column_group(out, source_cols, merged_col)
+        legacy_value = out[legacy_map[suffix]].apply(
+            lambda row: _merge_cell_values(row.tolist()), axis=1
+        )
+        canonical_value = out[canonical_map[suffix]].apply(
+            lambda row: _merge_cell_values(row.tolist()), axis=1
+        )
+        selected_values = [
+            _select_essdai_value(legacy, canonical)
+            for legacy, canonical in zip(legacy_value, canonical_value)
+        ]
+        out[merged_col] = pd.Series(selected_values, index=out.index)
+        out = out.drop(columns=legacy_map[suffix])
 
     return out, len(shared_suffixes)
 
