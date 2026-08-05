@@ -55,3 +55,45 @@ def test_merge_essdai_columns_uses_essdai_r_when_canonical_value_is_empty() -> N
     result, _ = merge_essdai_versions._merge_essdai_columns(df)
 
     assert result.loc[0, "essdai__constitutional"] == "3"
+
+
+def test_add_sjogrens_class_patient_cohort_keeps_patient_with_any_target_class() -> None:
+    df = pd.DataFrame(
+        {
+            "ids__patient_record_number": ["P1", "P1"],
+            "visit_summary_form__sjogrens_class": ["1", "8"],
+        }
+    )
+
+    result, patient_cohorts = merge_essdai_versions._add_sjogrens_class_patient_cohort(df)
+
+    assert set(result["sjogrens_class_patient_cohort"]) == {"ever_1_2_4"}
+    assert patient_cohorts.loc[0, "sjogrens_class_patient_values"] == "1|8"
+
+
+def test_add_sjogrens_class_patient_cohort_marks_never_target_patients() -> None:
+    df = pd.DataFrame(
+        {
+            "ids__patient_record_number": ["P2", "P2", "P2", "P2", "P2"],
+            "visit_summary_form__sjogrens_class": ["3", "5", "6", "8", "8"],
+        }
+    )
+
+    result, patient_cohorts = merge_essdai_versions._add_sjogrens_class_patient_cohort(df)
+
+    assert set(result["sjogrens_class_patient_cohort"]) == {"never_1_2_4"}
+    assert patient_cohorts.loc[0, "sjogrens_class_patient_values"] == "3|5|6|8"
+
+
+def test_add_sjogrens_class_patient_cohort_handles_pipe_delimited_and_decimal_values() -> None:
+    df = pd.DataFrame(
+        {
+            "ids__patient_record_number": ["P3", "P3"],
+            "visit_summary_form__sjogrens_class": ["3 | 5.0", "2.0 | 8"],
+        }
+    )
+
+    result, patient_cohorts = merge_essdai_versions._add_sjogrens_class_patient_cohort(df)
+
+    assert set(result["sjogrens_class_patient_cohort"]) == {"ever_1_2_4"}
+    assert patient_cohorts.loc[0, "sjogrens_class_patient_values"] == "3|5|2|8"
