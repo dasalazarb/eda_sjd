@@ -14,6 +14,12 @@ ESSDAI_PREFIX_CANONICAL = "essdai__"
 KEY_PATIENT = "ids__patient_record_number"
 KEY_INTERVAL = "ids__interval_name"
 KEY_VISIT_DATE = "ids__visit_date"
+SJD_CLASS_COL = "visit_summary_form__sjogrens_class"
+SJD_TARGET_CLASSES = {"1", "2", "4"}
+SJD_COHORT_COL = "sjogrens_class_patient_cohort"
+SJD_CLASS_VALUES_COL = "sjogrens_class_patient_values"
+SJD_TARGET_COHORT_LABEL = "ever_1_2_4"
+SJD_NEVER_TARGET_COHORT_LABEL = "never_1_2_4"
 NH_INTERVAL = "Natural History Protocol 478 Interval"
 OPT15D_PREFIX = "15D Optional Evaluation"
 OPT15D_PATTERN = re.compile(rf"^{re.escape(OPT15D_PREFIX)}(?:\s*\{{?\d+\}}?)?$", re.IGNORECASE)
@@ -262,6 +268,90 @@ def _normalize_string(value: object) -> str:
     return str(value).strip()
 
 
+def _normalize_class_token(token: str) -> str | None:
+    """Normalize a Sjögren's classification token to an integer-like string."""
+    normalized = token.strip()
+    if not normalized or normalized.casefold() in EMPTY_LIKE_LITERALS:
+        return None
+
+    numeric = pd.to_numeric(normalized, errors="coerce")
+    if pd.notna(numeric) and float(numeric).is_integer():
+        return str(int(numeric))
+    return normalized
+
+
+def _extract_sjogrens_class_tokens(value: object) -> list[str]:
+    """Return normalized Sjögren's classification tokens from a cell value."""
+    tokens: list[str] = []
+    for token in _tokenize_cell(value):
+        normalized = _normalize_class_token(token)
+        if normalized is not None:
+            tokens.append(normalized)
+    return tokens
+
+
+def _add_sjogrens_class_patient_cohort(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Add patient-level Sjögren's class cohort labels to every visit row.
+
+    Patients are assigned to ``ever_1_2_4`` if any available longitudinal row
+    has class 1, 2, or 4. Patients with observed class values but never 1, 2,
+    or 4 are assigned to ``never_1_2_4`` so downstream analyses can compare
+    them against the primary SjD cohort without dropping their visit history.
+    """
+    if KEY_PATIENT not in df.columns or SJD_CLASS_COL not in df.columns:
+        return df.copy(), pd.DataFrame(
+            columns=[KEY_PATIENT, SJD_CLASS_VALUES_COL, SJD_COHORT_COL]
+        )
+
+    out = df.copy()
+    out[KEY_PATIENT] = out[KEY_PATIENT].map(_normalize_string)
+    patient_rows: list[dict[str, object]] = []
+
+    grouped = out.groupby(KEY_PATIENT, dropna=False, sort=False)[SJD_CLASS_COL]
+    for patient_id, values in grouped:
+        patient_text = _normalize_string(patient_id)
+        if not patient_text:
+            continue
+
+        class_values: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            for token in _extract_sjogrens_class_tokens(value):
+                if token in seen:
+                    continue
+                seen.add(token)
+                class_values.append(token)
+
+        has_target_class = bool(set(class_values) & SJD_TARGET_CLASSES)
+        if has_target_class:
+            cohort_label = SJD_TARGET_COHORT_LABEL
+        elif class_values:
+            cohort_label = SJD_NEVER_TARGET_COHORT_LABEL
+        else:
+            cohort_label = pd.NA
+
+        patient_rows.append(
+            {
+                KEY_PATIENT: patient_text,
+                SJD_CLASS_VALUES_COL: "|".join(class_values) if class_values else pd.NA,
+                SJD_COHORT_COL: cohort_label,
+            }
+        )
+
+    patient_cohorts = pd.DataFrame(
+        patient_rows, columns=[KEY_PATIENT, SJD_CLASS_VALUES_COL, SJD_COHORT_COL]
+    )
+    if patient_cohorts.empty:
+        out[SJD_CLASS_VALUES_COL] = pd.NA
+        out[SJD_COHORT_COL] = pd.NA
+        return out, patient_cohorts
+
+    out = out.merge(patient_cohorts, on=KEY_PATIENT, how="left")
+    return out, patient_cohorts
+
+
 def _patients_to_exclude(df: pd.DataFrame) -> set[str]:
     if KEY_PATIENT not in df.columns or KEY_INTERVAL not in df.columns:
         return set()
@@ -497,7 +587,10 @@ def run(config: MergeConfig) -> None:
     print_step(6, "Compute ESSDAI weighted total score")
     merged = _compute_essdai_total_score(merged)
 
-    print_step(7, "Drop fully empty columns and write report")
+    print_step(7, "Add patient-level Sjögren's classification cohort labels")
+    merged, sjogrens_class_patient_cohorts = _add_sjogrens_class_patient_cohort(merged)
+
+    print_step(8, "Drop fully empty columns and write report")
     merged, dropped_empty_columns = _drop_fully_empty_columns(merged)
     config.output_base.parent.mkdir(parents=True, exist_ok=True)
     empty_cols_report_path = config.output_base.parent / f"{config.output_base.name}_dropped_empty_columns.csv"
@@ -506,8 +599,12 @@ def run(config: MergeConfig) -> None:
         config.output_base.parent / f"{config.output_base.name}_collapsed_15d_optional_value_overlap_report.xlsx"
     )
     collapsed_optional_overlap_report.to_excel(optional_overlap_report_path, index=False)
+    sjogrens_class_cohort_report_path = (
+        config.output_base.parent / f"{config.output_base.name}_sjogrens_class_patient_cohorts.csv"
+    )
+    sjogrens_class_patient_cohorts.to_csv(sjogrens_class_cohort_report_path, index=False)
 
-    print_step(8, "Save outputs")
+    print_step(9, "Save outputs")
     parquet_path = config.output_base.with_suffix(".parquet")
     csv_path = config.output_base.with_suffix(".csv")
     merged.to_parquet(parquet_path, index=False)
@@ -517,6 +614,10 @@ def run(config: MergeConfig) -> None:
     logger.info("Saved merged dataset csv: %s", csv_path)
     logger.info("Saved empty-column drop report csv: %s", empty_cols_report_path)
     logger.info("Saved 15D Optional overlap report xlsx: %s", optional_overlap_report_path)
+    logger.info(
+        "Saved Sjögren's class patient cohort report csv: %s",
+        sjogrens_class_cohort_report_path,
+    )
     print_kv(
         "merge_summary",
         {
@@ -530,10 +631,31 @@ def run(config: MergeConfig) -> None:
             "additional_pairs_skipped_missing_columns": additional_pairs_skipped,
             "dropped_fully_empty_columns": len(dropped_empty_columns),
             "collapsed_optional_15d_overlap_report_rows": len(collapsed_optional_overlap_report),
+            "sjogrens_class_ever_1_2_4_patients": (
+                int(
+                    (
+                        sjogrens_class_patient_cohorts[SJD_COHORT_COL]
+                        == SJD_TARGET_COHORT_LABEL
+                    ).sum()
+                )
+                if not sjogrens_class_patient_cohorts.empty
+                else 0
+            ),
+            "sjogrens_class_never_1_2_4_patients": (
+                int(
+                    (
+                        sjogrens_class_patient_cohorts[SJD_COHORT_COL]
+                        == SJD_NEVER_TARGET_COHORT_LABEL
+                    ).sum()
+                )
+                if not sjogrens_class_patient_cohorts.empty
+                else 0
+            ),
             "parquet_path": str(parquet_path),
             "csv_path": str(csv_path),
             "empty_columns_report_path": str(empty_cols_report_path),
             "optional_overlap_report_path": str(optional_overlap_report_path),
+            "sjogrens_class_cohort_report_path": str(sjogrens_class_cohort_report_path),
         },
     )
 
