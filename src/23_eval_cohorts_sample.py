@@ -46,6 +46,7 @@ COL_IE_HV       = "inclusion/exclusion_criteria__ic_hv"
 COL_ESSDAI     = "essdai__essdai_total_score"
 COL_ESSPRI_DRY = "esspri_questionnaire__dryness"       # ESSPRI completeness proxy
 COL_ESSPRI_FAT = "esspri_questionnaire__fatigue"
+COL_ESSPRI_PAIN = "esspri_questionnaire__pain"
 
 # Labs
 COL_LABS       = "cris_lab_form__labs_done"
@@ -300,6 +301,8 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
         esspri_mask = esspri_mask | df[COL_ESSPRI_DRY].notna()
     if COL_ESSPRI_FAT in df.columns:
         esspri_mask = esspri_mask | df[COL_ESSPRI_FAT].notna()
+    if COL_ESSPRI_PAIN in df.columns:
+        esspri_mask = esspri_mask | df[COL_ESSPRI_PAIN].notna()
     esspri_any = set(df.loc[esspri_mask, COL_PATIENT].unique())
 
     paired_df = df[df[COL_ESSDAI].notna() & esspri_mask] \
@@ -310,9 +313,11 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     results["C7"] = dict(
         description="Phenotype Pop 1-3 (paired ESSDAI+ESSPRI)",
         objective="Secondary Objective 2 — proportions in Pop 1/2/3",
-        inclusion_criteria="C1 + ≥1 visit with ESSDAI and ESSPRI (fatigue o dryness) within ±30 days",
+        inclusion_criteria="C1 + ≥1 visit with ESSDAI and ESSPRI (pain, fatigue o dryness) within ±30 days",
         time_zero_criteria="First paired ESSDAI-ESSPRI assessment",
-        key_variables=f"{COL_ESSDAI}, {COL_ESSPRI_FAT}, {COL_ESSPRI_DRY}",
+        key_variables=(
+            f"{COL_ESSDAI}, {COL_ESSPRI_PAIN}, {COL_ESSPRI_FAT}, {COL_ESSPRI_DRY}"
+        ),
         n=len(c7),
         pts=c7,
         n_essdai_any=len(essdai_any),
