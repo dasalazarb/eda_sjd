@@ -4,7 +4,7 @@ SJÖGREN'S NATURAL HISTORY PROJECT
 Cohort Viability Analysis — C0 through C12
 =============================================================================
 
-INPUT:  visits_long_collapsed_by_interval_codebook_type_recode.csv
+INPUT:  visits_long_collapsed_by_interval_codebook_not_clean.csv
         (Codebook format: rows = visits; non-null cells = recorded value;
          CSV row 0 contains type descriptors and is removed.)
 
