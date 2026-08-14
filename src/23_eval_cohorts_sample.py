@@ -47,6 +47,19 @@ COL_ESSDAI     = "essdai__essdai_total_score"
 COL_ESSPRI_DRY = "esspri_questionnaire__dryness"       # ESSPRI completeness proxy
 COL_ESSPRI_FAT = "esspri_questionnaire__fatigue"
 COL_ESSPRI_PAIN = "esspri_questionnaire__pain"
+COLS_ESSPRI = [COL_ESSPRI_DRY, COL_ESSPRI_FAT, COL_ESSPRI_PAIN]
+
+COLS_SF36 = [
+    (
+        "sf-36_health_survey__sf_q26"
+        if question == 26
+        else f"sf-36_health_survey__sf36_q{question}"
+    )
+    for question in range(1, 37)
+]
+PROFAD_PREFIX = "profile_of_fatigue_and_discomfort__profad_"
+PROFAD_VARIABLE_COUNT = 19
+MDAFS_MAF_PREFIX = "multidimensional_assessment_of_fatigue_scale__fat_q"
 
 # Labs
 COL_LABS       = "cris_lab_form__labs_done"
@@ -146,6 +159,55 @@ def pts_all_cols_same_visit(df: pd.DataFrame, cols: list) -> set:
         return set()
     mask = df[present].notna().all(axis=1)
     return set(df[mask][COL_PATIENT].unique())
+
+
+def complete_pro_visit_mask(df: pd.DataFrame) -> pd.Series:
+    """
+    Identify visits with a complete PRO questionnaire, in priority order.
+
+    A visit qualifies when it has every item from at least one questionnaire.
+    Questionnaires are evaluated in this order: ESSPRI, SF-36, PROFAD, then
+    MDAFS/MAF. An incomplete higher-priority questionnaire does not prevent a
+    complete lower-priority questionnaire from qualifying the visit.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Visit-level clinical dataframe.
+
+    Returns
+    -------
+    pd.Series
+        Boolean series aligned to ``df.index``; ``True`` marks a complete PRO
+        assessment.
+    """
+    complete_mask = pd.Series(False, index=df.index, dtype=bool)
+
+    fixed_groups = (COLS_ESSPRI, COLS_SF36)
+    for columns in fixed_groups:
+        if all(column in df.columns for column in columns):
+            eligible = ~complete_mask
+            complete_mask.loc[eligible] = df.loc[eligible, columns].notna().all(axis=1)
+
+    profad_columns = sorted(
+        column for column in df.columns if column.startswith(PROFAD_PREFIX)
+    )
+    if len(profad_columns) == PROFAD_VARIABLE_COUNT:
+        eligible = ~complete_mask
+        complete_mask.loc[eligible] = (
+            df.loc[eligible, profad_columns].notna().all(axis=1)
+        )
+
+    mdafs_maf_columns = sorted(
+        column for column in df.columns if column.startswith(MDAFS_MAF_PREFIX)
+    )
+    if mdafs_maf_columns:
+        eligible = ~complete_mask
+        complete_mask.loc[eligible] = (
+            df.loc[eligible, mdafs_maf_columns].notna().all(axis=1)
+        )
+
+    return complete_mask
 
 
 def viability_flag(n: int) -> str:
@@ -359,13 +421,18 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     # -----------------------------------------------------------------------
     # C10: Prospective PRO cohort
     # -----------------------------------------------------------------------
-    c10 = pts_with_data(df, COL_ESSPRI_DRY, min_visits=2) & c1
+    complete_pro_mask = complete_pro_visit_mask(df)
+    complete_pro_visits = df.loc[complete_pro_mask].groupby(COL_PATIENT).size()
+    c10 = set(complete_pro_visits[complete_pro_visits >= 2].index) & c1
     results["C10"] = dict(
-        description="Prospective PRO (≥2 ESSPRI ≥6 months)",
+        description="Prospective PRO (≥2 complete PRO assessments ≥6 months)",
         objective="Secondary Objective 5 — symptom burden and quality of life",
-        inclusion_criteria="11-D with ≥2 PRO assessments separated by ≥6 months",
+        inclusion_criteria=(
+            "11-D with ≥2 complete PRO assessments (ESSPRI, SF-36, PROFAD, "
+            "or MDAFS/MAF) separated by ≥6 months"
+        ),
         time_zero_criteria="First visit with recorded PRO",
-        key_variables=COL_ESSPRI_DRY,
+        key_variables="ESSPRI; SF-36; PROFAD; MDAFS/MAF",
         n=len(c10),
         pts=c10,
         note="Temporal separation ≥6 months cannot be verified without true dates.",
