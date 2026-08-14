@@ -75,22 +75,8 @@ COL_COMORBID   = "rheumatological_comorbidities__comorbid_none"
 COL_PMH_CARDIO = "past_medical_history__cardio_none"
 
 # Autoimmune overlap (para C8)
-COLS_OVERLAP   = [
-    "rheumatological_comorbidities__integ_raynds",
-    "rheumatological_comorbidities__ra",
-    "rheumatological_comorbidities__sle1",
-    "rheumatological_comorbidities__systemic_sclerosis",
-    "rheumatological_comorbidities__polymyositis",
-    "rheumatological_comorbidities__dermatomyositis",
-    "rheumatological_comorbidities__mixed_connective_tissue_disease",
-    "rheumatological_comorbidities__antiphospholipid_syndrome",
-    "rheumatological_comorbidities__cryoglobulinemia",
-    "rheumatological_comorbidities__fibromyalgia1",
-    "rheumatological_comorbidities__osteoporosis1",
-    "rheumatological_comorbidities__osteopenia",
-    "rheumatological_comorbidities__osteoarthritis",
-    "rheumatological_comorbidities__sarcoidosis",
-]
+OVERLAP_COLUMN_PREFIX = "rheumatological_comorbidities__"
+OVERLAP_CONFIRM_MARKER = "confirm"
 
 # Medications (for C9)
 COLS_MEDS      = [f"medications__rx_{i}_name" for i in range(1, 11)]
@@ -390,14 +376,26 @@ def run_analysis(df: pd.DataFrame, c0_df: pd.DataFrame | None = None) -> dict:
     # -----------------------------------------------------------------------
     # C8: Secondary/overlap autoimmune subgroup
     # -----------------------------------------------------------------------
-    overlap_pts = pts_any_col(df, COLS_OVERLAP)
+    overlap_confirm_col = next(
+        (
+            column
+            for column in df.columns
+            if column.startswith(OVERLAP_COLUMN_PREFIX)
+            and OVERLAP_CONFIRM_MARKER
+            in column.removeprefix(OVERLAP_COLUMN_PREFIX).lower()
+        ),
+        None,
+    )
+    overlap_pts = pts_any_col(
+        df, [overlap_confirm_col] if overlap_confirm_col is not None else []
+    )
     c8 = c1 & overlap_pts
     results["C8"] = dict(
         description="Autoimmune overlap (RA/SLE/SSc/others)",
         objective="Secondary Objective 3 — progression in SjD + overlap",
         inclusion_criteria="C1 subset with coexisting autoimmune disease",
         time_zero_criteria="Same index as parent cohort (C1)",
-        key_variables=", ".join(COLS_OVERLAP[:3]) + "...",
+        key_variables=overlap_confirm_col or "N/A",
         n=len(c8),
         pts=c8,
     )
