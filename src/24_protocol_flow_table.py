@@ -21,6 +21,7 @@ from common import (
 )
 
 PROTOCOLS = ("11D", "15D")
+SJD_ELIGIBLE_VALUES = {1, 2, 4}
 DEFAULT_INPUT_CANDIDATES = [
     ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_corrected.parquet",
     ANALYTIC_DIR / "visits_long_collapsed_by_interval.parquet",
@@ -88,6 +89,25 @@ def _protocol_mask(df: pd.DataFrame, protocol_col: str, protocol: str) -> pd.Ser
     return values.str.split(r"\s*\|\s*", regex=True).apply(
         lambda parts: protocol in set(parts)
     )
+
+
+def _eligible_sjd_patient_set(
+    visits: pd.DataFrame, patient_col: str, classification_col: str
+) -> set:
+    """Return patients classified as SjD (1, 2, or 4) at least once."""
+
+    def has_eligible_value(value: object) -> bool:
+        if pd.isna(value):
+            return False
+        components = [part.strip() for part in str(value).split("|")]
+        for component in components:
+            numeric = pd.to_numeric(component, errors="coerce")
+            if not pd.isna(numeric) and numeric in SJD_ELIGIBLE_VALUES:
+                return True
+        return False
+
+    eligible_rows = visits[classification_col].apply(has_eligible_value)
+    return set(visits.loc[eligible_rows, patient_col].dropna())
 
 
 def _clean_visit_date(value: object) -> tuple[pd.Timestamp | pd.NaT, bool, str]:
@@ -479,6 +499,30 @@ def main() -> None:
     if date_col is None:
         raise KeyError("Could not identify a visit_datetime or visit_date column")
     visits, special_dates = _prepare_visits(source, patient_col, protocol_col, date_col)
+
+    classification_col = _resolve_optional_column(
+        visits,
+        ("visit_summary_form__sjogrens_class", "sjogrens_class"),
+    )
+    if classification_col is None:
+        raise KeyError(
+            "Could not identify the visit_summary_form__sjogrens_class column"
+        )
+    eligible_patients = _eligible_sjd_patient_set(
+        visits, "patient_record_number", classification_col
+    )
+    visits = visits[visits["patient_record_number"].isin(eligible_patients)].copy()
+    special_dates = special_dates[
+        special_dates["patient_record_number"].isin(eligible_patients)
+    ].copy()
+    if visits.empty:
+        raise ValueError(
+            "No patients had visit_summary_form__sjogrens_class equal to 1, 2, or 4"
+        )
+    logger.info(
+        "Restricted follow-up cohort to %d patients ever classified as 1, 2, or 4",
+        len(eligible_patients),
+    )
     protocol_sets = {
         protocol: set(
             visits.loc[
