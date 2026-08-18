@@ -114,7 +114,12 @@ def _prepare_visits(
     visits["_source_row"] = np.arange(len(visits))
     visits["visit_date_original"] = visits[date_col]
     cleaned = visits[date_col].apply(_clean_visit_date)
-    visits["visit_date"] = cleaned.str[0]
+    # Extracting Timestamp objects from tuple results leaves an object-dtype
+    # Series in recent pandas versions. Convert the already-cleaned scalar
+    # dates explicitly so downstream subtraction always supports ``.dt``.
+    visits["visit_date"] = pd.to_datetime(
+        cleaned.str[0], errors="coerce", utc=True
+    ).dt.tz_localize(None)
     visits["visit_date_had_multiple_values"] = cleaned.str[1]
     visits["visit_date_issue"] = cleaned.str[2]
     visits["patient_record_number"] = visits[patient_col]
