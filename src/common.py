@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
 import warnings
+import zipfile
 from pathlib import Path
 from typing import Iterable
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -239,6 +243,25 @@ def upsert_eda_sheets_xlsx(
     workbook_path: Path | str = EDA_UNIFIED_REPORT_PATH,
     sheets_dict: dict[str, pd.DataFrame] | None = None,
 ) -> Path:
+    """Add or replace EDA worksheets while preserving recoverability.
+
+    Existing workbooks are copied to a temporary file and the updated copy is
+    atomically installed only after ``openpyxl`` has successfully written it.
+    If an existing workbook is corrupt, it is preserved beside the replacement
+    with a ``.corrupt`` suffix before a new workbook is created.
+
+    Parameters
+    ----------
+    workbook_path : Path or str
+        Destination Excel workbook.
+    sheets_dict : dict[str, pd.DataFrame] or None
+        DataFrames keyed by requested worksheet name.
+
+    Returns
+    -------
+    Path
+        Path to the updated workbook.
+    """
     ensure_dirs()
     workbook = Path(workbook_path)
     workbook.parent.mkdir(parents=True, exist_ok=True)
@@ -248,27 +271,60 @@ def upsert_eda_sheets_xlsx(
 
     normalized_names = _make_unique_sheet_names(sheets_dict.keys())
     existing_sheet_names: set[str] = set()
+    existing_consolidated: dict[str, pd.DataFrame] = {}
+    workbook_is_valid = False
     if workbook.exists():
-        with pd.ExcelFile(workbook, engine="openpyxl") as excel_file:
-            existing_sheet_names = set(excel_file.sheet_names)
+        try:
+            with pd.ExcelFile(workbook, engine="openpyxl") as excel_file:
+                existing_sheet_names = set(excel_file.sheet_names)
+                consolidated_names = {
+                    normalized_names[str(name)]
+                    for name in sheets_dict
+                    if normalized_names[str(name)] in CONSOLIDATED_EDA_SHEETS
+                    and normalized_names[str(name)] in existing_sheet_names
+                }
+                existing_consolidated = {
+                    name: pd.read_excel(excel_file, sheet_name=name)
+                    for name in consolidated_names
+                }
+            workbook_is_valid = True
+        except (zipfile.BadZipFile, KeyError, OSError, ValueError) as exc:
+            backup = workbook.with_name(f"{workbook.name}.corrupt")
+            counter = 1
+            while backup.exists():
+                backup = workbook.with_name(f"{workbook.name}.corrupt.{counter}")
+                counter += 1
+            shutil.copy2(workbook, backup)
+            warnings.warn(
+                f"Could not read {workbook} ({exc}). Preserved the corrupt "
+                f"workbook as {backup} and created a new workbook.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
-    writer_mode = "a" if workbook.exists() else "w"
+    temporary_workbook = workbook.with_name(
+        f".{workbook.stem}.{uuid4().hex}.tmp{workbook.suffix}"
+    )
+    if workbook_is_valid:
+        shutil.copy2(workbook, temporary_workbook)
+
+    writer_mode = "a" if workbook_is_valid else "w"
     writer_kwargs: dict[str, object] = {"engine": "openpyxl", "mode": writer_mode}
     if writer_mode == "a":
         writer_kwargs["if_sheet_exists"] = "replace"
 
-    with pd.ExcelWriter(workbook, **writer_kwargs) as writer:
-        for original_name, df in sheets_dict.items():
-            sheet_name = normalized_names[str(original_name)]
-            if sheet_name in CONSOLIDATED_EDA_SHEETS and sheet_name in existing_sheet_names:
-                existing_df = pd.read_excel(workbook, sheet_name=sheet_name, engine="openpyxl")
-                combined_df = _concat_aligned_by_column_name(existing_df, df)
-                combined_df.to_excel(writer, sheet_name=sheet_name, index=False)
-                continue
-
-            # Para hojas no consolidadas se mantiene el comportamiento actual:
-            # escritura normal (replace en modo append).
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    try:
+        with pd.ExcelWriter(temporary_workbook, **writer_kwargs) as writer:
+            for original_name, df in sheets_dict.items():
+                sheet_name = normalized_names[str(original_name)]
+                if sheet_name in existing_consolidated:
+                    df = _concat_aligned_by_column_name(
+                        existing_consolidated[sheet_name], df
+                    )
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+        os.replace(temporary_workbook, workbook)
+    finally:
+        temporary_workbook.unlink(missing_ok=True)
 
     return workbook
 
