@@ -1,16 +1,17 @@
+"""Summarize longitudinal visit follow-up for the 11D and 15D protocols."""
+
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from common import (
     ANALYTIC_DIR,
-    INTERMEDIATE_DIR,
     REPORTS_DIR,
     print_kv,
     print_script_overview,
@@ -19,152 +20,63 @@ from common import (
     setup_logger,
 )
 
-PROTOCOL_A = "11D"
-PROTOCOL_B = "15D"
-PROTOCOLS = [PROTOCOL_A, PROTOCOL_B]
+PROTOCOLS = ("11D", "15D")
 DEFAULT_INPUT_CANDIDATES = [
     ANALYTIC_DIR / "visits_long_collapsed_by_interval_codebook_corrected.parquet",
     ANALYTIC_DIR / "visits_long_collapsed_by_interval.parquet",
     ANALYTIC_DIR / "visits_long.parquet",
 ]
-TYPE_PLACEHOLDER_VALUES = {"numeric", "datetime", "date", "string", "boolean"}
-
-ESSDAI_COLUMNS = [
-    "essdai__essdai_total_score",
-    "essdai-_r__essdai_total_score",
-]
-ESSPRI_COLUMNS = [
-    "esspri_questionnaire__esspri_total_score",
-    "esspri_questionnaire__dryness",
-    "esspri_questionnaire__fatigue",
-    "esspri_questionnaire__pain",
-    "esspri_questionnaire__limb_pain",
-]
-SJD_CLASSIFICATION_COLUMNS = [
-    "visit_summary_form__sjogrens_class",
-    "visit_summary_form__sjögrens_class",
-]
-SJD_CLASSIFICATION_ELIGIBLE_VALUES = {1, 2, 4}
-SECONDS_PER_YEAR = 365.25 * 24 * 60 * 60
-
-
-@dataclass(frozen=True)
-class MetricResult:
-    raw_value: float | int | str | None
-    display_value: str
+RETENTION_THRESHOLDS = {
+    "6 months": 182,
+    "1 year": 365,
+    "2 years": 730,
+    "3 years": 1095,
+    "5 years": 1826,
+    "10 years": 3652,
+}
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Builds a protocol-by-protocol analytic flow table with unique totals for "
-            "SjD eligibility, longitudinal availability, ESSDAI/ESSPRI coverage, follow-up, and events."
-        )
+        description="Describe longitudinal visit follow-up in 11D, 15D, and unique patients."
     )
+    parser.add_argument("--input-path", type=Path, default=None)
     parser.add_argument(
-        "--input-path",
-        type=Path,
-        default=None,
-        help="Visit-level analytic parquet/csv/xlsx input. Defaults to the richest available pipeline output.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=REPORTS_DIR / "protocol_flow",
-        help="Directory for protocol_flow_table.csv/.xlsx and protocol_flow_table_long.csv.",
+        "--output-dir", type=Path, default=REPORTS_DIR / "followup_summary"
     )
     return parser.parse_args()
 
 
 def _read_table(path: Path) -> pd.DataFrame:
-    if path.suffix.lower() == ".parquet":
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
         return pd.read_parquet(path)
-    if path.suffix.lower() == ".csv":
+    if suffix == ".csv":
         return pd.read_csv(path)
-    if path.suffix.lower() in {".xls", ".xlsx"}:
+    if suffix in {".xls", ".xlsx"}:
         return pd.read_excel(path)
-    raise ValueError(f"Unsupported input extension for {path}")
-
-
-def _type_placeholder_columns(df: pd.DataFrame) -> list[str]:
-    clinical_columns = [
-        col
-        for col in [*ESSDAI_COLUMNS, *ESSPRI_COLUMNS, *SJD_CLASSIFICATION_COLUMNS]
-        if col in df.columns
-    ]
-    clinical_columns.extend(
-        col
-        for col in sorted(
-            set(_candidate_columns(df, ["acr"]))
-            | set(_candidate_columns(df, ["eular"]))
-            | set(_candidate_columns(df, ["aecg"]))
-            | set(_candidate_columns(df, ["classification", "criteria"]))
-        )
-        if col not in clinical_columns
-    )
-
-    placeholder_columns = []
-    for col in clinical_columns:
-        values = df[col].dropna().astype("string").str.strip().str.lower()
-        if values.empty:
-            continue
-        if set(values.unique()).issubset(TYPE_PLACEHOLDER_VALUES):
-            placeholder_columns.append(col)
-    return placeholder_columns
-
-
-def _validate_value_preserving_input(df: pd.DataFrame, path: Path) -> None:
-    placeholder_columns = _type_placeholder_columns(df)
-    if not placeholder_columns:
-        return
-
-    examples = ", ".join(placeholder_columns[:8])
-    suffix = "" if len(placeholder_columns) <= 8 else ", ..."
-    raise ValueError(
-        "Protocol flow table requires value-preserving clinical data, but "
-        f"{path} appears to contain codebook type placeholders in clinical columns "
-        f"({examples}{suffix}). Use "
-        "data_analytic/visits_long_collapsed_by_interval_codebook_corrected.parquet "
-        "or another value-preserving visit-level file instead of the type-recoded output."
-    )
+    raise ValueError(f"Unsupported input extension: {path}")
 
 
 def _choose_input_path(explicit_path: Path | None) -> Path:
-    if explicit_path:
+    if explicit_path is not None:
         if not explicit_path.exists():
             raise FileNotFoundError(f"Input not found: {explicit_path}")
         return explicit_path
-
-    for candidate in DEFAULT_INPUT_CANDIDATES:
-        if candidate.exists():
-            return candidate
-
-    candidates = "\n".join(f"- {path}" for path in DEFAULT_INPUT_CANDIDATES)
-    raise FileNotFoundError(f"No default visit-level input found. Checked:\n{candidates}")
+    for path in DEFAULT_INPUT_CANDIDATES:
+        if path.exists():
+            return path
+    checked = "\n".join(f"- {path}" for path in DEFAULT_INPUT_CANDIDATES)
+    raise FileNotFoundError(f"No default visit-level input found. Checked:\n{checked}")
 
 
-def _resolve_optional_column(df: pd.DataFrame, canonical_name: str) -> str | None:
-    try:
-        return resolve_canonical_column(df, canonical_name)
-    except KeyError:
-        return None
-
-
-def _first_present(columns: Iterable[str], candidates: Iterable[str]) -> str | None:
-    present = set(columns)
-    for candidate in candidates:
-        if candidate in present:
-            return candidate
+def _resolve_optional_column(df: pd.DataFrame, names: Iterable[str]) -> str | None:
+    for name in names:
+        try:
+            return resolve_canonical_column(df, name)
+        except KeyError:
+            continue
     return None
-
-
-def _candidate_columns(df: pd.DataFrame, tokens: Iterable[str]) -> list[str]:
-    token_list = [token.lower() for token in tokens]
-    return [
-        str(col)
-        for col in df.columns
-        if all(token in str(col).lower() for token in token_list)
-    ]
 
 
 def _normalize_protocol(series: pd.Series) -> pd.Series:
@@ -172,511 +84,478 @@ def _normalize_protocol(series: pd.Series) -> pd.Series:
 
 
 def _protocol_mask(df: pd.DataFrame, protocol_col: str, protocol: str) -> pd.Series:
-    protocol_series = _normalize_protocol(df[protocol_col]).fillna("")
-    return protocol_series.str.split(r"\s*\|\s*", regex=True).apply(lambda parts: protocol in set(parts))
-
-
-def _protocol_patient_sets(df: pd.DataFrame, patient_col: str, protocol_col: str) -> dict[str, set]:
-    return {
-        protocol: set(df.loc[_protocol_mask(df, protocol_col, protocol), patient_col].dropna().unique())
-        for protocol in PROTOCOLS
-    }
-
-
-def _coerce_truthy(series: pd.Series) -> pd.Series:
-    normalized = series.astype("string").str.strip().str.lower()
-    truthy_strings = {
-        "1",
-        "1.0",
-        "true",
-        "yes",
-        "y",
-        "si",
-        "sí",
-        "positive",
-        "pos",
-        "eligible",
-        "met",
-        "meets",
-    }
-    numeric = pd.to_numeric(series, errors="coerce")
-    return normalized.isin(truthy_strings) | (numeric > 0)
-
-
-def _eligible_patient_set(df: pd.DataFrame, patient_col: str) -> set:
-    eligible_mask = pd.Series(False, index=df.index)
-
-    sjd_class_col = _first_present(df.columns, SJD_CLASSIFICATION_COLUMNS)
-    if sjd_class_col:
-        numeric_class = pd.to_numeric(df[sjd_class_col], errors="coerce")
-        eligible_mask = eligible_mask | numeric_class.isin(SJD_CLASSIFICATION_ELIGIBLE_VALUES)
-
-    criteria_cols = sorted(
-        set(_candidate_columns(df, ["acr"]))
-        | set(_candidate_columns(df, ["eular"]))
-        | set(_candidate_columns(df, ["aecg"]))
-        | set(_candidate_columns(df, ["classification", "criteria"]))
+    values = _normalize_protocol(df[protocol_col]).fillna("")
+    return values.str.split(r"\s*\|\s*", regex=True).apply(
+        lambda parts: protocol in set(parts)
     )
-    for col in criteria_cols:
-        eligible_mask = eligible_mask | _coerce_truthy(df[col])
-
-    if not eligible_mask.any():
-        return set(df[patient_col].dropna().unique())
-    return set(df.loc[eligible_mask, patient_col].dropna().unique())
 
 
-def _metric_n(n: int | float | None) -> MetricResult:
-    if n is None or pd.isna(n):
-        return MetricResult(None, "NA")
-    return MetricResult(int(n), f"{int(n):,}")
-
-
-def _metric_n_pct(n: int, denominator: int) -> MetricResult:
-    pct = np.nan if denominator == 0 else 100 * n / denominator
-    display = f"{n:,} (NA)" if pd.isna(pct) else f"{n:,} ({pct:.1f}%)"
-    return MetricResult(n, display)
-
-
-def _format_median_iqr(values: pd.Series, decimals: int) -> MetricResult:
-    clean = pd.to_numeric(values, errors="coerce").dropna()
-    if clean.empty:
-        return MetricResult(np.nan, "NA")
-    q1 = clean.quantile(0.25)
-    median = clean.median()
-    q3 = clean.quantile(0.75)
-    fmt = f"{{:.{decimals}f}}"
-    return MetricResult(float(median), f"{fmt.format(median)} ({fmt.format(q1)}–{fmt.format(q3)})")
-
-
-def _patient_visit_stats(
-    df: pd.DataFrame,
-    patient_col: str,
-    visit_date_col: str | None,
-    patient_set: set,
-) -> tuple[pd.Series, pd.Series]:
-    subset = df[df[patient_col].isin(patient_set)].copy()
-    visit_counts = subset.groupby(patient_col).size()
-    if not visit_date_col:
-        return pd.Series(dtype=float), visit_counts
-
-    subset[visit_date_col] = pd.to_datetime(subset[visit_date_col], errors="coerce")
-    spans = subset.groupby(patient_col)[visit_date_col].agg(["min", "max"])
-    followup_years = (spans["max"] - spans["min"]).dt.total_seconds() / SECONDS_PER_YEAR
-    return followup_years.dropna(), visit_counts
-
-
-def _patients_with_min_nonmissing_visits(
-    df: pd.DataFrame,
-    patient_col: str,
-    columns: list[str],
-    min_visits: int,
-    patient_set: set,
-) -> set:
-    present = [col for col in columns if col in df.columns]
-    if not present:
-        return set()
-
-    subset = df[df[patient_col].isin(patient_set)].copy()
-    if subset.empty:
-        return set()
-
-    per_measure_sets = []
-    for col in present:
-        counts = subset.loc[subset[col].notna()].groupby(patient_col).size()
-        per_measure_sets.append(set(counts[counts >= min_visits].index))
-    return set().union(*per_measure_sets)
-
-
-def _index_low_and_later_event(
-    df: pd.DataFrame,
-    patient_col: str,
-    visit_date_col: str | None,
-    essdai_col: str | None,
-    patient_set: set,
-) -> tuple[set, set]:
-    if not essdai_col:
-        return set(), set()
-
-    subset = df[df[patient_col].isin(patient_set)].copy()
-    subset["_essdai_numeric"] = pd.to_numeric(subset[essdai_col], errors="coerce")
-    subset = subset[subset["_essdai_numeric"].notna()]
-    if subset.empty:
-        return set(), set()
-
-    sort_cols = [patient_col]
-    if visit_date_col:
-        subset[visit_date_col] = pd.to_datetime(subset[visit_date_col], errors="coerce")
-        sort_cols.append(visit_date_col)
-    subset = subset.sort_values(sort_cols, na_position="last")
-
-    index_rows = subset.groupby(patient_col, as_index=False).first()
-    low_index = set(index_rows.loc[index_rows["_essdai_numeric"] < 5, patient_col].dropna().unique())
-    later_event = set()
-    for patient, patient_rows in subset[subset[patient_col].isin(low_index)].groupby(patient_col):
-        if len(patient_rows) <= 1:
-            continue
-        later_rows = patient_rows.iloc[1:]
-        if (later_rows["_essdai_numeric"] >= 5).any():
-            later_event.add(patient)
-    return low_index, later_event
-
-
-def _format_detail_value(series: pd.Series, patient: object) -> float | int | None:
-    if patient not in series.index:
-        return None
-    value = series.loc[patient]
+def _clean_visit_date(value: object) -> tuple[pd.Timestamp | pd.NaT, bool, str]:
+    """Return the earliest valid component of a possibly concatenated visit date."""
     if pd.isna(value):
-        return None
-    if isinstance(value, (np.integer, int)):
-        return int(value)
-    if isinstance(value, (np.floating, float)):
-        return float(value)
-    return value
+        return pd.NaT, False, "missing_date"
+    text = str(value).strip()
+    had_multiple = " | " in text
+    parts = [part.strip() for part in text.split(" | ")] if had_multiple else [text]
+    parsed = [pd.to_datetime(part, errors="coerce") for part in parts]
+    valid = [date for date in parsed if not pd.isna(date)]
+    if not valid:
+        return pd.NaT, had_multiple, "unparseable_date"
+    reason = "multiple_values_earliest_used" if had_multiple else ""
+    if had_multiple and len(valid) < len(parts):
+        reason += ";invalid_component_discarded"
+    return min(valid), had_multiple, reason
 
 
-def _build_calculation_tables(
-    all_patients: set,
-    protocol_sets: dict[str, set],
-    eligible_total: set,
-    eligible_by_protocol: dict[str, set],
-    followup_by_protocol: dict[str, set],
-    essdai_by_protocol: dict[str, set],
-    esspri_by_protocol: dict[str, set],
-    low_index_by_protocol: dict[str, set],
-    event_by_protocol: dict[str, set],
-    followup_years_by_protocol: dict[str, pd.Series],
-    visit_counts_by_protocol: dict[str, pd.Series],
-    total_followup: set,
-    total_essdai: set,
-    total_esspri: set,
-    total_low_index: set,
-    total_event: set,
-    total_followup_years: pd.Series,
-    total_visit_counts: pd.Series,
-) -> dict[str, pd.DataFrame]:
-    """Build auditable patient-level tables used to calculate the summary metrics."""
-    patient_rows = []
-    for patient in sorted(all_patients, key=lambda value: str(value)):
-        row = {
-            "patient_record_number": patient,
-            "in_protocol_11d": patient in protocol_sets[PROTOCOL_A],
-            "in_protocol_15d": patient in protocol_sets[PROTOCOL_B],
-            "sjd_eligible_total_unique": patient in eligible_total,
-            "has_baseline_plus_followup_total_unique": patient in total_followup,
-            "has_2plus_essdai_total_unique": patient in total_essdai,
-            "has_2plus_esspri_total_unique": patient in total_esspri,
-            "essdai_lt5_at_index_total_unique": patient in total_low_index,
-            "later_essdai_ge5_event_total_unique": patient in total_event,
-            "total_unique_visit_count": _format_detail_value(total_visit_counts, patient),
-            "total_unique_followup_years": _format_detail_value(total_followup_years, patient),
-        }
-        for protocol in PROTOCOLS:
-            suffix = protocol.lower()
-            row.update(
-                {
-                    f"sjd_eligible_{suffix}": patient in eligible_by_protocol[protocol],
-                    f"has_baseline_plus_followup_{suffix}": patient in followup_by_protocol[protocol],
-                    f"has_2plus_essdai_{suffix}": patient in essdai_by_protocol[protocol],
-                    f"has_2plus_esspri_{suffix}": patient in esspri_by_protocol[protocol],
-                    f"essdai_lt5_at_index_{suffix}": patient in low_index_by_protocol[protocol],
-                    f"later_essdai_ge5_event_{suffix}": patient in event_by_protocol[protocol],
-                    f"visit_count_{suffix}": _format_detail_value(visit_counts_by_protocol[protocol], patient),
-                    f"followup_years_{suffix}": _format_detail_value(followup_years_by_protocol[protocol], patient),
-                }
-            )
-        patient_rows.append(row)
+def _prepare_visits(
+    df: pd.DataFrame, patient_col: str, protocol_col: str, date_col: str
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    visits = df.copy()
+    visits["_source_row"] = np.arange(len(visits))
+    visits["visit_date_original"] = visits[date_col]
+    cleaned = visits[date_col].apply(_clean_visit_date)
+    visits["visit_date"] = cleaned.str[0]
+    visits["visit_date_had_multiple_values"] = cleaned.str[1]
+    visits["visit_date_issue"] = cleaned.str[2]
+    visits["patient_record_number"] = visits[patient_col]
+    visits["protocol_membership"] = _normalize_protocol(visits[protocol_col])
 
-    patient_flags = pd.DataFrame(patient_rows)
-    protocol_membership = patient_flags[
+    special = visits.loc[
+        visits["visit_date_had_multiple_values"] | visits["visit_date_issue"].ne(""),
         [
             "patient_record_number",
-            "in_protocol_11d",
-            "in_protocol_15d",
-            "sjd_eligible_11d",
-            "sjd_eligible_15d",
-            "sjd_eligible_total_unique",
-        ]
-    ].copy()
-    followup_stats = patient_flags[
+            "visit_date_original",
+            "visit_date",
+            "visit_date_had_multiple_values",
+            "visit_date_issue",
+        ],
+    ].rename(columns={"visit_date_issue": "reason"})
+    return visits, special
+
+
+def _deduplicate_visits(visits: pd.DataFrame, include_protocol: bool) -> pd.DataFrame:
+    """Remove only clear duplicates sharing patient, date, and available visit label."""
+    interval_col = _resolve_optional_column(visits, ("interval_name", "interval_code"))
+    valid = visits[visits["visit_date"].notna()].copy()
+    missing = visits[visits["visit_date"].isna()].copy()
+    keys = ["patient_record_number", "visit_date"]
+    if include_protocol:
+        keys.append("protocol_membership")
+    if interval_col:
+        keys.append(interval_col)
+    valid = valid.drop_duplicates(keys, keep="first")
+    return pd.concat([valid, missing], ignore_index=True)
+
+
+def _build_intervisit_gaps(visits: pd.DataFrame) -> pd.DataFrame:
+    dated = visits[visits["visit_date"].notna()].copy()
+    dated = dated.sort_values(["patient_record_number", "visit_date", "_source_row"])
+    dated["previous_visit_date"] = dated.groupby("patient_record_number")[
+        "visit_date"
+    ].shift()
+    gaps = dated[dated["previous_visit_date"].notna()].copy()
+    gaps["gap_days"] = (gaps["visit_date"] - gaps["previous_visit_date"]).dt.days
+    gaps["gap_order"] = gaps.groupby("patient_record_number").cumcount() + 1
+    gaps["gap_zero_days"] = gaps["gap_days"].eq(0)
+    gaps["gap_negative"] = gaps["gap_days"].lt(0)
+    return gaps[
         [
             "patient_record_number",
-            "visit_count_11d",
-            "followup_years_11d",
-            "visit_count_15d",
-            "followup_years_15d",
-            "total_unique_visit_count",
-            "total_unique_followup_years",
+            "protocol_membership",
+            "previous_visit_date",
+            "visit_date",
+            "gap_days",
+            "gap_order",
+            "gap_zero_days",
+            "gap_negative",
         ]
-    ].copy()
-    return {
-        "calculation_patient_flags": patient_flags,
-        "calculation_protocol_membership": protocol_membership,
-        "calculation_followup_stats": followup_stats,
-    }
-
-
-def _build_metric_rows(
-    df: pd.DataFrame,
-    raw11: pd.DataFrame,
-    raw15: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
-    patient_col = resolve_canonical_column(df, "patient_record_number")
-    protocol_col = resolve_canonical_column(df, "source_protocol")
-    visit_date_col = _resolve_optional_column(df, "visit_datetime") or _resolve_optional_column(df, "visit_date")
-    essdai_col = _first_present(df.columns, ESSDAI_COLUMNS)
-    esspri_cols = [col for col in ESSPRI_COLUMNS if col in df.columns]
-
-    protocol_sets = _protocol_patient_sets(df, patient_col, protocol_col)
-    total_patient_set = set(df[patient_col].dropna().unique())
-    eligible_total = _eligible_patient_set(df, patient_col)
-    eligible_by_protocol = {
-        protocol: patients & eligible_total
-        for protocol, patients in protocol_sets.items()
-    }
-
-    followup_by_protocol = {}
-    essdai_by_protocol = {}
-    esspri_by_protocol = {}
-    low_index_by_protocol = {}
-    event_by_protocol = {}
-    followup_years_by_protocol = {}
-    visit_counts_by_protocol = {}
-
-    for protocol in PROTOCOLS:
-        protocol_df = df[_protocol_mask(df, protocol_col, protocol)].copy()
-        eligible_patients = eligible_by_protocol[protocol]
-        followup_years, visit_counts = _patient_visit_stats(
-            protocol_df,
-            patient_col,
-            visit_date_col,
-            eligible_patients,
-        )
-        followup_patients = set(visit_counts[visit_counts >= 2].index)
-        essdai_patients = _patients_with_min_nonmissing_visits(
-            protocol_df,
-            patient_col,
-            [col for col in ESSDAI_COLUMNS if col in protocol_df.columns],
-            2,
-            eligible_patients,
-        )
-        esspri_patients = _patients_with_min_nonmissing_visits(
-            protocol_df,
-            patient_col,
-            esspri_cols,
-            2,
-            eligible_patients,
-        )
-        low_index, later_event = _index_low_and_later_event(
-            protocol_df,
-            patient_col,
-            visit_date_col,
-            essdai_col if essdai_col in protocol_df.columns else None,
-            eligible_patients,
-        )
-
-        followup_by_protocol[protocol] = followup_patients
-        essdai_by_protocol[protocol] = essdai_patients
-        esspri_by_protocol[protocol] = esspri_patients
-        low_index_by_protocol[protocol] = low_index
-        event_by_protocol[protocol] = later_event
-        followup_years_by_protocol[protocol] = followup_years
-        visit_counts_by_protocol[protocol] = visit_counts
-
-    total_followup_years, total_visit_counts = _patient_visit_stats(
-        df,
-        patient_col,
-        visit_date_col,
-        eligible_total,
-    )
-    total_followup = set(total_visit_counts[total_visit_counts >= 2].index)
-    total_essdai = _patients_with_min_nonmissing_visits(
-        df,
-        patient_col,
-        [col for col in ESSDAI_COLUMNS if col in df.columns],
-        2,
-        eligible_total,
-    )
-    total_esspri = _patients_with_min_nonmissing_visits(df, patient_col, esspri_cols, 2, eligible_total)
-    total_low_index, total_event = _index_low_and_later_event(
-        df,
-        patient_col,
-        visit_date_col,
-        essdai_col,
-        eligible_total,
-    )
-
-    metrics = [
-        (
-            "Raw records",
-            _metric_n(len(raw11)),
-            _metric_n(len(raw15)),
-            _metric_n(len(raw11) + len(raw15)),
-        ),
-        (
-            "Unique patients after linkage/deduplication",
-            _metric_n(len(protocol_sets[PROTOCOL_A])),
-            _metric_n(len(protocol_sets[PROTOCOL_B])),
-            _metric_n(len(total_patient_set)),
-        ),
-        (
-            "SjD eligible according to ACR/EULAR and/or AECG",
-            _metric_n(len(eligible_by_protocol[PROTOCOL_A])),
-            _metric_n(len(eligible_by_protocol[PROTOCOL_B])),
-            _metric_n(len(eligible_total)),
-        ),
-        (
-            "With baseline + ≥1 follow-up",
-            _metric_n(len(followup_by_protocol[PROTOCOL_A])),
-            _metric_n(len(followup_by_protocol[PROTOCOL_B])),
-            _metric_n(len(total_followup)),
-        ),
-        (
-            "With ≥2 ESSDAI",
-            _metric_n_pct(len(essdai_by_protocol[PROTOCOL_A]), len(eligible_by_protocol[PROTOCOL_A])),
-            _metric_n_pct(len(essdai_by_protocol[PROTOCOL_B]), len(eligible_by_protocol[PROTOCOL_B])),
-            _metric_n_pct(len(total_essdai), len(eligible_total)),
-        ),
-        (
-            "With ≥2 comparable ESSPRI/PRO",
-            _metric_n_pct(len(esspri_by_protocol[PROTOCOL_A]), len(eligible_by_protocol[PROTOCOL_A])),
-            _metric_n_pct(len(esspri_by_protocol[PROTOCOL_B]), len(eligible_by_protocol[PROTOCOL_B])),
-            _metric_n_pct(len(total_esspri), len(eligible_total)),
-        ),
-        (
-            "Follow-up, median (IQR), years",
-            _format_median_iqr(followup_years_by_protocol[PROTOCOL_A], 1),
-            _format_median_iqr(followup_years_by_protocol[PROTOCOL_B], 1),
-            _format_median_iqr(total_followup_years, 1),
-        ),
-        (
-            "Visits per patient, median (IQR)",
-            _format_median_iqr(visit_counts_by_protocol[PROTOCOL_A], 0),
-            _format_median_iqr(visit_counts_by_protocol[PROTOCOL_B], 0),
-            _format_median_iqr(total_visit_counts, 0),
-        ),
-        (
-            "ESSDAI <5 at index",
-            _metric_n(len(low_index_by_protocol[PROTOCOL_A])),
-            _metric_n(len(low_index_by_protocol[PROTOCOL_B])),
-            _metric_n(len(total_low_index)),
-        ),
-        (
-            "Subsequent ESSDAI ≥5 event",
-            _metric_n(len(event_by_protocol[PROTOCOL_A])),
-            _metric_n(len(event_by_protocol[PROTOCOL_B])),
-            _metric_n(len(total_event)),
-        ),
     ]
 
+
+def _build_patient_followup_metrics(
+    visits: pd.DataFrame, protocol_sets: dict[str, set]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    deduped = _deduplicate_visits(visits, include_protocol=False)
+    dated = deduped[deduped["visit_date"].notna()]
+    dates = dated.groupby("patient_record_number")["visit_date"].agg(["min", "max"])
+    counts = deduped.groupby("patient_record_number").size().rename("n_visits")
+    metrics = counts.to_frame().join(
+        dates.rename(columns={"min": "first_visit_date", "max": "last_visit_date"})
+    )
+    metrics["followup_days"] = (
+        metrics["last_visit_date"] - metrics["first_visit_date"]
+    ).dt.days
+    metrics["followup_years"] = metrics["followup_days"] / 365.25
+
+    gaps = _build_intervisit_gaps(deduped)
+    valid_gaps = gaps.loc[~gaps["gap_negative"]]
+    gap_stats = valid_gaps.groupby("patient_record_number")["gap_days"].agg(
+        median_gap_days="median", max_gap_days="max"
+    )
+    metrics = metrics.join(gap_stats)
+    metrics["visits_per_year"] = np.where(
+        metrics["followup_years"] > 0,
+        (metrics["n_visits"] - 1) / metrics["followup_years"],
+        np.nan,
+    )
+    metrics["in_protocol_11d"] = metrics.index.isin(protocol_sets["11D"])
+    metrics["in_protocol_15d"] = metrics.index.isin(protocol_sets["15D"])
+    for label, days in RETENTION_THRESHOLDS.items():
+        suffix = {
+            "6 months": "6mo",
+            "1 year": "1yr",
+            "2 years": "2yr",
+            "3 years": "3yr",
+            "5 years": "5yr",
+            "10 years": "10yr",
+        }[label]
+        metrics[f"has_followup_{suffix}"] = metrics["followup_days"].ge(days)
+    for days in (180, 365, 730):
+        patients = set(
+            valid_gaps.loc[valid_gaps["gap_days"] > days, "patient_record_number"]
+        )
+        metrics[f"has_gap_over_{days}d"] = metrics.index.isin(patients)
+    metrics.index.name = "patient_record_number"
+    return metrics.reset_index(), gaps
+
+
+def _cohort_metrics(
+    visits: pd.DataFrame, patients: pd.DataFrame, gaps: pd.DataFrame
+) -> dict[str, object]:
+    denominator = len(patients)
+
+    def n_pct(mask: pd.Series) -> str:
+        n = int(mask.fillna(False).sum())
+        return (
+            f"{n:,} (NA)"
+            if denominator == 0
+            else f"{n:,} ({100 * n / denominator:.1f}%)"
+        )
+
+    def median_iqr(series: pd.Series, decimals: int = 1) -> str:
+        clean = pd.to_numeric(series, errors="coerce").dropna()
+        if clean.empty:
+            return "NA"
+        q1, median, q3 = clean.quantile([0.25, 0.5, 0.75])
+        return f"{median:.{decimals}f} ({q1:.{decimals}f}–{q3:.{decimals}f})"
+
+    followup = patients["followup_years"]
+    valid_gaps = gaps.loc[gaps["gap_days"].notna() & ~gaps["gap_negative"], "gap_days"]
+    result: dict[str, object] = {
+        "Raw records": len(visits),
+        "Unique patients": denominator,
+        "Patients with exactly 1 visit": n_pct(patients["n_visits"].eq(1)),
+        "Patients with >=2 visits": n_pct(patients["n_visits"].ge(2)),
+        "Patients with >=3 visits": n_pct(patients["n_visits"].ge(3)),
+        "Patients with >=5 visits": n_pct(patients["n_visits"].ge(5)),
+        "Patients with >=10 visits": n_pct(patients["n_visits"].ge(10)),
+        "Follow-up, median (IQR), years": median_iqr(followup),
+        "Visits per patient, median (IQR)": median_iqr(patients["n_visits"], 0),
+        "Visits per patient, mean": (
+            round(patients["n_visits"].mean(), 1) if denominator else "NA"
+        ),
+        "Maximum visits per patient": (
+            int(patients["n_visits"].max()) if denominator else "NA"
+        ),
+        "Median inter-visit gap, days": (
+            round(valid_gaps.median(), 1) if not valid_gaps.empty else "NA"
+        ),
+        "IQR inter-visit gap, days": (
+            f"{valid_gaps.quantile(0.25):.1f}–{valid_gaps.quantile(0.75):.1f}"
+            if not valid_gaps.empty
+            else "NA"
+        ),
+        "P90 inter-visit gap, days": (
+            round(valid_gaps.quantile(0.90), 1) if not valid_gaps.empty else "NA"
+        ),
+        "Visits per follow-up year, median (IQR)": median_iqr(
+            patients["visits_per_year"]
+        ),
+    }
+    for percentile in (0.10, 0.25, 0.50, 0.75, 0.90):
+        result[f"Follow-up P{int(percentile * 100)}, years"] = (
+            round(followup.quantile(percentile), 1) if followup.notna().any() else "NA"
+        )
+    result["Maximum follow-up, years"] = (
+        round(followup.max(), 1) if followup.notna().any() else "NA"
+    )
+    suffixes = ("6mo", "1yr", "2yr", "3yr", "5yr", "10yr")
+    for (label, _), suffix in zip(RETENTION_THRESHOLDS.items(), suffixes):
+        result[f"Follow-up >={label}"] = n_pct(patients[f"has_followup_{suffix}"])
+    for days in (180, 365, 730):
+        result[f"Patients with at least one gap >{days} days"] = n_pct(
+            patients[f"has_gap_over_{days}d"]
+        )
+    return result
+
+
+def _build_summary_table(
+    cohort_data: dict[str, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    columns = {name: _cohort_metrics(*data) for name, data in cohort_data.items()}
+    indicators = list(columns["Protocol 11D"])
     wide = pd.DataFrame(
-        [
-            {
-                "Indicator": label,
-                "Protocol A": a.display_value,
-                "Protocol B": b.display_value,
-                "Unique total": total.display_value,
-            }
-            for label, a, b, total in metrics
-        ]
+        {
+            "Indicator": indicators,
+            **{
+                name: [values[i] for i in indicators]
+                for name, values in columns.items()
+            },
+        }
     )
-    long = pd.DataFrame(
-        [
-            {
-                "indicator": label,
-                "column": column,
-                "raw_value": metric.raw_value,
-                "formatted_value": metric.display_value,
-            }
-            for label, a, b, total in metrics
-            for column, metric in [
-                ("Protocol A", a),
-                ("Protocol B", b),
-                ("Unique total", total),
-            ]
-        ]
-    )
-    calculation_tables = _build_calculation_tables(
-        total_patient_set,
-        protocol_sets,
-        eligible_total,
-        eligible_by_protocol,
-        followup_by_protocol,
-        essdai_by_protocol,
-        esspri_by_protocol,
-        low_index_by_protocol,
-        event_by_protocol,
-        followup_years_by_protocol,
-        visit_counts_by_protocol,
-        total_followup,
-        total_essdai,
-        total_esspri,
-        total_low_index,
-        total_event,
-        total_followup_years,
-        total_visit_counts,
-    )
-    return wide, long, calculation_tables
+    long = wide.melt(id_vars="Indicator", var_name="cohort", value_name="value")
+    return wide, long
 
 
-def _load_raw_protocol(path: Path) -> pd.DataFrame:
-    if path.exists():
-        return pd.read_parquet(path)
-    return pd.DataFrame()
+def _build_retention_table(cohorts: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    rows = []
+    for label, days in RETENTION_THRESHOLDS.items():
+        row: dict[str, object] = {"followup_threshold": label, "threshold_days": days}
+        for output_name, patients in cohorts.items():
+            n = int(patients["followup_days"].ge(days).sum())
+            row[f"{output_name}_n"] = n
+            row[f"{output_name}_pct"] = (
+                100 * n / len(patients) if len(patients) else np.nan
+            )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _save_empty_plot(path: Path, title: str) -> None:
+    _, ax = plt.subplots(figsize=(8, 5))
+    ax.set_title(title)
+    ax.text(0.5, 0.5, "No data available", ha="center", va="center")
+    ax.axis("off")
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def _plot_followup_distribution(cohorts: dict[str, pd.DataFrame], path: Path) -> None:
+    if not any(df["followup_years"].notna().any() for df in cohorts.values()):
+        return _save_empty_plot(path, "Follow-up distribution")
+    _, ax = plt.subplots(figsize=(8, 5))
+    for label, df in cohorts.items():
+        values = df["followup_years"].dropna()
+        if not values.empty:
+            ax.hist(values, bins=20, alpha=0.5, label=label)
+    ax.set(
+        xlabel="Follow-up (years)", ylabel="Patients", title="Follow-up distribution"
+    )
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def _plot_retention(cohorts: dict[str, pd.DataFrame], path: Path) -> None:
+    if not any(df["followup_days"].notna().any() for df in cohorts.values()):
+        return _save_empty_plot(path, "Descriptive follow-up retention curve")
+    _, ax = plt.subplots(figsize=(8, 5))
+    observed = pd.concat(
+        [df["followup_years"].dropna() for df in cohorts.values()], ignore_index=True
+    )
+    max_years = observed.max() if not observed.empty else 0
+    grid = np.linspace(0, max(1, max_years), 100)
+    for label, df in cohorts.items():
+        values = df["followup_years"].dropna()
+        if not values.empty:
+            ax.plot(
+                grid,
+                [100 * values.ge(year).sum() / len(df) for year in grid],
+                label=label,
+            )
+    ax.set(
+        xlabel="Years from first visit",
+        ylabel="Patients with follow-up >= time (%)",
+        title="Descriptive follow-up retention curve (not Kaplan-Meier)",
+    )
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def _plot_visits_per_patient(cohorts: dict[str, pd.DataFrame], path: Path) -> None:
+    labels = ["1 visit", "2 visits", "3–4 visits", "5–9 visits", ">=10 visits"]
+    bins = [0, 1, 2, 4, 9, np.inf]
+    x = np.arange(len(labels))
+    width = 0.35
+    _, ax = plt.subplots(figsize=(9, 5))
+    for offset, (name, df) in zip((-width / 2, width / 2), cohorts.items()):
+        groups = (
+            pd.cut(df["n_visits"], bins=bins, labels=labels)
+            .value_counts()
+            .reindex(labels, fill_value=0)
+        )
+        ax.bar(x + offset, groups, width, label=name)
+    ax.set_xticks(x, labels)
+    ax.set(ylabel="Patients", title="Visits per patient")
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def _plot_followup_vs_visits(cohorts: dict[str, pd.DataFrame], path: Path) -> None:
+    _, ax = plt.subplots(figsize=(8, 5))
+    plotted = False
+    for label, df in cohorts.items():
+        clean = df.dropna(subset=["followup_years", "n_visits"])
+        if not clean.empty:
+            ax.scatter(
+                clean["followup_years"], clean["n_visits"], alpha=0.55, label=label
+            )
+            plotted = True
+    if not plotted:
+        plt.close()
+        return _save_empty_plot(path, "Follow-up vs visits")
+    ax.set(
+        xlabel="Follow-up (years)",
+        ylabel="Number of visits",
+        title="Follow-up vs visits",
+    )
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def _plot_swimmer(visits: pd.DataFrame, metrics: pd.DataFrame, path: Path) -> None:
+    dated = visits[visits["visit_date"].notna()].copy()
+    if dated.empty:
+        return _save_empty_plot(path, "Longitudinal visit follow-up")
+    order = metrics.sort_values(["n_visits", "followup_days"], ascending=False)[
+        "patient_record_number"
+    ].tolist()
+    positions = {patient: index for index, patient in enumerate(order)}
+    dated = dated[dated["patient_record_number"].isin(positions)].merge(
+        metrics[["patient_record_number", "first_visit_date"]],
+        on="patient_record_number",
+    )
+    dated["days_from_first"] = (dated["visit_date"] - dated["first_visit_date"]).dt.days
+    height = min(18, max(6, len(order) * 0.08))
+    _, ax = plt.subplots(figsize=(10, height))
+    for patient, rows in dated.groupby("patient_record_number"):
+        y = positions[patient]
+        days = rows["days_from_first"]
+        ax.plot([days.min(), days.max()], [y, y], color="0.7", linewidth=0.8)
+        ax.scatter(days, np.full(len(days), y), s=8)
+    ax.set(
+        xlabel="Days from first visit",
+        ylabel="Patients (ordered)",
+        title="Longitudinal visit follow-up",
+    )
+    ax.set_yticks([])
+    ax.invert_yaxis()
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
 
 
 def main() -> None:
     args = _parse_args()
     logger = setup_logger("24_protocol_flow_table")
-
     print_script_overview(
         "24_protocol_flow_table.py",
-        "Builds the requested protocol A/B/unique-total SjD analytic flow table.",
+        "Summarizes longitudinal visit follow-up by protocol.",
     )
 
-    print_step(1, "Load visit-level analytic table and raw protocol tables")
+    print_step(1, "Load and prepare visit-level data")
     input_path = _choose_input_path(args.input_path)
-    visits = _read_table(input_path)
-    _validate_value_preserving_input(visits, input_path)
-    raw11 = _load_raw_protocol(INTERMEDIATE_DIR / "11d_raw_enriched.parquet")
-    raw15 = _load_raw_protocol(INTERMEDIATE_DIR / "15d_raw_enriched.parquet")
+    source = _read_table(input_path)
+    if source.empty:
+        raise ValueError(f"Input dataset is empty: {input_path}")
+    patient_col = resolve_canonical_column(source, "patient_record_number")
+    protocol_col = resolve_canonical_column(source, "source_protocol")
+    # Prefer the original visit-date field so concatenated values remain visible
+    # to the explicit component-by-component cleaning below.
+    date_col = _resolve_optional_column(source, ("visit_date", "visit_datetime"))
+    if date_col is None:
+        raise KeyError("Could not identify a visit_datetime or visit_date column")
+    visits, special_dates = _prepare_visits(source, patient_col, protocol_col, date_col)
+    protocol_sets = {
+        protocol: set(
+            visits.loc[
+                _protocol_mask(visits, "protocol_membership", protocol),
+                "patient_record_number",
+            ].dropna()
+        )
+        for protocol in PROTOCOLS
+    }
 
-    print_step(2, "Compute protocol flow metrics")
-    wide, long, calculation_tables = _build_metric_rows(visits, raw11, raw15)
-
-    print_step(3, "Save protocol flow summary and calculation tables")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    wide_csv = args.output_dir / "protocol_flow_table.csv"
-    long_csv = args.output_dir / "protocol_flow_table_long.csv"
-    xlsx_path = args.output_dir / "protocol_flow_table.xlsx"
-    wide.to_csv(wide_csv, index=False)
-    long.to_csv(long_csv, index=False)
-    calculation_paths = {}
-    for table_name, table in calculation_tables.items():
-        table_path = args.output_dir / f"{table_name}.csv"
-        table.to_csv(table_path, index=False)
-        calculation_paths[table_name] = table_path
-
-    with pd.ExcelWriter(xlsx_path) as writer:
-        wide.to_excel(writer, sheet_name="protocol_flow_table", index=False)
-        long.to_excel(writer, sheet_name="protocol_flow_long", index=False)
-        for table_name, table in calculation_tables.items():
-            table.to_excel(writer, sheet_name=table_name[:31], index=False)
-
-    logger.info("Saved protocol flow table: %s", wide_csv)
-    logger.info("Saved protocol flow long table: %s", long_csv)
-    for table_name, table_path in calculation_paths.items():
-        logger.info("Saved protocol flow calculation table %s: %s", table_name, table_path)
-    logger.info("Saved protocol flow workbook: %s", xlsx_path)
-    print_kv(
-        "Protocol flow outputs",
+    print_step(2, "Calculate patient follow-up, gaps, retention, and summaries")
+    patient_metrics, total_gaps = _build_patient_followup_metrics(visits, protocol_sets)
+    protocol_results = {}
+    protocol_patients = {}
+    for protocol in PROTOCOLS:
+        protocol_visits = visits[
+            _protocol_mask(visits, "protocol_membership", protocol)
+        ].copy()
+        protocol_metrics, protocol_gaps = _build_patient_followup_metrics(
+            protocol_visits, protocol_sets
+        )
+        protocol_patients[protocol] = protocol_metrics
+        protocol_results[f"Protocol {protocol}"] = (
+            protocol_visits,
+            protocol_metrics,
+            protocol_gaps,
+        )
+    protocol_results["Unique total"] = (visits, patient_metrics, total_gaps)
+    summary, summary_long = _build_summary_table(protocol_results)
+    retention = _build_retention_table(
         {
-            "input_path": input_path,
-            "wide_csv": wide_csv,
-            "long_csv": long_csv,
-            **calculation_paths,
-            "xlsx": xlsx_path,
-        },
+            "11D": protocol_patients["11D"],
+            "15D": protocol_patients["15D"],
+            "total": patient_metrics,
+        }
     )
+
+    print_step(3, "Save follow-up tables and figures")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    outputs = {
+        "summary": args.output_dir / "followup_summary.csv",
+        "summary_long": args.output_dir / "followup_summary_long.csv",
+        "patient_metrics": args.output_dir / "patient_followup_metrics.csv",
+        "retention": args.output_dir / "retention_by_time.csv",
+        "gaps": args.output_dir / "intervisit_gaps.csv",
+        "special_dates": args.output_dir / "visit_date_special_cases.csv",
+        "xlsx": args.output_dir / "followup_summary.xlsx",
+    }
+    for table, key in (
+        (summary, "summary"),
+        (summary_long, "summary_long"),
+        (patient_metrics, "patient_metrics"),
+        (retention, "retention"),
+        (total_gaps, "gaps"),
+        (special_dates, "special_dates"),
+    ):
+        table.to_csv(outputs[key], index=False)
+    with pd.ExcelWriter(outputs["xlsx"]) as writer:
+        summary.to_excel(writer, sheet_name="followup_summary", index=False)
+        summary_long.to_excel(writer, sheet_name="followup_summary_long", index=False)
+        patient_metrics.to_excel(writer, sheet_name="patient_metrics", index=False)
+        retention.to_excel(writer, sheet_name="retention", index=False)
+        total_gaps.to_excel(writer, sheet_name="intervisit_gaps", index=False)
+        special_dates.to_excel(writer, sheet_name="date_special_cases", index=False)
+
+    plot_cohorts = {"11D": protocol_patients["11D"], "15D": protocol_patients["15D"]}
+    _plot_followup_distribution(
+        plot_cohorts, args.output_dir / "followup_distribution.png"
+    )
+    _plot_retention(
+        {**plot_cohorts, "Unique total": patient_metrics},
+        args.output_dir / "retention_curve.png",
+    )
+    _plot_visits_per_patient(plot_cohorts, args.output_dir / "visits_per_patient.png")
+    _plot_followup_vs_visits(plot_cohorts, args.output_dir / "followup_vs_visits.png")
+    _plot_swimmer(
+        _deduplicate_visits(visits, False),
+        patient_metrics,
+        args.output_dir / "swimmer_followup.png",
+    )
+    logger.info("Saved follow-up outputs to %s", args.output_dir)
+    print_kv("Follow-up outputs", {"input_path": input_path, **outputs})
 
 
 if __name__ == "__main__":
