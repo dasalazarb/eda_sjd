@@ -108,6 +108,19 @@ def _identifier_output_columns(has_interval: bool) -> list[str]:
     return columns
 
 
+def _input_visit_key_columns(data: pd.DataFrame) -> list[str]:
+    """Return the columns that uniquely identify a visit in the input.
+
+    The analytical dataset can legitimately contain more than one interval on
+    the same calendar date.  When interval metadata is available, it is part of
+    the visit identity rather than evidence of a duplicate row.
+    """
+    columns = [PATIENT_COLUMN, VISIT_DATE_COLUMN]
+    if INTERVAL_COLUMN in data.columns:
+        columns.append(INTERVAL_COLUMN)
+    return columns
+
+
 def calculate_visit_prefix_completeness(
     data: pd.DataFrame, prefix_dictionary: dict[str, dict[str, object]]
 ) -> pd.DataFrame:
@@ -151,14 +164,12 @@ def create_wide_matrix(long_output: pd.DataFrame) -> pd.DataFrame:
     identifiers = _identifier_output_columns("interval_name" in long_output.columns)
     visits = long_output[identifiers].drop_duplicates()
     percentages = long_output.pivot(
-        index=["patient_record_number", "visit_date"],
+        index=identifiers,
         columns="prefix",
         values="completeness_pct",
     ).reset_index()
-    matrix = visits.merge(
-        percentages, on=["patient_record_number", "visit_date"], how="left"
-    )
-    return matrix.sort_values(["patient_record_number", "visit_date"], kind="stable")
+    matrix = visits.merge(percentages, on=identifiers, how="left")
+    return matrix.sort_values(identifiers, kind="stable")
 
 
 def create_prefix_summary(
@@ -246,15 +257,13 @@ def run_qc_checks(
         raise ValueError(
             "No clinical variables remain after excluding ids__ metadata columns."
         )
-    duplicates = data.duplicated([PATIENT_COLUMN, VISIT_DATE_COLUMN], keep=False)
+    visit_key = _input_visit_key_columns(data)
+    duplicates = data.duplicated(visit_key, keep=False)
     if duplicates.any():
-        examples = (
-            data.loc[duplicates, [PATIENT_COLUMN, VISIT_DATE_COLUMN]]
-            .head(5)
-            .to_dict("records")
-        )
+        examples = data.loc[duplicates, visit_key].head(5).to_dict("records")
         raise ValueError(
-            "Duplicate patient × visit rows found; rows will not be aggregated. "
+            "Duplicate visit rows found using patient, date, and interval when "
+            "available; rows will not be aggregated. "
             f"First duplicate keys: {examples}"
         )
     if prefix_dictionary is None or long_output is None:
@@ -279,7 +288,8 @@ def run_qc_checks(
         raise AssertionError(
             "Completed plus missing counts must equal input variable counts."
         )
-    keys = ["patient_record_number", "visit_date", "prefix"]
+    keys = _identifier_output_columns("interval_name" in long_output.columns)
+    keys.append("prefix")
     if long_output.duplicated(keys).any():
         raise AssertionError(
             "Duplicate patient × visit × prefix output rows were produced."
