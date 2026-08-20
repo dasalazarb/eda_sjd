@@ -1,8 +1,8 @@
 """Audit completeness by patient, visit, and clinical variable prefix.
 
 This is a read-only QC utility.  It does not impute values or modify its input
-dataset.  Codebook size, input-schema availability, and observed visit
-completeness are reported as separate concepts.
+dataset. Prefixes and expected variables are discovered exclusively from the
+analytical input schema; no external codebook is required.
 """
 
 from __future__ import annotations
@@ -15,12 +15,11 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
-from src.common import ANALYTIC_DIR, RAW_DIR, ROOT
+from src.common import ANALYTIC_DIR, ROOT
 
 PATIENT_COLUMN = "ids__patient_record_number"
 VISIT_DATE_COLUMN = "ids__visit_date"
 INTERVAL_COLUMN = "ids__interval_name"
-CODEBOOK_VARIABLE_COLUMN = "FORM_NAME__QUESTION_NAME"
 TEXT_MISSING_TOKENS = {"", "na", "n/a", "nan", "none", "unknown", "unk"}
 OUTPUT_STEM = "code_del_check_pcr_info"
 
@@ -45,26 +44,6 @@ def load_input(path: Path) -> pd.DataFrame:
     if path.suffix.lower() == ".csv":
         return pd.read_csv(path)
     raise ValueError(f"Unsupported analytical input format: {path.suffix}")
-
-
-def load_codebook(path: Path) -> pd.DataFrame:
-    """Load the consolidated Excel codebook.
-
-    Parameters
-    ----------
-    path : pathlib.Path
-        Excel codebook path.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Raw codebook rows, including repeated categorical answer rows.
-    """
-    if not path.exists():
-        raise FileNotFoundError(f"Codebook does not exist: {path}")
-    if path.suffix.lower() not in {".xlsx", ".xls", ".xlsm"}:
-        raise ValueError("The codebook must be an Excel workbook.")
-    return pd.read_excel(path)
 
 
 def is_missing(value: object) -> bool:
@@ -99,46 +78,25 @@ def get_prefix(variable: str) -> str:
     return variable.split("__", 1)[0]
 
 
-def prepare_codebook_variables(codebook: pd.DataFrame) -> list[str]:
-    """Return unique, nonblank canonical variable names from the codebook."""
-    if CODEBOOK_VARIABLE_COLUMN not in codebook.columns:
-        raise KeyError(
-            f"Codebook is missing required column {CODEBOOK_VARIABLE_COLUMN!r}."
-        )
-    values = codebook[CODEBOOK_VARIABLE_COLUMN].dropna().astype(str).str.strip()
-    values = values[(values != "") & values.str.contains("__", regex=False)]
-    return sorted(values.drop_duplicates().tolist())
-
-
 def build_prefix_dictionary(
-    input_columns: Sequence[object], codebook_variables: Sequence[str]
+    input_columns: Sequence[object],
 ) -> dict[str, dict[str, object]]:
-    """Build prefix metadata while keeping schema and codebook sets separate."""
+    """Build the prefix-to-variable mapping from the analytical schema."""
     clinical_columns = [
         str(column)
         for column in input_columns
         if "__" in str(column) and not str(column).startswith("ids__")
     ]
     input_by_prefix: dict[str, list[str]] = {}
-    codebook_by_prefix: dict[str, list[str]] = {}
     for variable in clinical_columns:
         input_by_prefix.setdefault(get_prefix(variable), []).append(variable)
-    for variable in codebook_variables:
-        prefix = get_prefix(variable)
-        if prefix != "ids":
-            codebook_by_prefix.setdefault(prefix, []).append(variable)
 
     result: dict[str, dict[str, object]] = {}
-    for prefix in sorted(set(input_by_prefix) | set(codebook_by_prefix)):
+    for prefix in sorted(input_by_prefix):
         input_variables = sorted(set(input_by_prefix.get(prefix, [])))
-        codebook_set = set(codebook_by_prefix.get(prefix, []))
         result[prefix] = {
             "input_variables": input_variables,
-            "codebook_variables": sorted(codebook_set),
             "n_input_variables": len(input_variables),
-            "n_codebook_variables": len(codebook_set),
-            "n_codebook_not_in_input": len(codebook_set - set(input_variables)),
-            "prefix_not_in_codebook": prefix not in codebook_by_prefix,
         }
     return result
 
@@ -176,13 +134,11 @@ def calculate_visit_prefix_completeness(
                 {
                     **identifiers,
                     "prefix": prefix,
-                    "n_codebook_variables": metadata["n_codebook_variables"],
                     "n_input_variables": n_input,
                     "n_completed": n_input - n_missing,
                     "n_missing": n_missing,
                     "completeness_pct": 100.0 * (n_input - n_missing) / n_input,
                     "missing_variables": " | ".join(missing_variables),
-                    "prefix_not_in_codebook": metadata["prefix_not_in_codebook"],
                 }
             )
     long_output = pd.DataFrame(rows)
@@ -208,7 +164,7 @@ def create_wide_matrix(long_output: pd.DataFrame) -> pd.DataFrame:
 def create_prefix_summary(
     long_output: pd.DataFrame, prefix_dictionary: dict[str, dict[str, object]]
 ) -> pd.DataFrame:
-    """Summarize schema coverage and visit completeness separately by prefix."""
+    """Summarize visit completeness for every input-derived prefix."""
     rows: list[dict[str, object]] = []
     grouped = {
         prefix: group for prefix, group in long_output.groupby("prefix", sort=False)
@@ -217,18 +173,11 @@ def create_prefix_summary(
         values = grouped.get(prefix, pd.DataFrame()).get(
             "completeness_pct", pd.Series(dtype=float)
         )
-        n_codebook = int(metadata["n_codebook_variables"])
         n_input = int(metadata["n_input_variables"])
         rows.append(
             {
                 "prefix": prefix,
-                "n_codebook_variables": n_codebook,
                 "n_input_variables": n_input,
-                "n_codebook_not_in_input": metadata["n_codebook_not_in_input"],
-                "schema_coverage_pct": (
-                    100.0 * n_input / n_codebook if n_codebook else pd.NA
-                ),
-                "prefix_not_in_codebook": metadata["prefix_not_in_codebook"],
                 "n_patient_visits": len(values),
                 "mean_completeness_pct": values.mean(),
                 "median_completeness_pct": values.median(),
@@ -401,7 +350,7 @@ def _print_console_report(
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line paths for the read-only QC run."""
+    """Parse input and output paths for the read-only QC run."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input",
@@ -409,12 +358,6 @@ def parse_args() -> argparse.Namespace:
         default=ANALYTIC_DIR
         / "visits_long_collapsed_by_interval_codebook_corrected.parquet",
         help="Canonical longitudinal analytical Parquet (or CSV) input.",
-    )
-    parser.add_argument(
-        "--codebook",
-        type=Path,
-        default=RAW_DIR / "Consolidated_Codebook_all_columns.xlsx",
-        help="Consolidated Excel codebook.",
     )
     parser.add_argument(
         "--output-dir",
@@ -430,8 +373,7 @@ def main() -> None:
     args = parse_args()
     data = load_input(args.input)
     run_qc_checks(data)
-    codebook_variables = prepare_codebook_variables(load_codebook(args.codebook))
-    prefix_dictionary = build_prefix_dictionary(data.columns, codebook_variables)
+    prefix_dictionary = build_prefix_dictionary(data.columns)
     long_output = calculate_visit_prefix_completeness(data, prefix_dictionary)
     run_qc_checks(data, prefix_dictionary, long_output)
     matrix = create_wide_matrix(long_output)
