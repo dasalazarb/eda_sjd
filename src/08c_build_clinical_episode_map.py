@@ -181,6 +181,59 @@ def _aggregate_rows(rows: pd.DataFrame) -> pd.Series:
     return _classify_evidence(pd.DataFrame([values])).iloc[0]
 
 
+def build_daily_activity_units(
+    flagged_rows: pd.DataFrame, provenance_columns: Iterable[str] = ()
+) -> pd.DataFrame:
+    """Consolidate raw rows into indivisible patient-date activity units.
+
+    Parameters
+    ----------
+    flagged_rows : pd.DataFrame
+        Prepared row-level visits with presence flags.
+    provenance_columns : Iterable[str]
+        Existing protocol, origin, or source columns to retain.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per dated patient-day. Undated raw rows remain separate units so
+        that missing dates never cause unrelated records to be combined.
+    """
+    work = flagged_rows.copy()
+    dated_key = work["collection_date"].dt.strftime("%Y-%m-%d")
+    undated_key = "undated-row-" + work["row_id_raw"].astype("string")
+    work["_daily_key"] = dated_key.fillna(undated_key)
+    flag_columns = (
+        list(BLOCK_PREFIXES)
+        + ["has_essdai_total", "has_esspri_core"]
+        + list(RESEARCH_PREFIXES)
+    )
+    records: list[dict[str, object]] = []
+    for (patient_id, daily_key), rows in work.groupby(
+        ["patient_id", "_daily_key"], sort=False, dropna=False
+    ):
+        record: dict[str, object] = {
+            "patient_id": patient_id,
+            "collection_date": rows["collection_date"].iloc[0],
+            "daily_activity_unit_id": f"{patient_id}__{daily_key}",
+            "row_ids_involved": tuple(rows["row_id_raw"].tolist()),
+            "interval_names_involved": tuple(
+                dict.fromkeys(rows["interval_name"].dropna().astype(str))
+            ),
+            "_source_order": int(rows["_source_order"].min()),
+        }
+        for column in flag_columns:
+            record[column] = bool(rows[column].any())
+        for column in provenance_columns:
+            values = tuple(dict.fromkeys(rows[column].dropna().astype(str)))
+            record[f"{column}_involved"] = values
+        records.append(record)
+    units = pd.DataFrame(records)
+    if units.empty:
+        return units
+    return _classify_evidence(units).sort_values("_source_order").reset_index(drop=True)
+
+
 def _merge_rule(left: pd.DataFrame, right: pd.DataFrame) -> str | None:
     """Return the temporal assignment rule when two groups are complementary."""
     dated = pd.concat([left["collection_date"], right["collection_date"]]).dropna()
@@ -193,7 +246,9 @@ def _merge_rule(left: pd.DataFrame, right: pd.DataFrame) -> str | None:
     incoming = _aggregate_rows(right)
     combined = _aggregate_rows(pd.concat([left, right]))
     evidence_flags = list(BLOCK_PREFIXES) + list(RESEARCH_PREFIXES)
-    adds_content = any(bool(incoming[flag]) and not bool(before[flag]) for flag in evidence_flags)
+    adds_content = any(
+        bool(incoming[flag]) and not bool(before[flag]) for flag in evidence_flags
+    )
     if not adds_content:
         return None
     joins_essdai_esspri = bool(combined.has_essdai_form and combined.has_esspri_form) and not (
@@ -209,11 +264,15 @@ def _merge_rule(left: pd.DataFrame, right: pd.DataFrame) -> str | None:
     return None
 
 
-def assign_episodes(flagged: pd.DataFrame) -> pd.DataFrame:
-    """Assign every source row to exactly one patient-specific temporal episode."""
+def assign_episodes(daily_units: pd.DataFrame) -> pd.DataFrame:
+    """Assign every daily activity unit to one patient-specific temporal episode."""
     assigned: list[pd.DataFrame] = []
-    for patient_id, patient_rows in flagged.groupby("patient_id", sort=False, dropna=False):
-        ordered = patient_rows.sort_values(["collection_date", "_source_order"], na_position="last")
+    for patient_id, patient_units in daily_units.groupby(
+        "patient_id", sort=False, dropna=False
+    ):
+        ordered = patient_units.sort_values(
+            ["collection_date", "_source_order"], na_position="last"
+        )
         groups: list[tuple[pd.DataFrame, str]] = []
         for index in ordered.index:
             row = ordered.loc[[index]]
@@ -227,7 +286,30 @@ def assign_episodes(flagged: pd.DataFrame) -> pd.DataFrame:
             rows["clinical_episode_id"] = f"{patient_id}__CE{sequence:04d}"
             rows["assignment_rule"] = rule
             assigned.append(rows)
-    return pd.concat(assigned).sort_values("_source_order") if assigned else flagged.copy()
+    if not assigned:
+        return daily_units.copy()
+    return pd.concat(assigned).sort_values("_source_order")
+
+
+def propagate_episode_assignments(
+    flagged_rows: pd.DataFrame, assigned_units: pd.DataFrame
+) -> pd.DataFrame:
+    """Propagate each daily unit's episode assignment back to all raw rows."""
+    membership = assigned_units[
+        [
+            "daily_activity_unit_id",
+            "row_ids_involved",
+            "clinical_episode_id",
+            "assignment_rule",
+        ]
+    ].explode("row_ids_involved")
+    membership = membership.rename(columns={"row_ids_involved": "row_id_raw"})
+    return flagged_rows.merge(
+        membership,
+        on="row_id_raw",
+        how="left",
+        validate="one_to_one",
+    ).sort_values("_source_order")
 
 
 def _anchor_date(rows: pd.DataFrame) -> pd.Timestamp:
@@ -341,14 +423,28 @@ def prepare_visits(visits: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return result, list(dict.fromkeys(provenance))
 
 
-def build_qc(assigned: pd.DataFrame, manifest: pd.DataFrame) -> pd.DataFrame:
+def build_qc(
+    assigned_rows: pd.DataFrame,
+    assigned_units: pd.DataFrame,
+    manifest: pd.DataFrame,
+) -> pd.DataFrame:
     """Create the requested one-row QC metric table."""
-    duplicated_assignments = assigned.groupby("row_id_raw")["clinical_episode_id"].nunique()
+    duplicated_assignments = assigned_rows.groupby("row_id_raw")[
+        "clinical_episode_id"
+    ].nunique()
+    split_units = assigned_rows.groupby("daily_activity_unit_id")[
+        "clinical_episode_id"
+    ].nunique()
+    unique_patient_dates = assigned_rows[
+        ["patient_id", "collection_date"]
+    ].drop_duplicates()
     reunited = manifest["has_essdai_form"] & manifest["has_esspri_form"]
     metrics = {
-        "patients": assigned["patient_id"].nunique(),
-        "original_rows": len(assigned),
-        "resulting_episodes": len(manifest),
+        "patients": assigned_rows["patient_id"].nunique(),
+        "raw_rows": len(assigned_rows),
+        "unique_patient_collection_dates": len(unique_patient_dates),
+        "daily_activity_units": len(assigned_units),
+        "final_clinical_episode_ids": manifest["clinical_episode_id"].nunique(),
         "clinical_candidate": manifest["visit_type"].eq("clinical_candidate").sum(),
         "research_or_procedure_only_candidate": manifest["visit_type"].eq(
             "research_or_procedure_only_candidate"
@@ -359,8 +455,9 @@ def build_qc(assigned: pd.DataFrame, manifest: pd.DataFrame) -> pd.DataFrame:
             " \\| ", regex=True, na=False
         ).sum(),
         "episodes_with_essdai_and_esspri": reunited.sum(),
-        "rows_without_clinical_episode_id": assigned["clinical_episode_id"].isna().sum(),
-        "rows_assigned_to_multiple_episodes": (duplicated_assignments > 1).sum(),
+        "raw_rows_unassigned": assigned_rows["clinical_episode_id"].isna().sum(),
+        "raw_rows_multiply_assigned": (duplicated_assignments > 1).sum(),
+        "patient_date_units_assigned_to_multiple_episodes": (split_units > 1).sum(),
     }
     return pd.DataFrame([metrics])
 
@@ -430,23 +527,35 @@ def main() -> None:
     logger.info("Reading %s", args.input_path)
     visits = pd.read_parquet(args.input_path)
     prepared, provenance = prepare_visits(visits)
-    assigned = assign_episodes(add_presence_flags(prepared))
-    manifest = build_manifest(assigned)
-    qc = build_qc(assigned, manifest)
-    if int(qc.loc[0, "rows_without_clinical_episode_id"]) != 0 or int(
-        qc.loc[0, "rows_assigned_to_multiple_episodes"]
-    ) != 0:
+    flagged_rows = add_presence_flags(prepared)
+    daily_units = build_daily_activity_units(flagged_rows, provenance)
+    assigned_units = assign_episodes(daily_units)
+    assigned_rows = propagate_episode_assignments(flagged_rows, assigned_units)
+    manifest = build_manifest(assigned_rows)
+    qc = build_qc(assigned_rows, assigned_units, manifest)
+    assignment_failures = qc.loc[
+        0,
+        [
+            "raw_rows_unassigned",
+            "raw_rows_multiply_assigned",
+            "patient_date_units_assigned_to_multiple_episodes",
+        ],
+    ]
+    if assignment_failures.astype(int).any():
         raise RuntimeError("Episode assignment failed one-to-one QC")
     row_columns = [
         "patient_id", "row_id_raw", "interval_name", "collection_date",
+        "daily_activity_unit_id",
         *provenance, "clinical_episode_id", "assignment_rule", "manual_review_required",
     ]
-    assigned = assigned.merge(
+    assigned_rows = assigned_rows.merge(
         manifest[["clinical_episode_id", "manual_review_required"]],
         on="clinical_episode_id", how="left", validate="many_to_one",
     )
     args.qc_dir.mkdir(parents=True, exist_ok=True)
-    row_map_paths = write_parquet_and_csv(assigned[row_columns], args.row_map_path)
+    row_map_paths = write_parquet_and_csv(
+        assigned_rows[row_columns], args.row_map_path
+    )
     manifest_paths = write_parquet_and_csv(manifest, args.manifest_path)
     qc.to_csv(args.qc_dir / "08c_qc_summary.csv", index=False)
     previous_path = args.previous_episodes_path

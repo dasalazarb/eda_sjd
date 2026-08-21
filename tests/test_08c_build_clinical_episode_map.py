@@ -33,7 +33,10 @@ def _visits() -> pd.DataFrame:
 
 def test_flags_and_temporal_assignment_keep_valid_zero_and_no() -> None:
     prepared, _ = EPISODES.prepare_visits(_visits())
-    assigned = EPISODES.assign_episodes(EPISODES.add_presence_flags(prepared))
+    flagged = EPISODES.add_presence_flags(prepared)
+    units = EPISODES.build_daily_activity_units(flagged)
+    assigned_units = EPISODES.assign_episodes(units)
+    assigned = EPISODES.propagate_episode_assignments(flagged, assigned_units)
     manifest = EPISODES.build_manifest(assigned)
 
     first = manifest.loc[manifest["has_essdai_form"]].iloc[0]
@@ -47,9 +50,10 @@ def test_flags_and_temporal_assignment_keep_valid_zero_and_no() -> None:
 
 def test_objective_pair_is_clinical_and_research_only_is_not() -> None:
     prepared, _ = EPISODES.prepare_visits(_visits())
-    manifest = EPISODES.build_manifest(
-        EPISODES.assign_episodes(EPISODES.add_presence_flags(prepared))
-    )
+    flagged = EPISODES.add_presence_flags(prepared)
+    units = EPISODES.assign_episodes(EPISODES.build_daily_activity_units(flagged))
+    assigned = EPISODES.propagate_episode_assignments(flagged, units)
+    manifest = EPISODES.build_manifest(assigned)
 
     objective = manifest.loc[manifest["intervals_involved"].eq("V2")].iloc[0]
     research = manifest.loc[
@@ -81,3 +85,37 @@ def test_write_parquet_and_csv_creates_matching_outputs(tmp_path: Path) -> None:
     assert pd.read_csv(csv_path).to_dict(orient="records") == frame.to_dict(
         orient="records"
     )
+
+
+def test_same_patient_date_is_one_indivisible_clinical_unit() -> None:
+    visits = pd.DataFrame(
+        {
+            "patient_id": [7, 7, 7, 7],
+            "row_id_raw": [1, 2, 3, 4],
+            "interval_name": ["V1", "V1", "Screening", "V1"],
+            "visit_date": ["2024-04-05"] * 4,
+            "essdai__domain": [0, pd.NA, pd.NA, pd.NA],
+            "esspri_questionnaire__pain": [pd.NA, "No", pd.NA, pd.NA],
+            "eye_examination__eye_exam_done": [pd.NA, pd.NA, "Yes", pd.NA],
+            "oral_exam_form__performed": [pd.NA, pd.NA, pd.NA, "Yes"],
+        }
+    )
+    prepared, provenance = EPISODES.prepare_visits(visits)
+    flagged = EPISODES.add_presence_flags(prepared)
+    daily_units = EPISODES.build_daily_activity_units(flagged, provenance)
+    assigned_units = EPISODES.assign_episodes(daily_units)
+    assigned_rows = EPISODES.propagate_episode_assignments(flagged, assigned_units)
+    manifest = EPISODES.build_manifest(assigned_rows)
+    qc = EPISODES.build_qc(assigned_rows, assigned_units, manifest)
+
+    assert len(daily_units) == 1
+    assert set(daily_units.loc[0, "row_ids_involved"]) == {1, 2, 3, 4}
+    assert set(daily_units.loc[0, "interval_names_involved"]) == {"V1", "Screening"}
+    assert assigned_rows["clinical_episode_id"].nunique() == 1
+    assert manifest.loc[0, "clinical_visit"]
+    assert qc.loc[0, "raw_rows"] == 4
+    assert qc.loc[0, "unique_patient_collection_dates"] == 1
+    assert qc.loc[0, "daily_activity_units"] == 1
+    assert qc.loc[0, "raw_rows_unassigned"] == 0
+    assert qc.loc[0, "raw_rows_multiply_assigned"] == 0
+    assert qc.loc[0, "patient_date_units_assigned_to_multiple_episodes"] == 0
