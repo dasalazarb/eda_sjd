@@ -1,8 +1,8 @@
 """Audit dates and populated components within patient visit episodes.
 
-This script is descriptive only.  Its temporal review reads the previously
-generated episode and component CSVs and never combines episodes or changes the
-official clinical baseline.
+This script is descriptive only. Its composite-candidate review reads the
+previously generated chronological context, temporal cases, and component CSVs.
+It never combines episodes or changes interval names or the official baseline.
 """
 
 from __future__ import annotations
@@ -15,9 +15,11 @@ import pandas as pd
 from common import MISSING_TOKENS, REPORTS_DIR, setup_logger
 
 DEFAULT_OUTPUT_DIR = REPORTS_DIR / "visit_episode_audit"
-DEFAULT_EPISODE_SUMMARY = DEFAULT_OUTPUT_DIR / "02_episode_summary_clean.csv"
 DEFAULT_COMPONENT_DATES = DEFAULT_OUTPUT_DIR / "01_component_dates.csv"
+DEFAULT_CONTEXT = DEFAULT_OUTPUT_DIR / "06_chronological_episode_context.csv"
+DEFAULT_REVIEW_CASES = DEFAULT_OUTPUT_DIR / "07_temporal_review_cases.csv"
 NEARBY_DAYS = 14
+COMPOSITE_WINDOWS = (3, 7, 14)
 
 COMPONENT_PREFIXES: dict[str, tuple[str, ...]] = {
     "essdai": ("essdai", "essdai-_r"),
@@ -64,11 +66,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument(
-        "--episode-summary-path", type=Path, default=DEFAULT_EPISODE_SUMMARY
-    )
-    parser.add_argument(
         "--component-dates-path", type=Path, default=DEFAULT_COMPONENT_DATES
     )
+    parser.add_argument("--context-path", type=Path, default=DEFAULT_CONTEXT)
+    parser.add_argument("--review-cases-path", type=Path, default=DEFAULT_REVIEW_CASES)
     return parser.parse_args()
 
 
@@ -552,28 +553,342 @@ def build_temporal_review(
     return context, review_cases
 
 
+def _composite_component_flags(component_dates: pd.DataFrame) -> pd.DataFrame:
+    """Summarize clinical-anchor and research evidence by patient-interval."""
+    required = {"patient_id", "interval_name", "component"}
+    missing = required.difference(component_dates.columns)
+    if missing:
+        raise ValueError(f"Component dates missing columns: {sorted(missing)}")
+
+    component = component_dates["component"].astype("string").str.lower()
+    definitions = {
+        "has_essdai": ("essdai",),
+        "has_esspri": ("esspri",),
+        "anchor_eye_examination": ("eye_examination", "eye_exam"),
+        "anchor_salivary_flow": ("salivary_flow",),
+        "anchor_physician_review": (
+            "systems_review_for_physician",
+            "physician_review",
+        ),
+        "anchor_visit_summary": ("visit_summary",),
+        "anchor_oral_examination": ("oral_exam", "oral_examination"),
+        "has_research_only_components": (
+            "ccgo",
+            "specimen",
+            "buccal_swab",
+            "ipsc",
+            "skin_biopsy",
+        ),
+    }
+    flags = component_dates[["patient_id", "interval_name"]].copy()
+    for name, terms in definitions.items():
+        flags[name] = component.apply(
+            lambda value: bool(pd.notna(value) and any(term in value for term in terms))
+        )
+    return flags.groupby(["patient_id", "interval_name"], as_index=False).max()
+
+
+def _excluded_temporal_records(
+    context: pd.DataFrame, review_cases: pd.DataFrame
+) -> pd.DataFrame:
+    """Identify long or overlapping records to keep outside candidate clusters."""
+    columns = [
+        "patient_id",
+        "interval_name",
+        "episode_start_date",
+        "episode_end_date",
+        "exclusion_reason",
+    ]
+    reasons: dict[tuple[object, object], set[str]] = {}
+    if {"case_type", "patient_id", "interval_name"}.issubset(review_cases.columns):
+        long_rows = review_cases.loc[
+            review_cases["case_type"].eq("episode_span_gt_30"),
+            ["patient_id", "interval_name"],
+        ].drop_duplicates()
+    else:
+        long_rows = pd.DataFrame(columns=["patient_id", "interval_name"])
+    for row in long_rows.itertuples(index=False):
+        reasons.setdefault((row.patient_id, row.interval_name), set()).add(
+            "episode_span_days_gt_30"
+        )
+
+    ordered = context.sort_values(
+        ["patient_id", "episode_start_date", "episode_end_date", "interval_name"]
+    )
+    for _, patient_rows in ordered.groupby("patient_id", sort=False, dropna=False):
+        rows = list(patient_rows.itertuples(index=False))
+        for position, previous in enumerate(rows):
+            for current in rows[position + 1 :]:
+                if current.episode_start_date > previous.episode_end_date:
+                    break
+                reasons.setdefault(
+                    (previous.patient_id, previous.interval_name), set()
+                ).add("overlapping_date_range")
+                reasons.setdefault(
+                    (current.patient_id, current.interval_name), set()
+                ).add("overlapping_date_range")
+
+    excluded_rows: list[dict[str, object]] = []
+    indexed = context.set_index(["patient_id", "interval_name"], drop=False)
+    for key, record_reasons in reasons.items():
+        if key not in indexed.index:
+            continue
+        row = indexed.loc[key]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[0]
+        excluded_rows.append(
+            {
+                "patient_id": key[0],
+                "interval_name": key[1],
+                "episode_start_date": row["episode_start_date"],
+                "episode_end_date": row["episode_end_date"],
+                "exclusion_reason": ";".join(sorted(record_reasons)),
+            }
+        )
+    return pd.DataFrame(excluded_rows, columns=columns)
+
+
+def _window_clusters(records: pd.DataFrame, window_days: int) -> list[pd.DataFrame]:
+    """Return multi-record clusters whose complete date range fits a window."""
+    clusters: list[pd.DataFrame] = []
+    for _, patient_rows in records.groupby("patient_id", sort=False, dropna=False):
+        patient_rows = patient_rows.sort_values(
+            ["episode_start_date", "episode_end_date", "interval_name"]
+        )
+        current_indices: list[object] = []
+        cluster_start: pd.Timestamp | None = None
+        cluster_end: pd.Timestamp | None = None
+        for index, row in patient_rows.iterrows():
+            proposed_start = (
+                row["episode_start_date"] if cluster_start is None else cluster_start
+            )
+            proposed_end = (
+                row["episode_end_date"]
+                if cluster_end is None
+                else max(cluster_end, row["episode_end_date"])
+            )
+            if current_indices and (proposed_end - proposed_start).days > window_days:
+                if len(current_indices) > 1:
+                    clusters.append(patient_rows.loc[current_indices])
+                current_indices = []
+                cluster_start = row["episode_start_date"]
+                cluster_end = row["episode_end_date"]
+            else:
+                cluster_start = proposed_start
+                cluster_end = proposed_end
+            current_indices.append(index)
+        if len(current_indices) > 1:
+            clusters.append(patient_rows.loc[current_indices])
+    return clusters
+
+
+def build_composite_episode_candidates(
+    context: pd.DataFrame,
+    review_cases: pd.DataFrame,
+    component_dates: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Evaluate non-destructive composite clinical episode candidates.
+
+    Parameters
+    ----------
+    context : pd.DataFrame
+        Chronological episode context from ``06_chronological_episode_context.csv``.
+    review_cases : pd.DataFrame
+        Temporal cases from ``07_temporal_review_cases.csv``.
+    component_dates : pd.DataFrame
+        Component-level evidence. May be empty when the optional file is absent.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        Candidate clusters, comparison by window, and separately excluded records.
+    """
+    required = {
+        "patient_id",
+        "interval_name",
+        "episode_start_date",
+        "episode_end_date",
+        "candidate_visit_type",
+    }
+    missing = required.difference(context.columns)
+    if missing:
+        raise ValueError(f"Chronological context missing columns: {sorted(missing)}")
+
+    work = context.copy()
+    for column in ("episode_start_date", "episode_end_date"):
+        work[column] = pd.to_datetime(work[column], errors="coerce").dt.normalize()
+    work = work.dropna(
+        subset=["patient_id", "interval_name", "episode_start_date", "episode_end_date"]
+    )
+    excluded = _excluded_temporal_records(work, review_cases)
+    excluded_keys = set(
+        excluded[["patient_id", "interval_name"]].itertuples(index=False, name=None)
+    )
+    eligible = work.loc[
+        ~work.apply(
+            lambda row: (row["patient_id"], row["interval_name"]) in excluded_keys,
+            axis=1,
+        )
+    ].copy()
+
+    if component_dates.empty:
+        flags = eligible[["patient_id", "interval_name"]].drop_duplicates()
+        evidence_columns = [
+            "has_essdai",
+            "has_esspri",
+            "anchor_eye_examination",
+            "anchor_salivary_flow",
+            "anchor_physician_review",
+            "anchor_visit_summary",
+            "anchor_oral_examination",
+            "has_research_only_components",
+        ]
+        for column in evidence_columns:
+            flags[column] = False
+    else:
+        flags = _composite_component_flags(component_dates)
+        evidence_columns = [
+            column
+            for column in flags.columns
+            if column not in {"patient_id", "interval_name"}
+        ]
+    eligible = eligible.merge(flags, on=["patient_id", "interval_name"], how="left")
+    eligible[evidence_columns] = eligible[evidence_columns].fillna(False).astype(bool)
+    anchor_columns = [
+        column for column in evidence_columns if column.startswith("anchor_")
+    ]
+
+    candidate_rows: list[dict[str, object]] = []
+    for window_days in COMPOSITE_WINDOWS:
+        for cluster_number, cluster in enumerate(
+            _window_clusters(eligible, window_days), start=1
+        ):
+            has_essdai = bool(cluster["has_essdai"].any())
+            has_esspri = bool(cluster["has_esspri"].any())
+            anchor_count = int(cluster[anchor_columns].any(axis=0).sum())
+            combined_clinical = has_essdai or anchor_count >= 4
+            types = cluster["candidate_visit_type"].dropna().astype(str).unique()
+            essdai_esspri_together = has_essdai and has_esspri
+            essdai_esspri_reunited = essdai_esspri_together and not bool(
+                (cluster["has_essdai"] & cluster["has_esspri"]).any()
+            )
+            candidate_rows.append(
+                {
+                    "window_days": window_days,
+                    "cluster_id": f"w{window_days}_{cluster_number:05d}",
+                    "patient_id": cluster["patient_id"].iloc[0],
+                    "intervals_involved": "|".join(
+                        cluster["interval_name"].astype(str)
+                    ),
+                    "cluster_start_date": cluster["episode_start_date"].min(),
+                    "cluster_end_date": cluster["episode_end_date"].max(),
+                    "cluster_span_days": (
+                        cluster["episode_end_date"].max()
+                        - cluster["episode_start_date"].min()
+                    ).days,
+                    "n_records": len(cluster),
+                    "has_essdai": has_essdai,
+                    "has_esspri": has_esspri,
+                    "clinical_anchor_count_combined": anchor_count,
+                    "has_research_only_components": bool(
+                        cluster["has_research_only_components"].any()
+                    ),
+                    "candidate_visit_types_involved": "|".join(types),
+                    "n_ambiguous_records": int(
+                        cluster["candidate_visit_type"].eq("ambiguous").sum()
+                    ),
+                    "combines_essdai_esspri": essdai_esspri_together,
+                    "meets_clinical_anchor_threshold": anchor_count >= 4,
+                    "ambiguous_to_clinical_candidate": bool(
+                        combined_clinical
+                        and cluster["candidate_visit_type"].eq("ambiguous").any()
+                    ),
+                    "essdai_esspri_reunited": essdai_esspri_reunited,
+                }
+            )
+    candidate_columns = [
+        "window_days",
+        "cluster_id",
+        "patient_id",
+        "intervals_involved",
+        "cluster_start_date",
+        "cluster_end_date",
+        "cluster_span_days",
+        "n_records",
+        "has_essdai",
+        "has_esspri",
+        "clinical_anchor_count_combined",
+        "has_research_only_components",
+        "candidate_visit_types_involved",
+        "n_ambiguous_records",
+        "combines_essdai_esspri",
+        "meets_clinical_anchor_threshold",
+        "ambiguous_to_clinical_candidate",
+        "essdai_esspri_reunited",
+    ]
+    candidates = pd.DataFrame(candidate_rows, columns=candidate_columns)
+
+    summary_rows: list[dict[str, object]] = []
+    patients_with_clinical = set(
+        work.loc[work["candidate_visit_type"].eq("clinical_candidate"), "patient_id"]
+    )
+    for window_days in COMPOSITE_WINDOWS:
+        window = candidates.loc[candidates["window_days"].eq(window_days)]
+        recovered = window.loc[window["ambiguous_to_clinical_candidate"]]
+        recovered_without_prior = recovered.loc[
+            ~recovered["patient_id"].isin(patients_with_clinical)
+        ]
+        summary_rows.append(
+            {
+                "window_days": window_days,
+                "n_clusters_created": len(window),
+                "patients_affected": window["patient_id"].nunique(),
+                "ambiguous_episodes_recovered": int(
+                    recovered["n_ambiguous_records"].sum()
+                ),
+                "patients_without_clinical_candidate_recovered": recovered_without_prior[
+                    "patient_id"
+                ].nunique(),
+                "essdai_esspri_reunited_clusters": int(
+                    window["essdai_esspri_reunited"].sum()
+                ),
+            }
+        )
+    summary = pd.DataFrame(summary_rows)
+    return candidates, summary, excluded
+
+
 def main() -> None:
-    """Run the read-only chronological review and write two audit CSVs."""
+    """Evaluate composite episode windows without changing source records."""
     args = parse_args()
     logger = setup_logger("08b_visit_episode_temporal_audit")
-    logger.info("Reading clean episode summary from %s", args.episode_summary_path)
-    episodes = pd.read_csv(args.episode_summary_path)
-    logger.info("Reading component dates from %s", args.component_dates_path)
-    component_dates = pd.read_csv(args.component_dates_path)
-    context, review_cases = build_temporal_review(episodes, component_dates)
+    logger.info("Reading chronological context from %s", args.context_path)
+    context = pd.read_csv(args.context_path)
+    logger.info("Reading temporal review cases from %s", args.review_cases_path)
+    review_cases = pd.read_csv(args.review_cases_path)
+    if args.component_dates_path.exists():
+        logger.info("Reading component dates from %s", args.component_dates_path)
+        component_dates = pd.read_csv(args.component_dates_path)
+    else:
+        logger.warning(
+            "Component dates unavailable at %s; component-based indicators will be false",
+            args.component_dates_path,
+        )
+        component_dates = pd.DataFrame()
+    candidates, summary, excluded = build_composite_episode_candidates(
+        context, review_cases, component_dates
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     outputs = {
-        "06_chronological_episode_context.csv": context,
-        "07_temporal_review_cases.csv": review_cases,
+        "08b_composite_episode_candidates.csv": candidates,
+        "08b_window_comparison_summary.csv": summary,
+        "08b_temporal_records_for_review.csv": excluded,
     }
     for filename, table in outputs.items():
         path = args.output_dir / filename
         table.to_csv(path, index=False)
         logger.info("Saved %s rows=%d", path, len(table))
-    logger.info(
-        "Review cases by type: %s",
-        review_cases["case_type"].value_counts().to_dict(),
-    )
+    logger.info("Window comparison: %s", summary.to_dict(orient="records"))
 
 
 if __name__ == "__main__":
