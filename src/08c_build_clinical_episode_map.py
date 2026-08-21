@@ -320,8 +320,88 @@ def _anchor_date(rows: pd.DataFrame) -> pd.Timestamp:
     return pd.NaT
 
 
-def build_manifest(assigned: pd.DataFrame) -> pd.DataFrame:
+def build_source_interval_qc(prepared_rows: pd.DataFrame) -> pd.DataFrame:
+    """Calculate original patient-interval date ranges before episode clustering.
+
+    Parameters
+    ----------
+    prepared_rows : pd.DataFrame
+        Normalized raw rows containing patient, interval, and collection date.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per original patient-interval with its source date range and
+        greater-than-30-day review flag.
+    """
+    source_intervals = (
+        prepared_rows.groupby(
+            ["patient_id", "interval_name"], as_index=False, dropna=False
+        )
+        .agg(
+            source_interval_start_date=("collection_date", "min"),
+            source_interval_end_date=("collection_date", "max"),
+        )
+    )
+    source_intervals["source_interval_span_days"] = (
+        source_intervals["source_interval_end_date"]
+        - source_intervals["source_interval_start_date"]
+    ).dt.days.astype("Int64")
+    source_intervals["source_interval_span_gt30"] = source_intervals[
+        "source_interval_span_days"
+    ].gt(30).fillna(False)
+    return source_intervals
+
+
+def _source_interval_key(patient_id: object, interval_name: object) -> tuple[object, str]:
+    """Return a stable lookup key, including for a missing interval label."""
+    interval_key = "<MISSING>" if pd.isna(interval_name) else str(interval_name)
+    return patient_id, interval_key
+
+
+def _overlapping_source_interval_keys(
+    source_intervals: pd.DataFrame,
+) -> set[tuple[object, str]]:
+    """Find original patient-interval ranges that overlap another named interval."""
+    dated = source_intervals.dropna(
+        subset=[
+            "interval_name",
+            "source_interval_start_date",
+            "source_interval_end_date",
+        ]
+    )
+    overlapping: set[tuple[object, str]] = set()
+    for patient_id, rows in dated.groupby("patient_id", sort=False, dropna=False):
+        values = list(rows.itertuples(index=False))
+        for position, left in enumerate(values):
+            for right in values[position + 1 :]:
+                if (
+                    left.source_interval_start_date
+                    <= right.source_interval_end_date
+                    and right.source_interval_start_date
+                    <= left.source_interval_end_date
+                ):
+                    overlapping.add(
+                        _source_interval_key(patient_id, left.interval_name)
+                    )
+                    overlapping.add(
+                        _source_interval_key(patient_id, right.interval_name)
+                    )
+    return overlapping
+
+
+def build_manifest(
+    assigned: pd.DataFrame,
+    source_intervals: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Collapse assigned source rows into the requested episode manifest."""
+    if source_intervals is None:
+        source_intervals = build_source_interval_qc(assigned)
+    interval_lookup = {
+        _source_interval_key(row.patient_id, row.interval_name): row
+        for row in source_intervals.itertuples(index=False)
+    }
+    overlapping_keys = _overlapping_source_interval_keys(source_intervals)
     records: list[dict[str, object]] = []
     output_flags = list(BLOCK_PREFIXES) + ["has_essdai_total", "has_esspri_core"]
     for (patient_id, episode_id), rows in assigned.groupby(
@@ -342,7 +422,26 @@ def build_manifest(assigned: pd.DataFrame) -> pd.DataFrame:
             visit_type = "research_or_procedure_only_candidate"
         else:
             visit_type = "ambiguous"
-        manual = bool(pd.isna(start) or (pd.notna(span) and span > 30))
+        interval_keys = {
+            _source_interval_key(patient_id, interval_name)
+            for interval_name in rows["interval_name"].unique()
+        }
+        interval_qc = [
+            interval_lookup[key] for key in interval_keys if key in interval_lookup
+        ]
+        source_spans = [
+            item.source_interval_span_days
+            for item in interval_qc
+            if pd.notna(item.source_interval_span_days)
+        ]
+        max_source_span = max(source_spans) if source_spans else pd.NA
+        reasons: list[str] = []
+        if any(bool(item.source_interval_span_gt30) for item in interval_qc):
+            reasons.append("source_interval_span_gt30")
+        if interval_keys & overlapping_keys:
+            reasons.append("overlapping_source_interval_ranges")
+        if rows["collection_date"].isna().any():
+            reasons.append("missing_collection_date")
         intervals = sorted({str(value) for value in rows["interval_name"].dropna()})
         record: dict[str, object] = {
             "patient_id": patient_id,
@@ -352,11 +451,13 @@ def build_manifest(assigned: pd.DataFrame) -> pd.DataFrame:
             "clinical_anchor_date": _anchor_date(rows),
             "episode_end_date": end,
             "episode_span_days": span,
+            "max_source_interval_span_days": max_source_span,
             "physician_core_count": int(evidence.physician_core_count),
             "objective_exam_count": int(evidence.objective_exam_count),
             "visit_type": visit_type,
             "clinical_visit": bool(evidence.clinical_candidate),
-            "manual_review_required": manual,
+            "manual_review_required": bool(reasons),
+            "manual_review_reason": "|".join(reasons),
         }
         record.update({flag: bool(evidence[flag]) for flag in output_flags})
         records.append(record)
@@ -366,38 +467,10 @@ def build_manifest(assigned: pd.DataFrame) -> pd.DataFrame:
         "has_essdai_total", "has_esspri_form", "has_esspri_core", "has_systems_review",
         "has_physical_exam", "has_visit_summary", "has_eye_exam", "has_salivary_flow",
         "has_oral_exam", "physician_core_count", "objective_exam_count", "visit_type",
-        "clinical_visit", "manual_review_required",
+        "clinical_visit", "manual_review_required", "manual_review_reason",
+        "max_source_interval_span_days",
     ]
-    manifest = pd.DataFrame(records).reindex(columns=columns)
-    overlapping_ids = _episodes_in_overlapping_interval_ranges(assigned)
-    manifest.loc[
-        manifest["clinical_episode_id"].isin(overlapping_ids),
-        "manual_review_required",
-    ] = True
-    return manifest
-
-
-def _episodes_in_overlapping_interval_ranges(assigned: pd.DataFrame) -> set[object]:
-    """Find episodes belonging to distinct interval labels whose date ranges overlap."""
-    dated = assigned.dropna(subset=["collection_date", "interval_name"])
-    ranges = (
-        dated.groupby(["patient_id", "interval_name"], as_index=False)
-        .agg(range_start=("collection_date", "min"), range_end=("collection_date", "max"))
-    )
-    overlapping: set[tuple[object, object]] = set()
-    for patient_id, rows in ranges.groupby("patient_id", sort=False, dropna=False):
-        values = list(rows.itertuples(index=False))
-        for position, left in enumerate(values):
-            for right in values[position + 1 :]:
-                if left.range_start <= right.range_end and right.range_start <= left.range_end:
-                    overlapping.add((patient_id, left.interval_name))
-                    overlapping.add((patient_id, right.interval_name))
-    keys = assigned[["patient_id", "interval_name", "clinical_episode_id"]].drop_duplicates()
-    return {
-        row.clinical_episode_id
-        for row in keys.itertuples(index=False)
-        if (row.patient_id, row.interval_name) in overlapping
-    }
+    return pd.DataFrame(records).reindex(columns=columns)
 
 
 def prepare_visits(visits: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
@@ -427,6 +500,7 @@ def build_qc(
     assigned_rows: pd.DataFrame,
     assigned_units: pd.DataFrame,
     manifest: pd.DataFrame,
+    source_intervals: pd.DataFrame,
 ) -> pd.DataFrame:
     """Create the requested one-row QC metric table."""
     duplicated_assignments = assigned_rows.groupby("row_id_raw")[
@@ -439,6 +513,15 @@ def build_qc(
         ["patient_id", "collection_date"]
     ].drop_duplicates()
     reunited = manifest["has_essdai_form"] & manifest["has_esspri_form"]
+    long_source_intervals = source_intervals.loc[
+        source_intervals["source_interval_span_gt30"]
+    ]
+    has_long_source_interval = manifest["manual_review_reason"].str.contains(
+        "source_interval_span_gt30", regex=False, na=False
+    )
+    has_source_overlap = manifest["manual_review_reason"].str.contains(
+        "overlapping_source_interval_ranges", regex=False, na=False
+    )
     metrics = {
         "patients": assigned_rows["patient_id"].nunique(),
         "raw_rows": len(assigned_rows),
@@ -451,6 +534,12 @@ def build_qc(
         ).sum(),
         "ambiguous": manifest["visit_type"].eq("ambiguous").sum(),
         "manual_review": manifest["manual_review_required"].sum(),
+        "source_intervals_span_gt30": len(long_source_intervals),
+        "patients_with_source_interval_span_gt30": long_source_intervals[
+            "patient_id"
+        ].nunique(),
+        "clinical_episodes_with_source_interval_span_gt30": has_long_source_interval.sum(),
+        "clinical_episodes_with_overlapping_source_interval_ranges": has_source_overlap.sum(),
         "episodes_with_multiple_intervals": manifest["intervals_involved"].str.contains(
             " \\| ", regex=True, na=False
         ).sum(),
@@ -460,6 +549,24 @@ def build_qc(
         "patient_date_units_assigned_to_multiple_episodes": (split_units > 1).sum(),
     }
     return pd.DataFrame([metrics])
+
+
+def manual_review_reason_distribution(manifest: pd.DataFrame) -> pd.DataFrame:
+    """Count each combinable manual-review reason across clinical episodes."""
+    reasons = manifest.loc[
+        manifest["manual_review_reason"].ne(""),
+        ["clinical_episode_id", "manual_review_reason"],
+    ].copy()
+    if reasons.empty:
+        return pd.DataFrame(columns=["manual_review_reason", "clinical_episodes"])
+    reasons["manual_review_reason"] = reasons["manual_review_reason"].str.split("|")
+    return (
+        reasons.explode("manual_review_reason")
+        .groupby("manual_review_reason", as_index=False)
+        .agg(clinical_episodes=("clinical_episode_id", "nunique"))
+        .sort_values("manual_review_reason")
+        .reset_index(drop=True)
+    )
 
 
 def compare_previous(manifest: pd.DataFrame, path: Path) -> pd.DataFrame:
@@ -527,12 +634,13 @@ def main() -> None:
     logger.info("Reading %s", args.input_path)
     visits = pd.read_parquet(args.input_path)
     prepared, provenance = prepare_visits(visits)
+    source_intervals = build_source_interval_qc(prepared)
     flagged_rows = add_presence_flags(prepared)
     daily_units = build_daily_activity_units(flagged_rows, provenance)
     assigned_units = assign_episodes(daily_units)
     assigned_rows = propagate_episode_assignments(flagged_rows, assigned_units)
-    manifest = build_manifest(assigned_rows)
-    qc = build_qc(assigned_rows, assigned_units, manifest)
+    manifest = build_manifest(assigned_rows, source_intervals)
+    qc = build_qc(assigned_rows, assigned_units, manifest, source_intervals)
     assignment_failures = qc.loc[
         0,
         [
@@ -558,6 +666,12 @@ def main() -> None:
     )
     manifest_paths = write_parquet_and_csv(manifest, args.manifest_path)
     qc.to_csv(args.qc_dir / "08c_qc_summary.csv", index=False)
+    source_intervals.to_csv(
+        args.qc_dir / "08c_source_interval_qc.csv", index=False
+    )
+    manual_review_reason_distribution(manifest).to_csv(
+        args.qc_dir / "08c_manual_review_reason_distribution.csv", index=False
+    )
     previous_path = args.previous_episodes_path
     if previous_path == PREVIOUS_EPISODES_PATH and not previous_path.exists():
         previous_path = PREVIOUS_CANDIDATES_PATH

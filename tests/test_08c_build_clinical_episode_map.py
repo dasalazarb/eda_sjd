@@ -105,8 +105,11 @@ def test_same_patient_date_is_one_indivisible_clinical_unit() -> None:
     daily_units = EPISODES.build_daily_activity_units(flagged, provenance)
     assigned_units = EPISODES.assign_episodes(daily_units)
     assigned_rows = EPISODES.propagate_episode_assignments(flagged, assigned_units)
-    manifest = EPISODES.build_manifest(assigned_rows)
-    qc = EPISODES.build_qc(assigned_rows, assigned_units, manifest)
+    source_intervals = EPISODES.build_source_interval_qc(prepared)
+    manifest = EPISODES.build_manifest(assigned_rows, source_intervals)
+    qc = EPISODES.build_qc(
+        assigned_rows, assigned_units, manifest, source_intervals
+    )
 
     assert len(daily_units) == 1
     assert set(daily_units.loc[0, "row_ids_involved"]) == {1, 2, 3, 4}
@@ -119,3 +122,46 @@ def test_same_patient_date_is_one_indivisible_clinical_unit() -> None:
     assert qc.loc[0, "raw_rows_unassigned"] == 0
     assert qc.loc[0, "raw_rows_multiply_assigned"] == 0
     assert qc.loc[0, "patient_date_units_assigned_to_multiple_episodes"] == 0
+
+
+def test_source_interval_qc_drives_explicit_manual_review_reasons() -> None:
+    visits = pd.DataFrame(
+        {
+            "patient_id": [9, 9, 9, 9],
+            "row_id_raw": [1, 2, 3, 4],
+            "interval_name": ["A", "A", "B", "C"],
+            "visit_date": ["2024-01-01", "2024-03-15", "2024-01-01", pd.NA],
+            "essdai__domain": [0, 0, pd.NA, pd.NA],
+            "esspri_questionnaire__pain": [pd.NA, pd.NA, "No", "No"],
+        }
+    )
+    prepared, _ = EPISODES.prepare_visits(visits)
+    source_intervals = EPISODES.build_source_interval_qc(prepared)
+    flagged = EPISODES.add_presence_flags(prepared)
+    units = EPISODES.assign_episodes(EPISODES.build_daily_activity_units(flagged))
+    assigned = EPISODES.propagate_episode_assignments(flagged, units)
+    manifest = EPISODES.build_manifest(assigned, source_intervals)
+    qc = EPISODES.build_qc(assigned, units, manifest, source_intervals)
+    reasons = EPISODES.manual_review_reason_distribution(manifest)
+
+    interval_a = source_intervals.loc[source_intervals["interval_name"].eq("A")].iloc[0]
+    assert interval_a["source_interval_span_days"] == 74
+    assert interval_a["source_interval_span_gt30"]
+    first_episode = manifest.loc[
+        manifest["episode_start_date"].eq(pd.Timestamp("2024-01-01"))
+    ].iloc[0]
+    assert first_episode["max_source_interval_span_days"] == 74
+    assert set(first_episode["manual_review_reason"].split("|")) == {
+        "source_interval_span_gt30",
+        "overlapping_source_interval_ranges",
+    }
+    assert manifest["manual_review_reason"].str.contains(
+        "missing_collection_date", regex=False
+    ).any()
+    assert qc.loc[0, "source_intervals_span_gt30"] == 1
+    assert qc.loc[0, "patients_with_source_interval_span_gt30"] == 1
+    assert set(reasons["manual_review_reason"]) == {
+        "missing_collection_date",
+        "overlapping_source_interval_ranges",
+        "source_interval_span_gt30",
+    }
