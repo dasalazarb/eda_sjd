@@ -400,6 +400,29 @@ def compare_previous(manifest: pd.DataFrame, path: Path) -> pd.DataFrame:
     )
 
 
+def write_parquet_and_csv(frame: pd.DataFrame, parquet_path: Path) -> tuple[Path, Path]:
+    """Write an output table in both typed and human-readable formats.
+
+    Parameters
+    ----------
+    frame : pd.DataFrame
+        Table to persist.
+    parquet_path : Path
+        Parquet destination. The CSV is written beside it with the same stem.
+
+    Returns
+    -------
+    tuple[Path, Path]
+        Paths of the Parquet and CSV files, respectively.
+    """
+    parquet_path = parquet_path.with_suffix(".parquet")
+    csv_path = parquet_path.with_suffix(".csv")
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(parquet_path, index=False)
+    frame.to_csv(csv_path, index=False)
+    return parquet_path, csv_path
+
+
 def main() -> None:
     """Read visits, construct episodes, validate assignments, and write outputs."""
     args = parse_args()
@@ -422,11 +445,9 @@ def main() -> None:
         manifest[["clinical_episode_id", "manual_review_required"]],
         on="clinical_episode_id", how="left", validate="many_to_one",
     )
-    for path in (args.row_map_path, args.manifest_path):
-        path.parent.mkdir(parents=True, exist_ok=True)
     args.qc_dir.mkdir(parents=True, exist_ok=True)
-    assigned[row_columns].to_parquet(args.row_map_path, index=False)
-    manifest.to_parquet(args.manifest_path, index=False)
+    row_map_paths = write_parquet_and_csv(assigned[row_columns], args.row_map_path)
+    manifest_paths = write_parquet_and_csv(manifest, args.manifest_path)
     qc.to_csv(args.qc_dir / "08c_qc_summary.csv", index=False)
     previous_path = args.previous_episodes_path
     if previous_path == PREVIOUS_EPISODES_PATH and not previous_path.exists():
@@ -435,7 +456,11 @@ def main() -> None:
         args.qc_dir / "08c_vs_08b_classification.csv", index=False
     )
     logger.info("QC summary: %s", qc.iloc[0].to_dict())
-    logger.info("Saved row map %s and manifest %s", args.row_map_path, args.manifest_path)
+    logger.info(
+        "Saved row map %s and manifest %s in Parquet and CSV formats",
+        row_map_paths,
+        manifest_paths,
+    )
 
 
 if __name__ == "__main__":

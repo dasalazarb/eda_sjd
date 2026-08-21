@@ -65,3 +65,19 @@ def test_prepare_visits_rejects_duplicate_raw_row_ids() -> None:
     visits.loc[1, "row_id_raw"] = 10
     with pytest.raises(ValueError, match="row_id_raw must be complete and unique"):
         EPISODES.prepare_visits(visits)
+
+
+def test_write_parquet_and_csv_creates_matching_outputs(tmp_path: Path) -> None:
+    frame = pd.DataFrame({"clinical_episode_id": ["1__CE0001"]})
+
+    parquet_path, csv_path = EPISODES.write_parquet_and_csv(
+        frame, tmp_path / "episode_manifest.parquet"
+    )
+
+    assert parquet_path == tmp_path / "episode_manifest.parquet"
+    assert csv_path == tmp_path / "episode_manifest.csv"
+    assert parquet_path.exists()
+    assert csv_path.exists()
+    assert pd.read_csv(csv_path).to_dict(orient="records") == frame.to_dict(
+        orient="records"
+    )
