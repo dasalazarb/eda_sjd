@@ -450,6 +450,42 @@ def merge_ans_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return output
 
 
+def make_parquet_compatible(frame: pd.DataFrame) -> pd.DataFrame:
+    """Make mixed object columns safe for Arrow without changing missing values.
+
+    Conservative collapsing can legitimately put a numeric singleton in one
+    episode and a pipe-delimited conflict string in another. Pandas consequently
+    stores that column as ``object``, while Arrow requires one physical type per
+    column. When an object column mixes text (or bytes) with another Python type,
+    all populated values are serialized using their existing display form. Pure
+    numeric, boolean, datetime, and text object columns are left unchanged.
+
+    Parameters
+    ----------
+    frame : pd.DataFrame
+        Collapsed episode table before Parquet serialization.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy whose heterogeneous text-like object columns have consistent values.
+    """
+    output = frame.copy()
+    for column in output.select_dtypes(include=["object"]).columns:
+        populated = output[column].dropna()
+        if populated.empty:
+            continue
+        has_text = populated.map(lambda value: isinstance(value, str)).any()
+        all_text = populated.map(lambda value: isinstance(value, str)).all()
+        has_bytes = populated.map(lambda value: isinstance(value, bytes)).any()
+        all_bytes = populated.map(lambda value: isinstance(value, bytes)).all()
+        if (has_text and not all_text) or (has_bytes and not all_bytes):
+            output[column] = output[column].map(
+                lambda value: pd.NA if _is_missing(value) else _display_value(value)
+            )
+    return output
+
+
 def hard_qc(output: pd.DataFrame, manifest: pd.DataFrame) -> int:
     """Enforce unique output keys, episode completeness, and ordered dates."""
     duplicates = int(
@@ -714,7 +750,9 @@ def main() -> None:
     patient_column, assignment_qc = validate_inputs(visits, row_map, manifest)
     joined = join_assignments(visits, row_map, patient_column)
     collapsed, conflicts = collapse_episodes(joined, manifest)
-    output = merge_ans_columns(add_manifest(collapsed, manifest))
+    output = make_parquet_compatible(
+        merge_ans_columns(add_manifest(collapsed, manifest))
+    )
     hard_qc(output, manifest)
     qc = build_qc(visits, joined, manifest, output, conflicts, assignment_qc)
 
