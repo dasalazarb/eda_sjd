@@ -25,6 +25,7 @@ INPUT_PATH = ANALYTIC_DIR / "visits_long.parquet"
 ROW_MAP_PATH = INTERMEDIATE_DIR / "clinical_episode_row_map.parquet"
 MANIFEST_PATH = ANALYTIC_DIR / "clinical_episode_manifest.parquet"
 QC_DIR = REPORTS_DIR / "clinical_episode_map"
+MISSED_BACKWARD_MERGES_FILENAME = "08c_possible_missed_backward_merges.csv"
 PREVIOUS_EPISODES_PATH = REPORTS_DIR / "visit_episode_audit" / "02_episode_summary.csv"
 PREVIOUS_CANDIDATES_PATH = (
     REPORTS_DIR / "visit_episode_audit" / "08b_composite_episode_candidates.csv"
@@ -91,16 +92,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--row-map-path", type=Path, default=ROW_MAP_PATH)
     parser.add_argument("--manifest-path", type=Path, default=MANIFEST_PATH)
     parser.add_argument("--qc-dir", type=Path, default=QC_DIR)
-    parser.add_argument("--previous-episodes-path", type=Path, default=PREVIOUS_EPISODES_PATH)
+    parser.add_argument(
+        "--previous-episodes-path", type=Path, default=PREVIOUS_EPISODES_PATH
+    )
     return parser.parse_args()
 
 
-def resolve_column(df: pd.DataFrame, names: Iterable[str], required: bool = True) -> str | None:
+def resolve_column(
+    df: pd.DataFrame, names: Iterable[str], required: bool = True
+) -> str | None:
     """Resolve the first exact or uniquely group-prefixed column name."""
     for name in names:
         if name in df.columns:
             return name
-        matches = [str(column) for column in df.columns if str(column).endswith(f"__{name}")]
+        matches = [
+            str(column) for column in df.columns if str(column).endswith(f"__{name}")
+        ]
         if len(matches) == 1:
             return matches[0]
     if required:
@@ -111,7 +118,9 @@ def resolve_column(df: pd.DataFrame, names: Iterable[str], required: bool = True
 def has_information(series: pd.Series) -> pd.Series:
     """Identify valid populated values without treating zero or negative answers as missing."""
     result = series.notna()
-    if pd.api.types.is_object_dtype(series.dtype) or pd.api.types.is_string_dtype(series.dtype):
+    if pd.api.types.is_object_dtype(series.dtype) or pd.api.types.is_string_dtype(
+        series.dtype
+    ):
         text = series.astype("string").str.strip()
         result &= text.notna() & ~text.str.upper().isin(MISSING_UPPER)
     return result.fillna(False)
@@ -122,7 +131,8 @@ def _columns_for_prefixes(df: pd.DataFrame, prefixes: Iterable[str]) -> list[str
     return [
         str(column)
         for column in df.columns
-        if "__" in str(column) and str(column).split("__", 1)[0].strip().lower() in accepted
+        if "__" in str(column)
+        and str(column).split("__", 1)[0].strip().lower() in accepted
     ]
 
 
@@ -161,11 +171,16 @@ def _classify_evidence(frame: pd.DataFrame) -> pd.DataFrame:
     """Calculate evidence counts and the operational row classification."""
     result = frame.copy()
     result["physician_core_count"] = result[list(CORE_FLAGS)].sum(axis=1).astype(int)
-    result["objective_exam_count"] = result[list(OBJECTIVE_FLAGS)].sum(axis=1).astype(int)
+    result["objective_exam_count"] = (
+        result[list(OBJECTIVE_FLAGS)].sum(axis=1).astype(int)
+    )
     result["clinical_candidate"] = (
         result["has_essdai_form"]
         | (result["physician_core_count"] >= 2)
-        | ((result["physician_core_count"] >= 1) & (result["objective_exam_count"] >= 1))
+        | (
+            (result["physician_core_count"] >= 1)
+            & (result["objective_exam_count"] >= 1)
+        )
         | (result["objective_exam_count"] >= 2)
     )
     result["has_research_component"] = result[list(RESEARCH_PREFIXES)].any(axis=1)
@@ -176,7 +191,11 @@ def _classify_evidence(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _aggregate_rows(rows: pd.DataFrame) -> pd.Series:
-    flags = list(BLOCK_PREFIXES) + ["has_essdai_total", "has_esspri_core"] + list(RESEARCH_PREFIXES)
+    flags = (
+        list(BLOCK_PREFIXES)
+        + ["has_essdai_total", "has_esspri_core"]
+        + list(RESEARCH_PREFIXES)
+    )
     values = {flag: bool(rows[flag].any()) for flag in flags}
     return _classify_evidence(pd.DataFrame([values])).iloc[0]
 
@@ -251,12 +270,18 @@ def _merge_rule(left: pd.DataFrame, right: pd.DataFrame) -> str | None:
     )
     if not adds_content:
         return None
-    joins_essdai_esspri = bool(combined.has_essdai_form and combined.has_esspri_form) and not (
+    joins_essdai_esspri = bool(
+        combined.has_essdai_form and combined.has_esspri_form
+    ) and not (
         bool(before.has_essdai_form and before.has_esspri_form)
         or bool(incoming.has_essdai_form and incoming.has_esspri_form)
     )
-    becomes_clinical = bool(combined.clinical_candidate) and not bool(before.clinical_candidate)
-    completes_clinical = bool(before.clinical_candidate) and bool(incoming.has_any_clinical_evidence)
+    becomes_clinical = bool(combined.clinical_candidate) and not bool(
+        before.clinical_candidate
+    )
+    completes_clinical = bool(before.clinical_candidate) and bool(
+        incoming.has_any_clinical_evidence
+    )
     if span <= 7 and (joins_essdai_esspri or becomes_clinical or completes_clinical):
         return "complementary_within_7_days"
     if span >= 8 and (joins_essdai_esspri or becomes_clinical or completes_clinical):
@@ -334,26 +359,25 @@ def build_source_interval_qc(prepared_rows: pd.DataFrame) -> pd.DataFrame:
         One row per original patient-interval with its source date range and
         greater-than-30-day review flag.
     """
-    source_intervals = (
-        prepared_rows.groupby(
-            ["patient_id", "interval_name"], as_index=False, dropna=False
-        )
-        .agg(
-            source_interval_start_date=("collection_date", "min"),
-            source_interval_end_date=("collection_date", "max"),
-        )
+    source_intervals = prepared_rows.groupby(
+        ["patient_id", "interval_name"], as_index=False, dropna=False
+    ).agg(
+        source_interval_start_date=("collection_date", "min"),
+        source_interval_end_date=("collection_date", "max"),
     )
     source_intervals["source_interval_span_days"] = (
         source_intervals["source_interval_end_date"]
         - source_intervals["source_interval_start_date"]
     ).dt.days.astype("Int64")
-    source_intervals["source_interval_span_gt30"] = source_intervals[
-        "source_interval_span_days"
-    ].gt(30).fillna(False)
+    source_intervals["source_interval_span_gt30"] = (
+        source_intervals["source_interval_span_days"].gt(30).fillna(False)
+    )
     return source_intervals
 
 
-def _source_interval_key(patient_id: object, interval_name: object) -> tuple[object, str]:
+def _source_interval_key(
+    patient_id: object, interval_name: object
+) -> tuple[object, str]:
     """Return a stable lookup key, including for a missing interval label."""
     interval_key = "<MISSING>" if pd.isna(interval_name) else str(interval_name)
     return patient_id, interval_key
@@ -376,8 +400,7 @@ def _overlapping_source_interval_keys(
         for position, left in enumerate(values):
             for right in values[position + 1 :]:
                 if (
-                    left.source_interval_start_date
-                    <= right.source_interval_end_date
+                    left.source_interval_start_date <= right.source_interval_end_date
                     and right.source_interval_start_date
                     <= left.source_interval_end_date
                 ):
@@ -415,7 +438,9 @@ def build_manifest(
         has_core_or_objective = bool(
             evidence[list(CORE_FLAGS) + list(OBJECTIVE_FLAGS)].any()
         )
-        research_only = bool(evidence.has_research_component and not has_core_or_objective)
+        research_only = bool(
+            evidence.has_research_component and not has_core_or_objective
+        )
         if evidence.clinical_candidate:
             visit_type = "clinical_candidate"
         elif research_only:
@@ -462,12 +487,29 @@ def build_manifest(
         record.update({flag: bool(evidence[flag]) for flag in output_flags})
         records.append(record)
     columns = [
-        "patient_id", "clinical_episode_id", "intervals_involved", "episode_start_date",
-        "clinical_anchor_date", "episode_end_date", "episode_span_days", "has_essdai_form",
-        "has_essdai_total", "has_esspri_form", "has_esspri_core", "has_systems_review",
-        "has_physical_exam", "has_visit_summary", "has_eye_exam", "has_salivary_flow",
-        "has_oral_exam", "physician_core_count", "objective_exam_count", "visit_type",
-        "clinical_visit", "manual_review_required", "manual_review_reason",
+        "patient_id",
+        "clinical_episode_id",
+        "intervals_involved",
+        "episode_start_date",
+        "clinical_anchor_date",
+        "episode_end_date",
+        "episode_span_days",
+        "has_essdai_form",
+        "has_essdai_total",
+        "has_esspri_form",
+        "has_esspri_core",
+        "has_systems_review",
+        "has_physical_exam",
+        "has_visit_summary",
+        "has_eye_exam",
+        "has_salivary_flow",
+        "has_oral_exam",
+        "physician_core_count",
+        "objective_exam_count",
+        "visit_type",
+        "clinical_visit",
+        "manual_review_required",
+        "manual_review_reason",
         "max_source_interval_span_days",
     ]
     return pd.DataFrame(records).reindex(columns=columns)
@@ -477,20 +519,27 @@ def prepare_visits(visits: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """Normalize identifiers and dates while retaining original provenance columns."""
     patient_col = resolve_column(visits, ("patient_id", "patient_record_number"))
     interval_col = resolve_column(visits, ("interval_name",))
-    date_col = resolve_column(visits, ("collection_date", "visit_date", "visit_datetime"))
+    date_col = resolve_column(
+        visits, ("collection_date", "visit_date", "visit_datetime")
+    )
     row_col = resolve_column(visits, ("row_id_raw",), required=False)
     provenance = [
-        str(column) for column in visits.columns
+        str(column)
+        for column in visits.columns
         if any(term in str(column).lower() for term in ("protocol", "origin", "source"))
     ]
     result = visits.copy()
     result["_source_order"] = range(len(result))
     result["patient_id"] = result[patient_col]
     result["interval_name"] = result[interval_col]
-    result["collection_date"] = pd.to_datetime(result[date_col], errors="coerce").dt.normalize()
+    result["collection_date"] = pd.to_datetime(
+        result[date_col], errors="coerce"
+    ).dt.normalize()
     result["row_id_raw"] = result[row_col] if row_col else result["_source_order"]
     if result["patient_id"].isna().any():
-        raise ValueError("patient_id contains missing values; episode IDs cannot be made safely")
+        raise ValueError(
+            "patient_id contains missing values; episode IDs cannot be made safely"
+        )
     if result["row_id_raw"].isna().any() or result["row_id_raw"].duplicated().any():
         raise ValueError("row_id_raw must be complete and unique")
     return result, list(dict.fromkeys(provenance))
@@ -501,8 +550,11 @@ def build_qc(
     assigned_units: pd.DataFrame,
     manifest: pd.DataFrame,
     source_intervals: pd.DataFrame,
+    missed_backward_merges: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Create the requested one-row QC metric table."""
+    if missed_backward_merges is None:
+        missed_backward_merges = build_missed_backward_merge_qc(manifest)
     duplicated_assignments = assigned_rows.groupby("row_id_raw")[
         "clinical_episode_id"
     ].nunique()
@@ -529,9 +581,9 @@ def build_qc(
         "daily_activity_units": len(assigned_units),
         "final_clinical_episode_ids": manifest["clinical_episode_id"].nunique(),
         "clinical_candidate": manifest["visit_type"].eq("clinical_candidate").sum(),
-        "research_or_procedure_only_candidate": manifest["visit_type"].eq(
-            "research_or_procedure_only_candidate"
-        ).sum(),
+        "research_or_procedure_only_candidate": manifest["visit_type"]
+        .eq("research_or_procedure_only_candidate")
+        .sum(),
         "ambiguous": manifest["visit_type"].eq("ambiguous").sum(),
         "manual_review": manifest["manual_review_required"].sum(),
         "source_intervals_span_gt30": len(long_source_intervals),
@@ -540,15 +592,190 @@ def build_qc(
         ].nunique(),
         "clinical_episodes_with_source_interval_span_gt30": has_long_source_interval.sum(),
         "clinical_episodes_with_overlapping_source_interval_ranges": has_source_overlap.sum(),
-        "episodes_with_multiple_intervals": manifest["intervals_involved"].str.contains(
-            " \\| ", regex=True, na=False
-        ).sum(),
+        "episodes_with_multiple_intervals": manifest["intervals_involved"]
+        .str.contains(" \\| ", regex=True, na=False)
+        .sum(),
         "episodes_with_essdai_and_esspri": reunited.sum(),
         "raw_rows_unassigned": assigned_rows["clinical_episode_id"].isna().sum(),
         "raw_rows_multiply_assigned": (duplicated_assignments > 1).sum(),
         "patient_date_units_assigned_to_multiple_episodes": (split_units > 1).sum(),
+        "possible_missed_backward_merge_pairs": len(missed_backward_merges),
+        "patients_with_possible_missed_backward_merge": missed_backward_merges[
+            "patient_id"
+        ].nunique(),
+        "possible_merges_with_essdai_esspri_reunited": missed_backward_merges[
+            "would_reunite_essdai_esspri"
+        ].sum(),
+        "possible_merges_becoming_clinical": missed_backward_merges[
+            "would_become_clinical"
+        ].sum(),
     }
+    for label in ("gap_le_3_days", "gap_4_7_days", "gap_8_14_days"):
+        metrics[f"possible_missed_backward_merge_pairs_{label}"] = (
+            missed_backward_merges["gap_group"].eq(label).sum()
+        )
     return pd.DataFrame([metrics])
+
+
+def _combined_episode_evidence(left: pd.Series, right: pd.Series) -> pd.Series:
+    """Combine manifest evidence without changing either episode assignment."""
+    flags = list(BLOCK_PREFIXES) + ["has_essdai_total", "has_esspri_core"]
+    values = {
+        flag: bool(left.get(flag, False) or right.get(flag, False)) for flag in flags
+    }
+    values.update({flag: False for flag in RESEARCH_PREFIXES})
+    return _classify_evidence(pd.DataFrame([values])).iloc[0]
+
+
+def build_missed_backward_merge_qc(manifest: pd.DataFrame) -> pd.DataFrame:
+    """Identify consecutive episodes that merit backward-merge review.
+
+    Parameters
+    ----------
+    manifest : pd.DataFrame
+        Episode-level manifest produced by :func:`build_manifest`.
+
+    Returns
+    -------
+    pd.DataFrame
+        Candidate pairs only. This audit does not mutate episode identifiers,
+        assignment rules, or the manifest itself.
+    """
+    columns = [
+        "patient_id",
+        "episode_a_id",
+        "episode_b_id",
+        "episode_a_start_date",
+        "episode_a_end_date",
+        "episode_b_start_date",
+        "episode_b_end_date",
+        "gap_days",
+        "gap_group",
+        "episode_a_visit_type",
+        "episode_b_visit_type",
+        "episode_a_intervals",
+        "episode_b_intervals",
+        "a_has_essdai",
+        "a_has_esspri",
+        "b_has_essdai",
+        "b_has_esspri",
+        "combined_has_essdai",
+        "combined_has_esspri",
+        "combined_physician_core_count",
+        "combined_objective_exam_count",
+        "would_reunite_essdai_esspri",
+        "would_become_clinical",
+        "possible_missed_backward_merge",
+        "review_reason",
+    ]
+    records: list[dict[str, object]] = []
+    clinical_detail_flags = (*CORE_FLAGS, *OBJECTIVE_FLAGS, *SUPPORT_FLAGS)
+    for patient_id, episodes in manifest.groupby(
+        "patient_id", sort=False, dropna=False
+    ):
+        ordered = episodes.assign(
+            _review_date=episodes["clinical_anchor_date"].fillna(
+                episodes["episode_start_date"]
+            )
+        ).sort_values(["_review_date", "episode_start_date", "clinical_episode_id"])
+        pairs = zip(ordered.iloc[:-1].iterrows(), ordered.iloc[1:].iterrows())
+        for (_, left), (_, right) in pairs:
+            if pd.isna(left["episode_end_date"]) or pd.isna(
+                right["episode_start_date"]
+            ):
+                continue
+            gap_days = int(
+                (right["episode_start_date"] - left["episode_end_date"]).days
+            )
+            if gap_days < 0 or gap_days > 14:
+                continue
+            combined = _combined_episode_evidence(left, right)
+            left_clinical = bool(left["clinical_visit"])
+            right_clinical = bool(right["clinical_visit"])
+            has_incomplete_episode = not left_clinical or not right_clinical
+            both_research_only = (
+                left["visit_type"]
+                == right["visit_type"]
+                == ("research_or_procedure_only_candidate")
+            )
+            reunited = bool(
+                combined.has_essdai_form
+                and combined.has_esspri_form
+                and not (left.has_essdai_form and left.has_esspri_form)
+                and not (right.has_essdai_form and right.has_esspri_form)
+            )
+            becomes_clinical = bool(
+                combined.clinical_candidate and not left_clinical and not right_clinical
+            )
+            incomplete = left if not left_clinical else right
+            incomplete_complements_candidate = bool(
+                left_clinical != right_clinical
+                and any(bool(incomplete[flag]) for flag in clinical_detail_flags)
+                and any(
+                    bool(left[flag]) != bool(right[flag])
+                    for flag in clinical_detail_flags
+                )
+            )
+            coherent_clinical_complement = bool(
+                combined.physician_core_count + combined.objective_exam_count >= 2
+                and any(
+                    bool(left[flag]) and not bool(right[flag])
+                    for flag in (*CORE_FLAGS, *OBJECTIVE_FLAGS)
+                )
+                and any(
+                    bool(right[flag]) and not bool(left[flag])
+                    for flag in (*CORE_FLAGS, *OBJECTIVE_FLAGS)
+                )
+            )
+            reasons = []
+            if reunited:
+                reasons.append("reunites_essdai_esspri")
+            if becomes_clinical:
+                reasons.append("combined_evidence_becomes_clinical")
+            if incomplete_complements_candidate:
+                reasons.append("incomplete_episode_complements_clinical_candidate")
+            if coherent_clinical_complement:
+                reasons.append("coherent_clinical_components_reunited")
+            possible = bool(
+                has_incomplete_episode and not both_research_only and reasons
+            )
+            if not possible:
+                continue
+            gap_group = (
+                "gap_le_3_days"
+                if gap_days <= 3
+                else "gap_4_7_days" if gap_days <= 7 else "gap_8_14_days"
+            )
+            records.append(
+                {
+                    "patient_id": patient_id,
+                    "episode_a_id": left["clinical_episode_id"],
+                    "episode_b_id": right["clinical_episode_id"],
+                    "episode_a_start_date": left["episode_start_date"],
+                    "episode_a_end_date": left["episode_end_date"],
+                    "episode_b_start_date": right["episode_start_date"],
+                    "episode_b_end_date": right["episode_end_date"],
+                    "gap_days": gap_days,
+                    "gap_group": gap_group,
+                    "episode_a_visit_type": left["visit_type"],
+                    "episode_b_visit_type": right["visit_type"],
+                    "episode_a_intervals": left["intervals_involved"],
+                    "episode_b_intervals": right["intervals_involved"],
+                    "a_has_essdai": bool(left["has_essdai_form"]),
+                    "a_has_esspri": bool(left["has_esspri_form"]),
+                    "b_has_essdai": bool(right["has_essdai_form"]),
+                    "b_has_esspri": bool(right["has_esspri_form"]),
+                    "combined_has_essdai": bool(combined.has_essdai_form),
+                    "combined_has_esspri": bool(combined.has_esspri_form),
+                    "combined_physician_core_count": int(combined.physician_core_count),
+                    "combined_objective_exam_count": int(combined.objective_exam_count),
+                    "would_reunite_essdai_esspri": reunited,
+                    "would_become_clinical": becomes_clinical,
+                    "possible_missed_backward_merge": possible,
+                    "review_reason": "|".join(reasons),
+                }
+            )
+    return pd.DataFrame(records).reindex(columns=columns)
 
 
 def manual_review_reason_distribution(manifest: pd.DataFrame) -> pd.DataFrame:
@@ -595,11 +822,15 @@ def compare_previous(manifest: pd.DataFrame, path: Path) -> pd.DataFrame:
     ).explode("interval_name")
     comparison = exploded.merge(
         previous[["patient_id", "interval_name", previous_type]],
-        on=["patient_id", "interval_name"], how="left",
+        on=["patient_id", "interval_name"],
+        how="left",
     )
     return (
         comparison.groupby([previous_type, "visit_type"], dropna=False)
-        .size().rename("episodes").reset_index().rename(columns={previous_type: "previous_visit_type"})
+        .size()
+        .rename("episodes")
+        .reset_index()
+        .rename(columns={previous_type: "previous_visit_type"})
         .reindex(columns=columns)
     )
 
@@ -640,7 +871,14 @@ def main() -> None:
     assigned_units = assign_episodes(daily_units)
     assigned_rows = propagate_episode_assignments(flagged_rows, assigned_units)
     manifest = build_manifest(assigned_rows, source_intervals)
-    qc = build_qc(assigned_rows, assigned_units, manifest, source_intervals)
+    missed_backward_merges = build_missed_backward_merge_qc(manifest)
+    qc = build_qc(
+        assigned_rows,
+        assigned_units,
+        manifest,
+        source_intervals,
+        missed_backward_merges,
+    )
     assignment_failures = qc.loc[
         0,
         [
@@ -652,23 +890,30 @@ def main() -> None:
     if assignment_failures.astype(int).any():
         raise RuntimeError("Episode assignment failed one-to-one QC")
     row_columns = [
-        "patient_id", "row_id_raw", "interval_name", "collection_date",
+        "patient_id",
+        "row_id_raw",
+        "interval_name",
+        "collection_date",
         "daily_activity_unit_id",
-        *provenance, "clinical_episode_id", "assignment_rule", "manual_review_required",
+        *provenance,
+        "clinical_episode_id",
+        "assignment_rule",
+        "manual_review_required",
     ]
     assigned_rows = assigned_rows.merge(
         manifest[["clinical_episode_id", "manual_review_required"]],
-        on="clinical_episode_id", how="left", validate="many_to_one",
+        on="clinical_episode_id",
+        how="left",
+        validate="many_to_one",
     )
     args.qc_dir.mkdir(parents=True, exist_ok=True)
-    row_map_paths = write_parquet_and_csv(
-        assigned_rows[row_columns], args.row_map_path
-    )
+    row_map_paths = write_parquet_and_csv(assigned_rows[row_columns], args.row_map_path)
     manifest_paths = write_parquet_and_csv(manifest, args.manifest_path)
     qc.to_csv(args.qc_dir / "08c_qc_summary.csv", index=False)
-    source_intervals.to_csv(
-        args.qc_dir / "08c_source_interval_qc.csv", index=False
+    missed_backward_merges.to_csv(
+        args.qc_dir / MISSED_BACKWARD_MERGES_FILENAME, index=False
     )
+    source_intervals.to_csv(args.qc_dir / "08c_source_interval_qc.csv", index=False)
     manual_review_reason_distribution(manifest).to_csv(
         args.qc_dir / "08c_manual_review_reason_distribution.csv", index=False
     )
