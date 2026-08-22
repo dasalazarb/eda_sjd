@@ -19,6 +19,9 @@ from common import (
     INTERMEDIATE_DIR,
     MISSING_TOKENS,
     REPORTS_DIR,
+    print_kv,
+    print_script_overview,
+    print_step,
     save_parquet_and_csv,
     setup_logger,
 )
@@ -734,10 +737,75 @@ def build_review_examples(
     return pd.DataFrame(records, columns=["review_reason", *columns])
 
 
+def print_output_summary(
+    output: pd.DataFrame,
+    conflicts: pd.DataFrame,
+    output_base: Path,
+    qc_dir: Path,
+    before_after_created: bool,
+) -> None:
+    """Print generated artifacts and headline QC counts in a readable layout.
+
+    Parameters
+    ----------
+    output : pd.DataFrame
+        Final clinical-episode table.
+    conflicts : pd.DataFrame
+        Variable-level conflict report.
+    output_base : Path
+        Extension-free base path for the analytic Parquet and CSV outputs.
+    qc_dir : Path
+        Directory containing the step 09c QC reports.
+    before_after_created : bool
+        Whether the optional comparison with the interval pipeline was written.
+    """
+    output_files: dict[str, object] = {
+        "Analytic table (Parquet)": output_base.with_suffix(".parquet"),
+        "Analytic table (CSV)": output_base.with_suffix(".csv"),
+        "Variable conflicts": qc_dir / "09c_episode_variable_conflicts.csv",
+        "QC summary": qc_dir / "09c_qc_summary.csv",
+        "Episode row counts": qc_dir / "09c_episode_row_counts.csv",
+        "Review examples": qc_dir / "09c_review_examples.csv",
+    }
+    if before_after_created:
+        output_files["Old vs new comparison"] = qc_dir / "09c_before_after_summary.csv"
+    else:
+        output_files["Old vs new comparison"] = (
+            "not created (legacy interval-collapse Parquet was not found)"
+        )
+
+    print_step(6, "Outputs created")
+    print_kv("09c output files", output_files)
+    print_kv(
+        "09c completion summary",
+        {
+            "patients": int(output["patient_id"].nunique()),
+            "clinical episodes": int(len(output)),
+            "clinical candidates": int(
+                output["visit_type"].eq("clinical_candidate").sum()
+            ),
+            "research/procedure-only candidates": int(
+                output["visit_type"].eq("research_or_procedure_only_candidate").sum()
+            ),
+            "ambiguous episodes": int(output["visit_type"].eq("ambiguous").sum()),
+            "manual-review episodes": int(
+                output["manual_review_required"].fillna(False).astype(bool).sum()
+            ),
+            "variable conflicts": int(len(conflicts)),
+            "hard QC": "PASSED",
+        },
+    )
+
+
 def main() -> None:
     """Run clinical-episode collapse, hard validation, and QC report creation."""
     args = parse_args()
     logger = setup_logger("09c_clinical_episode_collapse")
+    print_script_overview(
+        "09c_clinical_episode_collapse.py",
+        "Collapse variables inside the clinical episodes already defined by step 08c.",
+    )
+    print_step(1, "Load visits, clinical episode row map, and manifest")
     logger.info(
         "Loading visits=%s row_map=%s manifest=%s",
         args.input_path,
@@ -747,15 +815,19 @@ def main() -> None:
     visits = pd.read_parquet(args.input_path)
     row_map = pd.read_parquet(args.row_map_path)
     manifest = pd.read_parquet(args.manifest_path)
+    print_step(2, "Validate authoritative row assignments and manifest keys")
     patient_column, assignment_qc = validate_inputs(visits, row_map, manifest)
     joined = join_assignments(visits, row_map, patient_column)
+    print_step(3, "Collapse variables by patient_id x clinical_episode_id")
     collapsed, conflicts = collapse_episodes(joined, manifest)
     output = make_parquet_compatible(
         merge_ans_columns(add_manifest(collapsed, manifest))
     )
+    print_step(4, "Run hard QC checks")
     hard_qc(output, manifest)
     qc = build_qc(visits, joined, manifest, output, conflicts, assignment_qc)
 
+    print_step(5, "Write analytic tables and QC reports")
     args.output_base.parent.mkdir(parents=True, exist_ok=True)
     args.qc_dir.mkdir(parents=True, exist_ok=True)
     save_parquet_and_csv(output, args.output_base, logger)
@@ -767,11 +839,19 @@ def main() -> None:
     build_review_examples(output, conflicts).to_csv(
         args.qc_dir / "09c_review_examples.csv", index=False
     )
-    if OLD_COLLAPSE_PATH.exists():
+    before_after_created = OLD_COLLAPSE_PATH.exists()
+    if before_after_created:
         old = pd.read_parquet(OLD_COLLAPSE_PATH)
         build_before_after(old, output, conflicts).to_csv(
             args.qc_dir / "09c_before_after_summary.csv", index=False
         )
+    print_output_summary(
+        output,
+        conflicts,
+        args.output_base,
+        args.qc_dir,
+        before_after_created,
+    )
     logger.info(
         "Completed rows=%d patients=%d conflicts=%d; all hard QC checks passed",
         len(output),
