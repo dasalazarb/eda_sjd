@@ -669,7 +669,9 @@ def build_missed_backward_merge_qc(manifest: pd.DataFrame) -> pd.DataFrame:
         "review_reason",
     ]
     records: list[dict[str, object]] = []
-    clinical_detail_flags = (*CORE_FLAGS, *OBJECTIVE_FLAGS, *SUPPORT_FLAGS)
+    # The manifest intentionally does not retain vital-signs or pathology flags.
+    # ESSPRI is the only support flag needed to identify a complementary PRO episode.
+    clinical_detail_flags = (*CORE_FLAGS, *OBJECTIVE_FLAGS, "has_esspri_form")
     for patient_id, episodes in manifest.groupby(
         "patient_id", sort=False, dropna=False
     ):
