@@ -89,6 +89,13 @@ NON_CONFLICT_PROVENANCE = {
     "source_file",
     "origin",
     "collection_date",
+    # Row-processing metadata varies by design inside a clinical episode and
+    # therefore must not inflate the clinical variable-conflict report.
+    "ids__time_24_hour",
+    "time_24_hour",
+    "duplicate_group_id",
+    "dup_rank",
+    "visit_datetime_adjustment_seconds",
 }
 ANS_PREFIX = "ans__"
 AUTONOMIC_PREFIX = "autonomic_nervous_system_questionnaire__"
