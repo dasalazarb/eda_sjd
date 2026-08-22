@@ -92,6 +92,7 @@ NON_CONFLICT_PROVENANCE = {
     # Row-processing metadata varies by design inside a clinical episode and
     # therefore must not inflate the clinical variable-conflict report.
     "ids__time_24_hour",
+    "ids__subject_number",
     "time_24_hour",
     "duplicate_group_id",
     "dup_rank",
