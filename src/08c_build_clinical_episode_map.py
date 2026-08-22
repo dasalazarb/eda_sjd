@@ -26,6 +26,8 @@ ROW_MAP_PATH = INTERMEDIATE_DIR / "clinical_episode_row_map.parquet"
 MANIFEST_PATH = ANALYTIC_DIR / "clinical_episode_manifest.parquet"
 QC_DIR = REPORTS_DIR / "clinical_episode_map"
 MISSED_BACKWARD_MERGES_FILENAME = "08c_possible_missed_backward_merges.csv"
+BACKWARD_SUMMARY_FILENAME = "08c_backward_reconciliation_summary.csv"
+BACKWARD_LOG_FILENAME = "08c_backward_reconciliation_log.csv"
 PREVIOUS_EPISODES_PATH = REPORTS_DIR / "visit_episode_audit" / "02_episode_summary.csv"
 PREVIOUS_CANDIDATES_PATH = (
     REPORTS_DIR / "visit_episode_audit" / "08b_composite_episode_candidates.csv"
@@ -316,6 +318,266 @@ def assign_episodes(daily_units: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(assigned).sort_values("_source_order")
 
 
+def _episode_visit_type(rows: pd.DataFrame) -> str:
+    """Return the operational visit type for a group of activity units."""
+    evidence = _aggregate_rows(rows)
+    has_core_or_objective = bool(
+        evidence[list(CORE_FLAGS) + list(OBJECTIVE_FLAGS)].any()
+    )
+    if evidence.clinical_candidate:
+        return "clinical_candidate"
+    if evidence.has_research_component and not has_core_or_objective:
+        return "research_or_procedure_only_candidate"
+    return "ambiguous"
+
+
+def _backward_merge_decision(
+    left: pd.DataFrame, right: pd.DataFrame
+) -> tuple[str | None, dict[str, object]]:
+    """Evaluate a consecutive episode pair under the conservative second-pass rule."""
+    left_evidence = _aggregate_rows(left)
+    right_evidence = _aggregate_rows(right)
+    combined = _aggregate_rows(pd.concat([left, right]))
+    left_type = _episode_visit_type(left)
+    right_type = _episode_visit_type(right)
+    left_dates = left["collection_date"].dropna()
+    right_dates = right["collection_date"].dropna()
+    details: dict[str, object] = {
+        "a_visit_type": left_type,
+        "b_visit_type": right_type,
+        "a_has_essdai": bool(left_evidence.has_essdai_form),
+        "a_has_esspri": bool(left_evidence.has_esspri_form),
+        "b_has_essdai": bool(right_evidence.has_essdai_form),
+        "b_has_esspri": bool(right_evidence.has_esspri_form),
+        "combined_has_essdai": bool(combined.has_essdai_form),
+        "combined_has_esspri": bool(combined.has_esspri_form),
+    }
+    if left_dates.empty or right_dates.empty:
+        return None, details
+    left_end = left_dates.max()
+    right_start = right_dates.min()
+    gap_days = int((right_start - left_end).days)
+    combined_start = min(left_dates.min(), right_dates.min())
+    combined_end = max(left_dates.max(), right_dates.max())
+    combined_span = int((combined_end - combined_start).days)
+    details.update(
+        gap_days=gap_days,
+        combined_span_days=combined_span,
+        combined_start_date=combined_start,
+        combined_end_date=combined_end,
+    )
+    if gap_days < 0 or gap_days > 14:
+        return None, details
+    # A pair is eligible only when an established clinical episode is being
+    # complemented by a clinically incomplete episode. Research-only content
+    # can travel with such an episode, but is deliberately absent from evidence.
+    left_candidate = bool(left_evidence.clinical_candidate)
+    right_candidate = bool(right_evidence.clinical_candidate)
+    if not (left_candidate or right_candidate) or (left_candidate and right_candidate):
+        return None, details
+    details["eligible_pair"] = True
+    if combined_span > 14:
+        details["rejection"] = "span_gt14"
+        return None, details
+
+    clinical_flags = list(
+        dict.fromkeys((*CORE_FLAGS, *OBJECTIVE_FLAGS, "has_esspri_form"))
+    )
+    candidate = left_evidence if left_candidate else right_evidence
+    incomplete = right_evidence if left_candidate else left_evidence
+    added_flags = [
+        flag
+        for flag in clinical_flags
+        if bool(incomplete[flag]) and not bool(candidate[flag])
+    ]
+    reunited = bool(
+        combined.has_essdai_form
+        and combined.has_esspri_form
+        and not (left_evidence.has_essdai_form and left_evidence.has_esspri_form)
+        and not (right_evidence.has_essdai_form and right_evidence.has_esspri_form)
+    )
+    details["reunited_essdai_esspri"] = reunited
+    details["clinical_components_added"] = len(added_flags)
+    if gap_days <= 7 and (reunited or added_flags):
+        reason = (
+            "reunites_essdai_esspri"
+            if reunited
+            else "incomplete_episode_adds_clinical_component:" + "|".join(added_flags)
+        )
+        return reason, details
+    if gap_days >= 8 and (reunited or len(added_flags) >= 2):
+        reason = (
+            "reunites_essdai_esspri"
+            if reunited
+            else "multiple_complementary_clinical_components:" + "|".join(added_flags)
+        )
+        return reason, details
+    details["rejection"] = "no_clinical_complementarity"
+    return None, details
+
+
+def backward_reconciliation(
+    assigned_units: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Iteratively reconcile consecutive episodes and regenerate their IDs.
+
+    Parameters
+    ----------
+    assigned_units : pd.DataFrame
+        Daily activity units after :func:`assign_episodes`.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        Reassigned units, one-row reconciliation summary, and merge audit log.
+    """
+    log_columns = [
+        "patient_id",
+        "episode_a_original",
+        "episode_b_original",
+        "episode_a_start",
+        "episode_a_end",
+        "episode_b_start",
+        "episode_b_end",
+        "gap_days",
+        "combined_span_days",
+        "a_visit_type",
+        "b_visit_type",
+        "a_has_essdai",
+        "a_has_esspri",
+        "b_has_essdai",
+        "b_has_esspri",
+        "combined_has_essdai",
+        "combined_has_esspri",
+        "merge_reason",
+        "reunited_essdai_esspri",
+        "new_clinical_episode_id",
+    ]
+    log_records: list[dict[str, object]] = []
+    rejected_span = 0
+    rejected_complement = 0
+    patient_merge_counts: dict[object, int] = {}
+    final_groups: list[tuple[object, list[dict[str, object]]]] = []
+    for patient_id, patient_units in assigned_units.groupby(
+        "patient_id", sort=False, dropna=False
+    ):
+        groups: list[dict[str, object]] = []
+        ordered = patient_units.sort_values(
+            ["collection_date", "_source_order"], na_position="last"
+        )
+        for original_id, rows in ordered.groupby(
+            "clinical_episode_id", sort=False, dropna=False
+        ):
+            groups.append({"rows": rows.copy(), "original_ids": [original_id]})
+        index = 1
+        while index < len(groups):
+            left = groups[index - 1]
+            right = groups[index]
+            reason, details = _backward_merge_decision(left["rows"], right["rows"])
+            if reason is None:
+                if details.get("rejection") == "span_gt14":
+                    rejected_span += 1
+                elif details.get("rejection") == "no_clinical_complementarity":
+                    rejected_complement += 1
+                index += 1
+                continue
+            left_rows = left["rows"]
+            right_rows = right["rows"]
+            log_records.append(
+                {
+                    "patient_id": patient_id,
+                    "episode_a_original": " | ".join(map(str, left["original_ids"])),
+                    "episode_b_original": " | ".join(map(str, right["original_ids"])),
+                    "episode_a_start": left_rows["collection_date"].min(),
+                    "episode_a_end": left_rows["collection_date"].max(),
+                    "episode_b_start": right_rows["collection_date"].min(),
+                    "episode_b_end": right_rows["collection_date"].max(),
+                    "gap_days": details["gap_days"],
+                    "combined_span_days": details["combined_span_days"],
+                    **{
+                        key: details[key]
+                        for key in (
+                            "a_visit_type",
+                            "b_visit_type",
+                            "a_has_essdai",
+                            "a_has_esspri",
+                            "b_has_essdai",
+                            "b_has_esspri",
+                            "combined_has_essdai",
+                            "combined_has_esspri",
+                        )
+                    },
+                    "merge_reason": reason,
+                    "reunited_essdai_esspri": details["reunited_essdai_esspri"],
+                    "new_clinical_episode_id": None,
+                }
+            )
+            groups[index - 1] = {
+                "rows": pd.concat([left_rows, right_rows]),
+                "original_ids": left["original_ids"] + right["original_ids"],
+            }
+            del groups[index]
+            patient_merge_counts[patient_id] = (
+                patient_merge_counts.get(patient_id, 0) + 1
+            )
+            index = max(1, index - 1)
+        final_groups.append((patient_id, groups))
+
+    reconciled: list[pd.DataFrame] = []
+    original_to_final: dict[tuple[object, str], str] = {}
+    for patient_id, groups in final_groups:
+        for sequence, group in enumerate(groups, start=1):
+            episode_id = f"{patient_id}__CE{sequence:04d}"
+            rows = group["rows"].copy()
+            rows["clinical_episode_id"] = episode_id
+            if len(group["original_ids"]) > 1:
+                rows["assignment_rule"] = "backward_reconciliation"
+            reconciled.append(rows)
+            for original_id in group["original_ids"]:
+                original_to_final[(patient_id, str(original_id))] = episode_id
+    for record in log_records:
+        original = str(record["episode_a_original"]).split(" | ")[0]
+        record["new_clinical_episode_id"] = original_to_final[
+            (record["patient_id"], original)
+        ]
+    result = (
+        pd.concat(reconciled).sort_values("_source_order")
+        if reconciled
+        else assigned_units.copy()
+    )
+    log = pd.DataFrame(log_records).reindex(columns=log_columns)
+    gaps = log["gap_days"] if not log.empty else pd.Series(dtype="int64")
+    summary = pd.DataFrame(
+        [
+            {
+                "episodes_before_backward_reconciliation": assigned_units[
+                    "clinical_episode_id"
+                ].nunique(),
+                "episodes_after_backward_reconciliation": result[
+                    "clinical_episode_id"
+                ].nunique(),
+                "episodes_merged": len(log),
+                "patients_affected": len(patient_merge_counts),
+                "merges_gap_le3": int(gaps.le(3).sum()),
+                "merges_gap_4_7": int(gaps.between(4, 7).sum()),
+                "merges_gap_8_14": int(gaps.between(8, 14).sum()),
+                "merges_reuniting_essdai_esspri": int(
+                    log.get("reunited_essdai_esspri", pd.Series(dtype=bool)).sum()
+                ),
+                "merges_with_clinical_complementarity": len(log),
+                "candidate_merges_rejected_span_gt14": rejected_span,
+                "candidate_merges_rejected_no_clinical_complementarity": rejected_complement,
+                "chains_with_multiple_merges": sum(
+                    len(group["original_ids"]) > 2
+                    for _, groups in final_groups
+                    for group in groups
+                ),
+            }
+        ]
+    )
+    return result, summary, log
+
+
 def propagate_episode_assignments(
     flagged_rows: pd.DataFrame, assigned_units: pd.DataFrame
 ) -> pd.DataFrame:
@@ -551,6 +813,7 @@ def build_qc(
     manifest: pd.DataFrame,
     source_intervals: pd.DataFrame,
     missed_backward_merges: pd.DataFrame | None = None,
+    backward_summary: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Create the requested one-row QC metric table."""
     if missed_backward_merges is None:
@@ -610,6 +873,26 @@ def build_qc(
             "would_become_clinical"
         ].sum(),
     }
+    if backward_summary is not None:
+        backward = backward_summary.iloc[0]
+        metrics.update(
+            {
+                "episodes_before_backward_reconciliation": backward[
+                    "episodes_before_backward_reconciliation"
+                ],
+                "episodes_after_backward_reconciliation": backward[
+                    "episodes_after_backward_reconciliation"
+                ],
+                "backward_merges_performed": backward["episodes_merged"],
+                "patients_with_backward_merges": backward["patients_affected"],
+                "essdai_esspri_pairs_recovered": backward[
+                    "merges_reuniting_essdai_esspri"
+                ],
+                "remaining_possible_missed_backward_merges": len(
+                    missed_backward_merges
+                ),
+            }
+        )
     for label in ("gap_le_3_days", "gap_4_7_days", "gap_8_14_days"):
         metrics[f"possible_missed_backward_merge_pairs_{label}"] = (
             missed_backward_merges["gap_group"].eq(label).sum()
@@ -860,6 +1143,35 @@ def write_parquet_and_csv(frame: pd.DataFrame, parquet_path: Path) -> tuple[Path
     return parquet_path, csv_path
 
 
+def validate_final_assignments(
+    input_rows: pd.DataFrame, assigned_rows: pd.DataFrame, manifest: pd.DataFrame
+) -> None:
+    """Enforce lossless, unique assignments and valid final episode dates."""
+    if len(input_rows) != len(assigned_rows):
+        raise RuntimeError("Rows were lost or added during episode assignment")
+    if assigned_rows["clinical_episode_id"].isna().any():
+        raise RuntimeError("At least one row_id_raw has no clinical episode")
+    if assigned_rows["row_id_raw"].duplicated().any():
+        raise RuntimeError("At least one row_id_raw appears in multiple episodes")
+    if set(input_rows["row_id_raw"]) != set(assigned_rows["row_id_raw"]):
+        raise RuntimeError("Final row_id_raw values differ from the input")
+    episode_patients = assigned_rows.groupby("clinical_episode_id")[
+        "patient_id"
+    ].nunique(dropna=False)
+    if episode_patients.gt(1).any():
+        raise RuntimeError("A clinical_episode_id belongs to multiple patients")
+    if manifest.duplicated(["patient_id", "clinical_episode_id"]).any():
+        raise RuntimeError("Duplicate episodes exist in the final manifest")
+    dated = manifest.dropna(
+        subset=["episode_start_date", "clinical_anchor_date", "episode_end_date"]
+    )
+    invalid_anchor = ~dated["clinical_anchor_date"].between(
+        dated["episode_start_date"], dated["episode_end_date"]
+    )
+    if invalid_anchor.any():
+        raise RuntimeError("A clinical anchor date falls outside its episode")
+
+
 def main() -> None:
     """Read visits, construct episodes, validate assignments, and write outputs."""
     args = parse_args()
@@ -871,6 +1183,9 @@ def main() -> None:
     flagged_rows = add_presence_flags(prepared)
     daily_units = build_daily_activity_units(flagged_rows, provenance)
     assigned_units = assign_episodes(daily_units)
+    assigned_units, backward_summary, backward_log = backward_reconciliation(
+        assigned_units
+    )
     assigned_rows = propagate_episode_assignments(flagged_rows, assigned_units)
     manifest = build_manifest(assigned_rows, source_intervals)
     missed_backward_merges = build_missed_backward_merge_qc(manifest)
@@ -880,6 +1195,7 @@ def main() -> None:
         manifest,
         source_intervals,
         missed_backward_merges,
+        backward_summary,
     )
     assignment_failures = qc.loc[
         0,
@@ -891,6 +1207,7 @@ def main() -> None:
     ]
     if assignment_failures.astype(int).any():
         raise RuntimeError("Episode assignment failed one-to-one QC")
+    validate_final_assignments(flagged_rows, assigned_rows, manifest)
     row_columns = [
         "patient_id",
         "row_id_raw",
@@ -912,6 +1229,8 @@ def main() -> None:
     row_map_paths = write_parquet_and_csv(assigned_rows[row_columns], args.row_map_path)
     manifest_paths = write_parquet_and_csv(manifest, args.manifest_path)
     qc.to_csv(args.qc_dir / "08c_qc_summary.csv", index=False)
+    backward_summary.to_csv(args.qc_dir / BACKWARD_SUMMARY_FILENAME, index=False)
+    backward_log.to_csv(args.qc_dir / BACKWARD_LOG_FILENAME, index=False)
     missed_backward_merges.to_csv(
         args.qc_dir / MISSED_BACKWARD_MERGES_FILENAME, index=False
     )
