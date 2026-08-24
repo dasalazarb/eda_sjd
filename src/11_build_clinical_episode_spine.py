@@ -3,6 +3,15 @@
 This step only attaches patient-level cohort and clinical-baseline fields from
 step 10. It does not reconstruct, combine, split, or otherwise modify the
 clinical episodes finalized by step 09d.
+
+Outputs
+-------
+data_analytic/clinical_episode_spine_all.parquet and .csv
+    Complete clinical-episode spine for every patient.
+data_analytic/clinical_episode_spine_sjd.parquet and .csv
+    Clinical-episode spine restricted to patients in the SjD cohort.
+reports/clinical_episode_spine/11_clinical_episode_spine_qc.parquet and .csv
+    One-row quality-control summary confirming episode preservation and counts.
 """
 
 from __future__ import annotations
@@ -22,8 +31,13 @@ BASELINE_PATH = (
     REPORTS_DIR / "clinical_baseline" / "10_clinical_baseline_comparison.csv"
 )
 OUTPUT_ALL_PATH = ANALYTIC_DIR / "clinical_episode_spine_all.parquet"
+OUTPUT_ALL_CSV_PATH = ANALYTIC_DIR / "clinical_episode_spine_all.csv"
 OUTPUT_SJD_PATH = ANALYTIC_DIR / "clinical_episode_spine_sjd.parquet"
+OUTPUT_SJD_CSV_PATH = ANALYTIC_DIR / "clinical_episode_spine_sjd.csv"
 QC_PATH = REPORTS_DIR / "clinical_episode_spine" / "11_clinical_episode_spine_qc.csv"
+QC_PARQUET_PATH = (
+    REPORTS_DIR / "clinical_episode_spine" / "11_clinical_episode_spine_qc.parquet"
+)
 KEYS = ["patient_id", "clinical_episode_id"]
 EPISODE_STRUCTURE_COLUMNS = {
     *KEYS,
@@ -50,8 +64,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-path", type=Path, default=INPUT_PATH)
     parser.add_argument("--baseline-path", type=Path, default=BASELINE_PATH)
     parser.add_argument("--output-all-path", type=Path, default=OUTPUT_ALL_PATH)
+    parser.add_argument(
+        "--output-all-csv-path", type=Path, default=OUTPUT_ALL_CSV_PATH
+    )
     parser.add_argument("--output-sjd-path", type=Path, default=OUTPUT_SJD_PATH)
+    parser.add_argument(
+        "--output-sjd-csv-path", type=Path, default=OUTPUT_SJD_CSV_PATH
+    )
     parser.add_argument("--qc-path", type=Path, default=QC_PATH)
+    parser.add_argument("--qc-parquet-path", type=Path, default=QC_PARQUET_PATH)
     return parser.parse_args()
 
 
@@ -181,6 +202,53 @@ def build_qc(
     )
 
 
+def write_outputs(
+    spine_all: pd.DataFrame,
+    spine_sjd: pd.DataFrame,
+    qc: pd.DataFrame,
+    output_all_path: Path,
+    output_all_csv_path: Path,
+    output_sjd_path: Path,
+    output_sjd_csv_path: Path,
+    qc_path: Path,
+    qc_parquet_path: Path,
+) -> None:
+    """Write each step-11 output in both Parquet and CSV formats.
+
+    Parameters
+    ----------
+    spine_all : pd.DataFrame
+        Complete clinical-episode spine.
+    spine_sjd : pd.DataFrame
+        SjD-only clinical-episode spine.
+    qc : pd.DataFrame
+        One-row quality-control summary.
+    output_all_path, output_all_csv_path : Path
+        Parquet and CSV destinations for the complete spine.
+    output_sjd_path, output_sjd_csv_path : Path
+        Parquet and CSV destinations for the SjD-only spine.
+    qc_path, qc_parquet_path : Path
+        CSV and Parquet destinations for the quality-control summary.
+    """
+    paths = (
+        output_all_path,
+        output_all_csv_path,
+        output_sjd_path,
+        output_sjd_csv_path,
+        qc_path,
+        qc_parquet_path,
+    )
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    spine_all.to_parquet(output_all_path, index=False)
+    spine_all.to_csv(output_all_csv_path, index=False)
+    spine_sjd.to_parquet(output_sjd_path, index=False)
+    spine_sjd.to_csv(output_sjd_csv_path, index=False)
+    qc.to_csv(qc_path, index=False)
+    qc.to_parquet(qc_parquet_path, index=False)
+
+
 def main() -> None:
     """Read steps 09d and 10, validate them, and write definitive spines."""
     args = parse_args()
@@ -192,11 +260,17 @@ def main() -> None:
     spine_all, spine_sjd = build_spines(episodes, baseline)
     qc = build_qc(episodes, spine_all, spine_sjd)
 
-    for path in (args.output_all_path, args.output_sjd_path, args.qc_path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-    spine_all.to_parquet(args.output_all_path, index=False)
-    spine_sjd.to_parquet(args.output_sjd_path, index=False)
-    qc.to_csv(args.qc_path, index=False)
+    write_outputs(
+        spine_all,
+        spine_sjd,
+        qc,
+        args.output_all_path,
+        args.output_all_csv_path,
+        args.output_sjd_path,
+        args.output_sjd_csv_path,
+        args.qc_path,
+        args.qc_parquet_path,
+    )
 
     row = qc.iloc[0]
     logger.info("patients_all=%d", row["patients_all"])
@@ -211,6 +285,17 @@ def main() -> None:
         "patients_sjd_without_clinical_baseline=%d",
         row["patients_sjd_without_clinical_baseline"],
     )
+    logger.info(
+        "Wrote complete spine to %s and %s",
+        args.output_all_path,
+        args.output_all_csv_path,
+    )
+    logger.info(
+        "Wrote SjD spine to %s and %s",
+        args.output_sjd_path,
+        args.output_sjd_csv_path,
+    )
+    logger.info("Wrote QC report to %s and %s", args.qc_path, args.qc_parquet_path)
     logger.info("Episode count and clinical_episode_id set were preserved")
 
 
