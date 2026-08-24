@@ -392,13 +392,14 @@ def hard_qc(before: pd.DataFrame, after: pd.DataFrame) -> dict[str, int]:
     for column in DATE_COLUMNS:
         left = pd.to_datetime(aligned[f"{column}_before"], errors="coerce")
         right = pd.to_datetime(aligned[f"{column}_after"], errors="coerce")
-        metrics[f"{column}s_changed" if column.endswith("date") else f"{column}_changed"] = int(~(left.eq(right) | (left.isna() & right.isna())).sum())
+        same = left.eq(right) | (left.isna() & right.isna())
+        metrics[f"{column}s_changed" if column.endswith("date") else f"{column}_changed"] = int((~same).sum())
     failures = [
         metrics["patients_before"] != metrics["patients_after"],
         metrics["episodes_before"] != metrics["episodes_after"], before_keys != after_keys,
         metrics["duplicated_patient_episode_before"] > 0,
         metrics["duplicated_patient_episode_after"] > 0,
-        any(metrics[f"{column}s_changed"] for column in DATE_COLUMNS),
+        any(metrics[f"{column}s_changed"] > 0 for column in DATE_COLUMNS),
     ]
     if any(failures):
         raise ValueError(f"Hard episode-architecture QC failed: {metrics}")
