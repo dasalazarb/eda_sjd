@@ -95,3 +95,26 @@ def test_multiple_baseline_matches_are_rejected() -> None:
 
     with pytest.raises(ValueError, match="more than one clinical baseline"):
         module.hard_qc(spine)
+
+
+def test_write_outputs_creates_csv_and_parquet_pairs(tmp_path: Path) -> None:
+    spine_all, spine_sjd = module.build_spines(episodes(), baselines())
+    qc = module.build_qc(episodes(), spine_all, spine_sjd)
+    paths = {
+        "output_all_path": tmp_path / "analytic" / "all.parquet",
+        "output_all_csv_path": tmp_path / "analytic" / "all.csv",
+        "output_sjd_path": tmp_path / "analytic" / "sjd.parquet",
+        "output_sjd_csv_path": tmp_path / "analytic" / "sjd.csv",
+        "qc_path": tmp_path / "reports" / "qc.csv",
+        "qc_parquet_path": tmp_path / "reports" / "qc.parquet",
+    }
+
+    module.write_outputs(spine_all, spine_sjd, qc, **paths)
+
+    assert all(path.is_file() for path in paths.values())
+    assert len(pd.read_parquet(paths["output_all_path"])) == len(spine_all)
+    assert len(pd.read_csv(paths["output_all_csv_path"])) == len(spine_all)
+    assert len(pd.read_parquet(paths["output_sjd_path"])) == len(spine_sjd)
+    assert len(pd.read_csv(paths["output_sjd_csv_path"])) == len(spine_sjd)
+    assert pd.read_parquet(paths["qc_parquet_path"]).equals(qc)
+    assert pd.read_csv(paths["qc_path"]).columns.tolist() == qc.columns.tolist()
