@@ -333,49 +333,67 @@ def _episode_visit_type(rows: pd.DataFrame) -> str:
     return "ambiguous"
 
 
-def _normalized_episode_intervals(rows: pd.DataFrame) -> set[str]:
-    """Return normalized, nonmissing source interval labels for an episode."""
-    normalized: set[str] = set()
+def _episode_interval_values(rows: pd.DataFrame) -> set[str]:
+    """Return the original, nonmissing interval labels carried by an episode."""
+    intervals: set[str] = set()
     for involved in rows["interval_names_involved"]:
         values = involved if isinstance(involved, (list, tuple, set)) else (involved,)
         for value in values:
             if pd.isna(value):
                 continue
-            parts = [
-                re.sub(r"\s+", "", part)
-                for part in re.split(r"[/|,;]+", str(value).strip().lower())
-                if part.strip()
-            ]
-            if parts:
-                normalized.add("/".join(parts))
-    return normalized
+            interval = str(value).strip()
+            if interval:
+                intervals.add(interval)
+    return intervals
+
+
+def _normalized_interval_name(interval_name: str) -> str:
+    """Normalize an interval label for comparison without changing provenance."""
+    return re.sub(r"\s+", " ", interval_name.strip().casefold())
+
+
+def _canonical_interval_name(interval_name: str) -> str:
+    """Map a real CTDB interval label to its comparison-only category."""
+    normalized = _normalized_interval_name(interval_name)
+    exact_categories = {
+        "natural history protocol 478 interval": "natural_history",
+        "phase 1: initial full evaluation": "phase1_full_1",
+        "phase 1: second full evaluation": "phase1_full_2",
+        "phase 1: final full (third full) evaluation": "phase1_full_3",
+        "phase 2: 4th full evaluation": "phase2_full",
+        "phase 2: 5th full evaluation": "phase2_full",
+    }
+    if normalized in exact_categories:
+        return exact_categories[normalized]
+    if re.fullmatch(r"optional evaluation [1-4]", normalized):
+        return "optional_evaluation"
+    if re.fullmatch(r"15d optional evaluation [1-5]", normalized):
+        return "natural_history_optional"
+    return "unrecognized"
 
 
 def _interval_compatibility(left: pd.DataFrame, right: pd.DataFrame) -> str:
     """Classify exact or natural-visit-family interval compatibility."""
-    left_intervals = _normalized_episode_intervals(left)
-    right_intervals = _normalized_episode_intervals(right)
-    if left_intervals & right_intervals:
+    left_original = _episode_interval_values(left)
+    right_original = _episode_interval_values(right)
+    left_normalized = {
+        _normalized_interval_name(interval) for interval in left_original
+    }
+    right_normalized = {
+        _normalized_interval_name(interval) for interval in right_original
+    }
+    if left_normalized & right_normalized:
         return "exact_same_interval"
-
-    def natural_tokens(intervals: set[str]) -> set[str]:
-        return {
-            token
-            for interval in intervals
-            for token in interval.split("/")
-            if re.fullmatch(r"vn|ovn\d+", token)
-        }
-
-    left_natural = natural_tokens(left_intervals)
-    right_natural = natural_tokens(right_intervals)
+    natural_categories = {"natural_history", "natural_history_optional"}
+    left_categories = {_canonical_interval_name(interval) for interval in left_original}
+    right_categories = {
+        _canonical_interval_name(interval) for interval in right_original
+    }
     if (
-        left_natural
-        and right_natural
-        and all(
-            re.fullmatch(r"vn|ovn\d+", token)
-            for interval in left_intervals | right_intervals
-            for token in interval.split("/")
-        )
+        left_categories
+        and right_categories
+        and left_categories <= natural_categories
+        and right_categories <= natural_categories
     ):
         return "natural_visit_family"
     return "none"
@@ -575,10 +593,10 @@ def backward_reconciliation(
                             map(str, right["original_ids"])
                         ),
                         "intervals_a": " | ".join(
-                            sorted(_normalized_episode_intervals(left["rows"]))
+                            sorted(_episode_interval_values(left["rows"]))
                         ),
                         "intervals_b": " | ".join(
-                            sorted(_normalized_episode_intervals(right["rows"]))
+                            sorted(_episode_interval_values(right["rows"]))
                         ),
                         "gap_days": details["gap_days"],
                         "combined_span_days": details["combined_span_days"],
