@@ -219,6 +219,14 @@ def build_comparison(episodes: pd.DataFrame) -> pd.DataFrame:
         baseline["_manual_review"].fillna(False).astype(bool)
         | comparison["clinical_baseline_episode_id"].isna()
     )
+    comparison.loc[
+        comparison["clinical_baseline_episode_id"].isna(),
+        "baseline_manual_review_required",
+    ] = True
+    assert comparison.loc[
+        comparison["clinical_baseline_episode_id"].isna(),
+        "baseline_manual_review_required",
+    ].all()
     comparison = comparison.reset_index().merge(
         _patient_sjogrens_classes(work), on="patient_id", how="left", validate="one_to_one"
     )
