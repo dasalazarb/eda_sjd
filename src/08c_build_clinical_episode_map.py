@@ -8,6 +8,7 @@ complementary and their dates meet the documented seven- or fourteen-day rule.
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -28,6 +29,7 @@ QC_DIR = REPORTS_DIR / "clinical_episode_map"
 MISSED_BACKWARD_MERGES_FILENAME = "08c_possible_missed_backward_merges.csv"
 BACKWARD_SUMMARY_FILENAME = "08c_backward_reconciliation_summary.csv"
 BACKWARD_LOG_FILENAME = "08c_backward_reconciliation_log.csv"
+EXTENDED_VISIT_REVIEW_FILENAME = "08c_extended_visit_exception_review.csv"
 PREVIOUS_EPISODES_PATH = REPORTS_DIR / "visit_episode_audit" / "02_episode_summary.csv"
 PREVIOUS_CANDIDATES_PATH = (
     REPORTS_DIR / "visit_episode_audit" / "08b_composite_episode_candidates.csv"
@@ -331,6 +333,54 @@ def _episode_visit_type(rows: pd.DataFrame) -> str:
     return "ambiguous"
 
 
+def _normalized_episode_intervals(rows: pd.DataFrame) -> set[str]:
+    """Return normalized, nonmissing source interval labels for an episode."""
+    normalized: set[str] = set()
+    for involved in rows["interval_names_involved"]:
+        values = involved if isinstance(involved, (list, tuple, set)) else (involved,)
+        for value in values:
+            if pd.isna(value):
+                continue
+            parts = [
+                re.sub(r"\s+", "", part)
+                for part in re.split(r"[/|,;]+", str(value).strip().lower())
+                if part.strip()
+            ]
+            if parts:
+                normalized.add("/".join(parts))
+    return normalized
+
+
+def _interval_compatibility(left: pd.DataFrame, right: pd.DataFrame) -> str:
+    """Classify exact or natural-visit-family interval compatibility."""
+    left_intervals = _normalized_episode_intervals(left)
+    right_intervals = _normalized_episode_intervals(right)
+    if left_intervals & right_intervals:
+        return "exact_same_interval"
+
+    def natural_tokens(intervals: set[str]) -> set[str]:
+        return {
+            token
+            for interval in intervals
+            for token in interval.split("/")
+            if re.fullmatch(r"vn|ovn\d+", token)
+        }
+
+    left_natural = natural_tokens(left_intervals)
+    right_natural = natural_tokens(right_intervals)
+    if (
+        left_natural
+        and right_natural
+        and all(
+            re.fullmatch(r"vn|ovn\d+", token)
+            for interval in left_intervals | right_intervals
+            for token in interval.split("/")
+        )
+    ):
+        return "natural_visit_family"
+    return "none"
+
+
 def _backward_merge_decision(
     left: pd.DataFrame, right: pd.DataFrame
 ) -> tuple[str | None, dict[str, object]]:
@@ -351,6 +401,8 @@ def _backward_merge_decision(
         "b_has_esspri": bool(right_evidence.has_esspri_form),
         "combined_has_essdai": bool(combined.has_essdai_form),
         "combined_has_esspri": bool(combined.has_esspri_form),
+        "special_extended_visit_exception": False,
+        "interval_compatibility_type": "none",
     }
     if left_dates.empty or right_dates.empty:
         return None, details
@@ -375,11 +427,6 @@ def _backward_merge_decision(
     right_candidate = bool(right_evidence.clinical_candidate)
     if not (left_candidate or right_candidate) or (left_candidate and right_candidate):
         return None, details
-    details["eligible_pair"] = True
-    if combined_span > 14:
-        details["rejection"] = "span_gt14"
-        return None, details
-
     clinical_flags = list(
         dict.fromkeys((*CORE_FLAGS, *OBJECTIVE_FLAGS, "has_esspri_form"))
     )
@@ -398,6 +445,27 @@ def _backward_merge_decision(
     )
     details["reunited_essdai_esspri"] = reunited
     details["clinical_components_added"] = len(added_flags)
+    details["eligible_pair"] = True
+    if combined_span > 14:
+        compatibility = _interval_compatibility(left, right)
+        details["interval_compatibility_type"] = compatibility
+        strong_complementarity = (
+            reunited
+            or (compatibility == "exact_same_interval" and len(added_flags) >= 1)
+            or (compatibility == "natural_visit_family" and len(added_flags) >= 2)
+        )
+        if compatibility == "none":
+            details["rejection"] = "span_gt14_incompatible_intervals"
+            return None, details
+        if not strong_complementarity:
+            details["rejection"] = "span_gt14_insufficient_complementarity"
+            return None, details
+        details["special_extended_visit_exception"] = True
+        if reunited and compatibility == "natural_visit_family":
+            return "extended_natural_visit_reunites_essdai_esspri", details
+        if compatibility == "exact_same_interval":
+            return "extended_same_interval_clinical_episode", details
+        return "extended_natural_visit_family_episode", details
     if gap_days <= 7 and (reunited or added_flags):
         reason = (
             "reunites_essdai_esspri"
@@ -418,7 +486,7 @@ def _backward_merge_decision(
 
 def backward_reconciliation(
     assigned_units: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Iteratively reconcile consecutive episodes and regenerate their IDs.
 
     Parameters
@@ -428,8 +496,8 @@ def backward_reconciliation(
 
     Returns
     -------
-    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
-        Reassigned units, one-row reconciliation summary, and merge audit log.
+    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        Reassigned units, one-row summary, merge log, and extended-span review.
     """
     log_columns = [
         "patient_id",
@@ -449,11 +517,31 @@ def backward_reconciliation(
         "b_has_esspri",
         "combined_has_essdai",
         "combined_has_esspri",
+        "special_extended_visit_exception",
+        "interval_compatibility_type",
         "merge_reason",
         "reunited_essdai_esspri",
         "new_clinical_episode_id",
     ]
+    extended_review_columns = [
+        "patient_id",
+        "episode_a_original",
+        "episode_b_original",
+        "intervals_a",
+        "intervals_b",
+        "gap_days",
+        "combined_span_days",
+        "interval_compatibility_type",
+        "a_has_essdai",
+        "a_has_esspri",
+        "b_has_essdai",
+        "b_has_esspri",
+        "reunited_essdai_esspri",
+        "merge_performed",
+        "merge_reason",
+    ]
     log_records: list[dict[str, object]] = []
+    extended_review_records: list[dict[str, object]] = []
     rejected_span = 0
     rejected_complement = 0
     patient_merge_counts: dict[object, int] = {}
@@ -474,8 +562,40 @@ def backward_reconciliation(
             left = groups[index - 1]
             right = groups[index]
             reason, details = _backward_merge_decision(left["rows"], right["rows"])
+            if details.get("combined_span_days", 0) > 14 and details.get(
+                "eligible_pair", False
+            ):
+                extended_review_records.append(
+                    {
+                        "patient_id": patient_id,
+                        "episode_a_original": " | ".join(
+                            map(str, left["original_ids"])
+                        ),
+                        "episode_b_original": " | ".join(
+                            map(str, right["original_ids"])
+                        ),
+                        "intervals_a": " | ".join(
+                            sorted(_normalized_episode_intervals(left["rows"]))
+                        ),
+                        "intervals_b": " | ".join(
+                            sorted(_normalized_episode_intervals(right["rows"]))
+                        ),
+                        "gap_days": details["gap_days"],
+                        "combined_span_days": details["combined_span_days"],
+                        "interval_compatibility_type": details[
+                            "interval_compatibility_type"
+                        ],
+                        "a_has_essdai": details["a_has_essdai"],
+                        "a_has_esspri": details["a_has_esspri"],
+                        "b_has_essdai": details["b_has_essdai"],
+                        "b_has_esspri": details["b_has_esspri"],
+                        "reunited_essdai_esspri": details["reunited_essdai_esspri"],
+                        "merge_performed": reason is not None,
+                        "merge_reason": reason or details.get("rejection", "rejected"),
+                    }
+                )
             if reason is None:
-                if details.get("rejection") == "span_gt14":
+                if str(details.get("rejection", "")).startswith("span_gt14"):
                     rejected_span += 1
                 elif details.get("rejection") == "no_clinical_complementarity":
                     rejected_complement += 1
@@ -505,6 +625,8 @@ def backward_reconciliation(
                             "b_has_esspri",
                             "combined_has_essdai",
                             "combined_has_esspri",
+                            "special_extended_visit_exception",
+                            "interval_compatibility_type",
                         )
                     },
                     "merge_reason": reason,
@@ -546,7 +668,11 @@ def backward_reconciliation(
         else assigned_units.copy()
     )
     log = pd.DataFrame(log_records).reindex(columns=log_columns)
+    extended_review = pd.DataFrame(extended_review_records).reindex(
+        columns=extended_review_columns
+    )
     gaps = log["gap_days"] if not log.empty else pd.Series(dtype="int64")
+    extended_merges = log.loc[log["special_extended_visit_exception"].eq(True)]
     summary = pd.DataFrame(
         [
             {
@@ -567,6 +693,23 @@ def backward_reconciliation(
                 "merges_with_clinical_complementarity": len(log),
                 "candidate_merges_rejected_span_gt14": rejected_span,
                 "candidate_merges_rejected_no_clinical_complementarity": rejected_complement,
+                "extended_visit_exception_merges": len(extended_merges),
+                "extended_same_interval_merges": extended_merges[
+                    "interval_compatibility_type"
+                ]
+                .eq("exact_same_interval")
+                .sum(),
+                "extended_natural_visit_family_merges": extended_merges[
+                    "interval_compatibility_type"
+                ]
+                .eq("natural_visit_family")
+                .sum(),
+                "extended_visit_merges_reuniting_essdai_esspri": extended_merges[
+                    "reunited_essdai_esspri"
+                ].sum(),
+                "max_span_days_extended_merge": extended_merges[
+                    "combined_span_days"
+                ].max(),
                 "chains_with_multiple_merges": sum(
                     len(group["original_ids"]) > 2
                     for _, groups in final_groups
@@ -575,7 +718,7 @@ def backward_reconciliation(
             }
         ]
     )
-    return result, summary, log
+    return result, summary, log, extended_review
 
 
 def propagate_episode_assignments(
@@ -1183,9 +1326,12 @@ def main() -> None:
     flagged_rows = add_presence_flags(prepared)
     daily_units = build_daily_activity_units(flagged_rows, provenance)
     assigned_units = assign_episodes(daily_units)
-    assigned_units, backward_summary, backward_log = backward_reconciliation(
-        assigned_units
-    )
+    (
+        assigned_units,
+        backward_summary,
+        backward_log,
+        extended_visit_review,
+    ) = backward_reconciliation(assigned_units)
     assigned_rows = propagate_episode_assignments(flagged_rows, assigned_units)
     manifest = build_manifest(assigned_rows, source_intervals)
     missed_backward_merges = build_missed_backward_merge_qc(manifest)
@@ -1231,6 +1377,9 @@ def main() -> None:
     qc.to_csv(args.qc_dir / "08c_qc_summary.csv", index=False)
     backward_summary.to_csv(args.qc_dir / BACKWARD_SUMMARY_FILENAME, index=False)
     backward_log.to_csv(args.qc_dir / BACKWARD_LOG_FILENAME, index=False)
+    extended_visit_review.to_csv(
+        args.qc_dir / EXTENDED_VISIT_REVIEW_FILENAME, index=False
+    )
     missed_backward_merges.to_csv(
         args.qc_dir / MISSED_BACKWARD_MERGES_FILENAME, index=False
     )
