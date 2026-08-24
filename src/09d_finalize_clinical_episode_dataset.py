@@ -43,18 +43,21 @@ ESSDAI_WEIGHTS = {
 PROVENANCE_PIPE_COLUMNS = {
     "intervals_involved", "source_protocols", "source_rows", "multiple_specimen_ids",
     "row_id_raw", "assignment_rule", "interval_name", "ids__interval_name",
-    "source_file", "origin", "collection_date",
+    "source_file", "origin", "collection_date", "ids__subject_number",
+    "ids__time_24_hour", "time_24_hour", "source_protocol", "dup_rank",
+    "duplicate_group_id", "visit_datetime_adjustment_seconds",
 }
 LOG_COLUMNS = [
     "patient_id", "clinical_episode_id", "variable_name", "original_collapsed_value",
     "source_values", "source_dates", "source_times", "source_intervals",
     "source_protocols", "clinical_anchor_date", "selected_value",
-    "resolution_status", "resolution_method", "source_conflict",
+    "resolution_status", "resolution_method", "source_conflict", "conflict_origin",
 ]
 REVIEW_COLUMNS = [
     "patient_id", "clinical_episode_id", "variable_name", "candidate_values",
     "candidate_dates", "candidate_times", "candidate_sources", "candidate_intervals",
     "clinical_anchor_date", "automatic_rule_attempted", "reason_not_resolved",
+    "conflict_origin",
 ]
 MISSING = {"", "na", "n/a", "nan", "none", "null", "nat"}
 
@@ -342,7 +345,8 @@ def apply_essdai(output: pd.DataFrame, sources: pd.DataFrame, log: list[dict[str
                             "original_collapsed_value": joined([legacy_old, old]), **details,
                             "clinical_anchor_date": episode["clinical_anchor_date"],
                             "selected_value": value, "resolution_status": "resolved" if not is_missing(value) else "unresolved",
-                            "resolution_method": method, "source_conflict": source_conflict})
+                            "resolution_method": method, "source_conflict": source_conflict,
+                            "conflict_origin": "09c_multirow_conflict"})
     return result.drop(columns=legacy_columns)
 
 
@@ -439,6 +443,98 @@ def validate_analytical_pipes(frame: pd.DataFrame) -> None:
         )
 
 
+def resolve_residual_pipes(
+    output: pd.DataFrame,
+    sources: pd.DataFrame,
+    log_records: list[dict[str, object]],
+) -> pd.DataFrame:
+    """Resolve analytical pipes omitted from the 09c conflict report.
+
+    A pipe already present within an individual source row is ambiguous: its
+    tokens are never treated as independent candidates.  Such a value becomes
+    missing and is explicitly routed to manual review through the resolution
+    log.  Pipes produced by distinct source rows use the existing generic
+    anchor-date and timestamp hierarchy.
+
+    Parameters
+    ----------
+    output : pd.DataFrame
+        Partially finalized episode-level dataset.
+    sources : pd.DataFrame
+        Visit-level source rows carrying authoritative episode identifiers.
+    log_records : list[dict[str, object]]
+        Mutable conflict-resolution audit records.
+
+    Returns
+    -------
+    pd.DataFrame
+        Episode-level data with residual scalar analytical pipes resolved or
+        replaced by missing values.
+    """
+    result = output.copy()
+    exempt = PROVENANCE_PIPE_COLUMNS | set(IMMUTABLE)
+    source_groups = {key: rows for key, rows in sources.groupby(KEYS, sort=False)}
+    for variable in result.columns:
+        if variable in exempt or variable_group(variable) == "biopsy_pathology":
+            continue
+        pipe_mask = result[variable].fillna("").astype(str).str.contains("|", regex=False)
+        for idx in result.index[pipe_mask]:
+            episode = result.loc[idx]
+            key = (episode["patient_id"], episode["clinical_episode_id"])
+            rows = source_groups.get(key)
+            original = episode[variable]
+            source_has_pipe = False
+            if rows is not None and variable in rows:
+                populated = rows.loc[~rows[variable].map(is_missing)]
+                source_has_pipe = populated[variable].astype(str).str.contains(
+                    "|", regex=False
+                ).any()
+                details = source_details(rows, variable)
+            else:
+                details = {
+                    name: ""
+                    for name in (
+                        "source_values", "source_dates", "source_times",
+                        "source_intervals", "source_protocols",
+                    )
+                }
+            if source_has_pipe:
+                selected, status, method = (
+                    pd.NA,
+                    "unresolved",
+                    "preexisting_source_pipe",
+                )
+                origin = "preexisting_source_pipe"
+            elif rows is None or variable not in rows:
+                selected, status, method = (
+                    pd.NA,
+                    "unresolved",
+                    "unresolved_multiple_dates",
+                )
+                origin = "09c_multirow_conflict"
+            else:
+                selected, status, method = resolve_generic(
+                    rows, variable, episode["clinical_anchor_date"]
+                )
+                origin = "09c_multirow_conflict"
+            result.at[idx, variable] = selected
+            log_records.append(
+                {
+                    **dict(zip(KEYS, key)),
+                    "variable_name": variable,
+                    "original_collapsed_value": original,
+                    **details,
+                    "clinical_anchor_date": episode["clinical_anchor_date"],
+                    "selected_value": selected,
+                    "resolution_status": status,
+                    "resolution_method": method,
+                    "source_conflict": True,
+                    "conflict_origin": origin,
+                }
+            )
+    return result
+
+
 def finalize(collapsed: pd.DataFrame, sources: pd.DataFrame, conflicts: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Resolve conflicts and return the analytical data, audit log, and review queue."""
     output = collapsed.copy()
@@ -464,7 +560,9 @@ def finalize(collapsed: pd.DataFrame, sources: pd.DataFrame, conflicts: pd.DataF
                             "original_collapsed_value": conflict.get("observed_values", output.loc[mask, variable].iloc[0]),
                             **details, "clinical_anchor_date": conflict["clinical_anchor_date"],
                             "selected_value": selected, "resolution_status": status,
-                            "resolution_method": method, "source_conflict": True})
+                            "resolution_method": method, "source_conflict": True,
+                            "conflict_origin": "09c_multirow_conflict"})
+    output = resolve_residual_pipes(output, sources, log_records)
     log = pd.DataFrame(log_records, columns=LOG_COLUMNS)
     unresolved = log[log["resolution_status"].eq("unresolved")]
     review = pd.DataFrame([
@@ -474,7 +572,8 @@ def finalize(collapsed: pd.DataFrame, sources: pd.DataFrame, conflicts: pd.DataF
          "candidate_sources": row.source_protocols, "candidate_intervals": row.source_intervals,
          "clinical_anchor_date": row.clinical_anchor_date,
          "automatic_rule_attempted": row.resolution_method,
-         "reason_not_resolved": row.resolution_method}
+         "reason_not_resolved": row.resolution_method,
+         "conflict_origin": row.conflict_origin}
         for row in unresolved.itertuples()
     ], columns=REVIEW_COLUMNS)
     unresolved_keys = set(map(tuple, unresolved[KEYS].to_numpy()))
