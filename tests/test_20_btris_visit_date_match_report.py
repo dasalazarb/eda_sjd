@@ -58,9 +58,7 @@ def _spine() -> pd.DataFrame:
 
 
 def test_source_schema_qc_is_structural_and_has_one_row_per_column() -> None:
-    raw = pd.DataFrame(
-        {"Foo": ["secret"], "Bar": ["2020-01-01"], "UnitX": ["mg/dL"]}
-    )
+    raw = pd.DataFrame({"Foo": ["secret"], "Bar": ["2020-01-01"], "UnitX": ["mg/dL"]})
 
     qc = btris.build_source_schema_qc(raw, "Lab.csv")
 
@@ -90,8 +88,10 @@ def test_field_resolution_uses_only_confirmed_aliases_and_exposes_no_values() ->
     assert pd.isna(unresolved_unit["resolved_raw_column"])
     assert bool(confirmed_unit["resolved"])
     assert confirmed_unit["resolved_raw_column"] == "UnitX"
-    assert not confirmed.astype("string").isin(["secret-unit", "secret-result"]).any(
-        axis=None
+    assert (
+        not confirmed.astype("string")
+        .isin(["secret-unit", "secret-result"])
+        .any(axis=None)
     )
 
 
@@ -230,6 +230,76 @@ def test_raw_result_is_preserved_and_not_reported_is_not_negative() -> None:
     assert labs.loc[0, "result_numeric"] == 7.4
     assert pd.isna(labs.loc[1, "result_numeric"])
     assert labs.loc[1, "result_text"] == "Not Reported"
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "exact", "operator", "bound"),
+    [
+        ("7.4", 7.4, None, None),
+        (">8.0", None, ">", 8.0),
+        ("<15", None, "<", 15.0),
+        ("> 8.0", None, ">", 8.0),
+        ("Positive 1:320", None, None, None),
+    ],
+)
+def test_numeric_result_parser_separates_exact_and_censored_evidence(
+    raw_value: str,
+    exact: float | None,
+    operator: str | None,
+    bound: float | None,
+) -> None:
+    parsed = btris.parse_numeric_result(raw_value)
+
+    assert parsed.exact == exact
+    assert parsed.operator == operator
+    assert parsed.bound == bound
+    normalized = btris.normalize_lab_records(_raw(["2020-01-01"], values=[raw_value]))
+    assert normalized.loc[0, "result_operator"] == operator or (
+        operator is None and pd.isna(normalized.loc[0, "result_operator"])
+    )
+    if exact is None:
+        assert pd.isna(normalized.loc[0, "result_numeric"])
+        assert pd.isna(normalized.loc[0, "result_numeric_exact"])
+    else:
+        assert normalized.loc[0, "result_numeric"] == exact
+        assert normalized.loc[0, "result_numeric_exact"] == exact
+    if bound is None:
+        assert pd.isna(normalized.loc[0, "result_numeric_bound"])
+    else:
+        assert normalized.loc[0, "result_numeric_bound"] == bound
+
+
+def test_btris_evidence_aliases_and_normal_range_qc() -> None:
+    raw = (
+        _raw(["2020-01-01"])
+        .drop(columns="Result Status")
+        .assign(
+            **{
+                "Unit of Measure": " mg/dL ",
+                "Normal Range": " 4.0   -  10.0 ",
+                "Observation Comment": "assay documentation",
+                "Observation Note": "source note",
+                "Status": "Final",
+                "Order ID": "ORDER-1",
+            }
+        )
+    )
+    normalized = btris.normalize_lab_records(raw)
+    annotated = normalized.assign(canonical_analyte="complement_c4")
+
+    assert normalized.loc[0, "unit"] == " mg/dL "
+    assert normalized.loc[0, "reference_range_raw"] == " 4.0   -  10.0 "
+    assert normalized.loc[0, "reference_range_parse_status"] == "ambiguous"
+    assert pd.isna(normalized.loc[0, "reference_low"])
+    assert pd.isna(normalized.loc[0, "reference_high"])
+    assert normalized.loc[0, "observation_comment"] == "assay documentation"
+    assert normalized.loc[0, "observation_note"] == "source note"
+    assert normalized.loc[0, "result_status"] == "Final"
+    assert normalized.loc[0, "order_identifier"] == "ORDER-1"
+    qc = btris.build_core_normal_range_token_qc(annotated)
+    assert qc.loc[0, "normalized_normal_range"] == "4.0 - 10.0"
+    assert qc.loc[0, "n_rows"] == 1
+    assert qc.loc[0, "pct_within_analyte"] == 100.0
 
 
 def test_ro52_ro60_and_ssa_remain_distinct() -> None:

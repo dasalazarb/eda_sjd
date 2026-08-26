@@ -37,10 +37,17 @@ OUTPUT_COLUMNS = [
     "lab_date",
     "result_raw",
     "result_numeric",
+    "result_numeric_exact",
+    "result_operator",
+    "result_numeric_bound",
     "result_text",
     "unit",
+    "reference_range_raw",
     "reference_low",
     "reference_high",
+    "reference_range_parse_status",
+    "observation_comment",
+    "observation_note",
     "reported_interpretation",
     "result_status",
     "result_valid_for_analysis",
@@ -526,7 +533,12 @@ COLUMN_ALIASES = {
         "Value",
         "result_raw",
     ],
-    "unit": ["Unit", "Units", "Result Unit"],
+    "unit": ["Unit", "Units", "Result Unit", "Unit of Measure"],
+    "reference_range_raw": [
+        "Normal Range",
+        "Reference Range",
+        "Reference Interval",
+    ],
     "reference_low": ["Reference Low", "Low Reference Range", "Reference Range Low"],
     "reference_high": [
         "Reference High",
@@ -539,6 +551,8 @@ COLUMN_ALIASES = {
         "Abnormal Flag",
     ],
     "result_status": ["Result Status", "Status"],
+    "observation_comment": ["Observation Comment"],
+    "observation_note": ["Observation Note"],
 }
 PRESERVED_METADATA = {
     "specimen_datetime": ["Specimen Date Time", "Collected Date Time"],
@@ -554,10 +568,13 @@ FIELD_RESOLUTION_TARGETS = [
     "lab_date",
     "result_raw",
     "unit",
+    "reference_range_raw",
     "reference_low",
     "reference_high",
     "reported_interpretation",
     "result_status",
+    "observation_comment",
+    "observation_note",
     "specimen_datetime",
     "specimen_type",
     "order_identifier",
@@ -601,6 +618,58 @@ def _normalize_patient_id(series: pd.Series) -> pd.Series:
         .str.replace(r"^0+", "", regex=True)
     )
     return normalized.mask(normalized.isin(["", "nan", "None"]))
+
+
+@dataclass(frozen=True)
+class ParsedNumericResult:
+    """Structured numeric evidence from one raw laboratory result."""
+
+    exact: float | None
+    operator: str | None
+    bound: float | None
+
+
+_NUMBER_PATTERN = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+_CENSORED_RESULT_PATTERN = re.compile(rf"^\s*(<=|>=|<|>|=)\s*({_NUMBER_PATTERN})\s*$")
+_EXACT_RESULT_PATTERN = re.compile(rf"^\s*({_NUMBER_PATTERN})\s*$")
+_ONE_SIDED_RANGE_PATTERN = re.compile(rf"^\s*(?:<=|>=|<|>)\s*{_NUMBER_PATTERN}\s*$")
+
+
+def parse_numeric_result(value: object) -> ParsedNumericResult:
+    """Parse exact or explicitly censored numeric laboratory evidence.
+
+    Parameters
+    ----------
+    value : object
+        Raw observation value. Mixed qualitative/numeric text is not parsed.
+
+    Returns
+    -------
+    ParsedNumericResult
+        Exact values and censored bounds are kept in mutually exclusive fields.
+    """
+    if pd.isna(value):
+        return ParsedNumericResult(None, None, None)
+    text = str(value)
+    censored = _CENSORED_RESULT_PATTERN.fullmatch(text)
+    if censored:
+        return ParsedNumericResult(None, censored.group(1), float(censored.group(2)))
+    exact = _EXACT_RESULT_PATTERN.fullmatch(text)
+    if exact:
+        return ParsedNumericResult(float(exact.group(1)), None, None)
+    return ParsedNumericResult(None, None, None)
+
+
+def classify_reference_range(value: object) -> str:
+    """Classify raw range syntax without deriving clinical reference limits."""
+    if pd.isna(value) or not str(value).strip():
+        return "missing"
+    text = str(value).strip()
+    if _ONE_SIDED_RANGE_PATTERN.fullmatch(text):
+        return "one_sided"
+    if not re.search(r"\d", text):
+        return "non_numeric_text"
+    return "ambiguous"
 
 
 def build_source_schema_qc(raw: pd.DataFrame, source_file: str) -> pd.DataFrame:
@@ -750,8 +819,22 @@ def normalize_lab_records(
     out["patient_id"] = _normalize_patient_id(out["patient_id"])
     out["lab_date"] = pd.to_datetime(out["lab_date"], errors="coerce").dt.normalize()
     out["result_raw"] = out["result_raw"].astype("string")
-    out["result_numeric"] = pd.to_numeric(out["result_raw"], errors="coerce")
-    out["result_text"] = out["result_raw"].where(out["result_numeric"].isna())
+    parsed_results = out["result_raw"].map(parse_numeric_result)
+    out["result_numeric_exact"] = pd.to_numeric(
+        parsed_results.map(lambda result: result.exact), errors="coerce"
+    )
+    out["result_operator"] = parsed_results.map(lambda result: result.operator).astype(
+        "string"
+    )
+    out["result_numeric_bound"] = pd.to_numeric(
+        parsed_results.map(lambda result: result.bound), errors="coerce"
+    )
+    # Compatibility contract: censored bounds are never exact measurements.
+    out["result_numeric"] = out["result_numeric_exact"]
+    out["result_text"] = out["result_raw"].where(out["result_numeric_exact"].isna())
+    out["reference_range_parse_status"] = out["reference_range_raw"].map(
+        classify_reference_range
+    )
     invalid_text = (
         out["result_raw"]
         .fillna("")
@@ -1186,6 +1269,14 @@ def normalize_qualitative_token(value: object) -> object:
     return str(value).strip().casefold()
 
 
+def normalize_normal_range(value: object) -> object:
+    """Normalize whitespace and case for range-token QC without losing syntax."""
+    if pd.isna(value):
+        return pd.NA
+    normalized = re.sub(r"\s+", " ", str(value).strip()).casefold()
+    return normalized if normalized else pd.NA
+
+
 def build_core_interpretation_evidence_qc(labs: pd.DataFrame) -> pd.DataFrame:
     """Summarize available interpretation evidence for core analytes.
 
@@ -1213,9 +1304,12 @@ def build_core_interpretation_evidence_qc(labs: pd.DataFrame) -> pd.DataFrame:
         counts = {
             "result_raw": count("result_raw"),
             "result_numeric": count("result_numeric"),
+            "result_operator": count("result_operator"),
+            "result_numeric_bound": count("result_numeric_bound"),
             "result_text": count("result_text"),
             "unit": count("unit"),
             "reported_interpretation": count("reported_interpretation"),
+            "reference_range_raw": count("reference_range_raw"),
             "reference_low": count("reference_low"),
             "reference_high": count("reference_high"),
         }
@@ -1229,9 +1323,12 @@ def build_core_interpretation_evidence_qc(labs: pd.DataFrame) -> pd.DataFrame:
                     f"pct_{name}_nonmissing": percent(counts[name])
                     for name in [
                         "result_numeric",
+                        "result_operator",
+                        "result_numeric_bound",
                         "result_text",
                         "unit",
                         "reported_interpretation",
+                        "reference_range_raw",
                         "reference_low",
                         "reference_high",
                     ]
@@ -1266,9 +1363,7 @@ def build_core_qualitative_token_qc(labs: pd.DataFrame) -> pd.DataFrame:
     )
     selected = selected.dropna(subset=["normalized_result_text"])
     counts = (
-        selected.groupby(
-            ["canonical_analyte", "normalized_result_text"], dropna=False
-        )
+        selected.groupby(["canonical_analyte", "normalized_result_text"], dropna=False)
         .size()
         .rename("n_rows")
         .reset_index()
@@ -1282,10 +1377,43 @@ def build_core_qualitative_token_qc(labs: pd.DataFrame) -> pd.DataFrame:
                 "pct_within_analyte",
             ]
         )
-    counts["pct_within_analyte"] = counts["n_rows"] / counts.groupby(
-        "canonical_analyte"
-    )["n_rows"].transform("sum") * 100
+    counts["pct_within_analyte"] = (
+        counts["n_rows"]
+        / counts.groupby("canonical_analyte")["n_rows"].transform("sum")
+        * 100
+    )
     return counts
+
+
+def build_core_normal_range_token_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate raw normal-range formats without patient or result details."""
+    selected = labs[
+        labs["canonical_analyte"].isin(INTERPRETATION_EVIDENCE_ANALYTES[:8])
+    ].copy()
+    selected["normalized_normal_range"] = selected["reference_range_raw"].map(
+        normalize_normal_range
+    )
+    selected = selected.dropna(subset=["normalized_normal_range"])
+    counts = (
+        selected.groupby(["canonical_analyte", "normalized_normal_range"], dropna=False)
+        .size()
+        .rename("n_rows")
+        .reset_index()
+    )
+    columns = [
+        "canonical_analyte",
+        "normalized_normal_range",
+        "n_rows",
+        "pct_within_analyte",
+    ]
+    if counts.empty:
+        return pd.DataFrame(columns=columns)
+    counts["pct_within_analyte"] = (
+        counts["n_rows"]
+        / counts.groupby("canonical_analyte")["n_rows"].transform("sum")
+        * 100
+    )
+    return counts[columns]
 
 
 def build_core_mapping_qc(labs: pd.DataFrame) -> pd.DataFrame:
@@ -1425,6 +1553,7 @@ def main() -> None:
     core_qc = build_core_mapping_qc(labs)
     interpretation_evidence_qc = build_core_interpretation_evidence_qc(labs)
     qualitative_token_qc = build_core_qualitative_token_qc(labs)
+    normal_range_token_qc = build_core_normal_range_token_qc(labs)
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.report_dir.mkdir(parents=True, exist_ok=True)
     labs[
@@ -1432,9 +1561,7 @@ def main() -> None:
         + [column for column in PRESERVED_METADATA if column in labs.columns]
     ].to_parquet(config.output_path, index=False)
     coverage.to_csv(config.report_dir / "20_lab_cluster_coverage.csv", index=False)
-    schema_qc.to_csv(
-        config.report_dir / "20_btris_source_schema_qc.csv", index=False
-    )
+    schema_qc.to_csv(config.report_dir / "20_btris_source_schema_qc.csv", index=False)
     field_resolution_qc.to_csv(
         config.report_dir / "20_btris_field_resolution_qc.csv", index=False
     )
@@ -1443,6 +1570,9 @@ def main() -> None:
     )
     qualitative_token_qc.to_csv(
         config.report_dir / "20_core_qualitative_token_qc.csv", index=False
+    )
+    normal_range_token_qc.to_csv(
+        config.report_dir / "20_core_normal_range_token_qc.csv", index=False
     )
     alias_qc.to_csv(config.report_dir / "20_lab_alias_mapping_qc.csv", index=False)
     semantic_qc.to_csv(
