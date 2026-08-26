@@ -144,6 +144,18 @@ def interpret_result(
                 return Interpretation(True, source, "interpretable")
             if token in NEGATIVE:
                 return Interpretation(False, source, "interpretable")
+        numeric = pd.to_numeric(row.get("result_numeric"), errors="coerce")
+        reference_high = pd.to_numeric(row.get("reference_high"), errors="coerce")
+        if pd.notna(numeric) and pd.notna(reference_high):
+            return Interpretation(
+                bool(numeric > reference_high), "reference_range", "interpretable"
+            )
+        if pd.notna(numeric) and prespecified_cutoff is not None:
+            return Interpretation(
+                bool(numeric > prespecified_cutoff),
+                "prespecified_cutoff",
+                "interpretable",
+            )
     elif kind == "low":
         if reported in LOW:
             return Interpretation(True, "reported_interpretation", "interpretable")
@@ -189,15 +201,40 @@ def temporal_window(days: Any, stable: bool = False) -> str:
 
 
 def _same_identity(left: pd.Series, right: pd.Series) -> bool:
-    keys = ["specimen_datetime", "specimen_type", "order_identifier", "assay"]
-    comparable = [
-        key
-        for key in keys
-        if key in left.index and pd.notna(left[key]) and pd.notna(right[key])
-    ]
-    return bool(comparable) and all(
-        str(left[key]) == str(right[key]) for key in comparable
+    """Return whether two rows have strong evidence of one logical observation.
+
+    Specimen type is deliberately excluded as identity evidence: values such as
+    ``Blood`` are shared by unrelated draws and assays.
+    """
+
+    def same_nonmissing(key: str) -> bool:
+        return (
+            key in left.index
+            and key in right.index
+            and pd.notna(left[key])
+            and pd.notna(right[key])
+            and str(left[key]).strip() != ""
+            and str(right[key]).strip() != ""
+            and str(left[key]) == str(right[key])
+        )
+
+    if same_nonmissing("order_identifier"):
+        return True
+    if not same_nonmissing("specimen_datetime"):
+        return False
+    if same_nonmissing("assay"):
+        return True
+    return same_nonmissing("order_name_original") and same_nonmissing(
+        "cluster_name_original"
     )
+
+
+def _all_same_identity(records: pd.DataFrame) -> bool:
+    """Return whether every row is strongly linked to the first row."""
+    if len(records) < 2:
+        return True
+    first = records.iloc[0]
+    return all(_same_identity(first, row) for _, row in records.iloc[1:].iterrows())
 
 
 def _result_signature(row: pd.Series, kind: str) -> tuple[Any, ...]:
@@ -223,26 +260,40 @@ def resolve_day(records: pd.DataFrame, kind: str, ana: bool = False) -> dict[str
             "provenance": "[]",
         }
     work = records.copy()
-    provenance = (
+    provenance = sorted(
         work.get("observation_identifier", work.index.to_series()).astype(str).tolist()
     )
     signatures = work.apply(lambda row: _result_signature(row, kind), axis=1)
     if signatures.nunique(dropna=False) == 1:
-        sort_columns = [c for c in ["observation_identifier"] if c in work]
+        sort_columns = [
+            column
+            for column in [
+                "order_identifier",
+                "specimen_datetime",
+                "assay",
+                "order_name_original",
+                "cluster_name_original",
+                "observation_identifier",
+            ]
+            if column in work
+        ]
         chosen = (
             work.sort_values(by=sort_columns, kind="stable") if sort_columns else work
         )
         return {
             "row": chosen.iloc[0],
             "conflict": False,
-            "deduplicated": len(work) > 1,
+            "deduplicated": len(work) > 1 and _all_same_identity(work),
             "selected_final": False,
             "source_priority": False,
             "provenance": json.dumps(provenance),
         }
     statuses = work["result_status"].map(_norm)
     final = work[statuses.isin(FINAL)]
-    if len(final) == 1:
+    if len(final) == 1 and all(
+        _same_identity(final.iloc[0], row)
+        for _, row in work[~work.index.isin(final.index)].iterrows()
+    ):
         return {
             "row": final.iloc[0],
             "conflict": False,
@@ -305,6 +356,7 @@ def _blank(patient: pd.Series, feature: str, has_labs: bool) -> dict[str, Any]:
         "reference_low": pd.NA,
         "reference_high": pd.NA,
         "n_prebaseline_measurements": 0,
+        "n_eligible_prebaseline_measurements": 0,
         "n_interpretable_prebaseline_measurements": 0,
         "n_postbaseline_measurements": 0,
         "n_total_measurements": 0,
@@ -497,6 +549,7 @@ def derive_dynamic_feature(
     out.update(
         {
             "n_prebaseline_measurements": len(all_pre),
+            "n_eligible_prebaseline_measurements": len(eligible_pre),
             "n_interpretable_prebaseline_measurements": int(
                 interpreted_pre.notna().sum()
             ),
@@ -540,8 +593,50 @@ def derive_dynamic_feature(
     return out
 
 
-def validate_inputs(labs: pd.DataFrame, spine: pd.DataFrame) -> int:
-    """Validate schemas, patient uniqueness, and authoritative baselines."""
+def build_patient_baseline_frame(episode_spine: pd.DataFrame) -> pd.DataFrame:
+    """Collapse an episode-level spine to coherent patient baseline metadata.
+
+    Parameters
+    ----------
+    episode_spine : pd.DataFrame
+        Clinical spine with one row per patient and clinical episode.
+
+    Returns
+    -------
+    pd.DataFrame
+        Exactly one row per patient after removing only fully equivalent
+        patient-level baseline metadata.
+
+    Raises
+    ------
+    ValueError
+        If required columns are absent or one patient has conflicting baseline
+        episode/date combinations.
+    """
+    required_spine = [
+        "patient_id",
+        "clinical_baseline_episode_id",
+        "clinical_baseline_date",
+    ]
+    if missing_spine := set(required_spine) - set(episode_spine.columns):
+        raise ValueError(f"Spine missing required columns: {sorted(missing_spine)}")
+
+    patient_spine = episode_spine[required_spine].copy()
+    patient_spine["clinical_baseline_date"] = pd.to_datetime(
+        patient_spine["clinical_baseline_date"], errors="coerce"
+    )
+    patient_spine = patient_spine.drop_duplicates()
+    conflicts = patient_spine[patient_spine["patient_id"].duplicated(keep=False)]
+    if not conflicts.empty:
+        raise ValueError(
+            "Clinical episode spine contains conflicting patient-level "
+            "clinical baseline metadata"
+        )
+    return patient_spine.reset_index(drop=True)
+
+
+def validate_inputs(labs: pd.DataFrame, patient_spine: pd.DataFrame) -> int:
+    """Validate the lab schema and agreement with patient-level baselines."""
     missing = REQUIRED_LAB_COLUMNS - set(labs.columns)
     if missing:
         raise ValueError(f"Step 20 input missing required columns: {sorted(missing)}")
@@ -550,14 +645,14 @@ def validate_inputs(labs: pd.DataFrame, spine: pd.DataFrame) -> int:
         "clinical_baseline_episode_id",
         "clinical_baseline_date",
     }
-    if missing_spine := required_spine - set(spine.columns):
+    if missing_spine := required_spine - set(patient_spine.columns):
         raise ValueError(f"Spine missing required columns: {sorted(missing_spine)}")
-    if spine["patient_id"].duplicated().any():
-        raise ValueError("Spine must contain one row per patient_id")
+    if patient_spine["patient_id"].duplicated().any():
+        raise ValueError("Patient baseline frame must contain one row per patient_id")
     check = labs[
         ["patient_id", "clinical_baseline_episode_id", "clinical_baseline_date"]
     ].merge(
-        spine[list(required_spine)],
+        patient_spine[list(required_spine)],
         on="patient_id",
         how="left",
         suffixes=("_lab", "_spine"),
@@ -840,7 +935,7 @@ def build_qc(
         "dynamic_rescue_with_eligible_prebaseline": int(
             (
                 dynamic["postbaseline_rescue"]
-                & dynamic["days_from_clinical_baseline"].between(-365, 0)
+                & (dynamic["n_eligible_prebaseline_measurements"] > 0)
             ).sum()
         ),
         "conflict_with_nonmissing_primary": int(
@@ -981,17 +1076,13 @@ def run(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run baseline-lab derivation and write outputs before failing hard QC."""
     logger = setup_logger("20b_btris_baseline_labs")
-    labs, spine = pd.read_parquet(lab_path), pd.read_parquet(spine_path)
-    spine = spine[
-        ["patient_id", "clinical_baseline_episode_id", "clinical_baseline_date"]
-    ].copy()
-    spine["clinical_baseline_date"] = pd.to_datetime(
-        spine["clinical_baseline_date"], errors="coerce"
-    )
-    mismatches = validate_inputs(labs, spine)
-    long, wide = derive_long(labs, spine), None
-    wide = derive_wide(long, spine)
-    reports, hard_qc = build_qc(long, wide, labs, spine, mismatches)
+    labs = pd.read_parquet(lab_path)
+    episode_spine = pd.read_parquet(spine_path)
+    patient_spine = build_patient_baseline_frame(episode_spine)
+    mismatches = validate_inputs(labs, patient_spine)
+    long = derive_long(labs, patient_spine)
+    wide = derive_wide(long, patient_spine)
+    reports, hard_qc = build_qc(long, wide, labs, patient_spine, mismatches)
     long_path.parent.mkdir(parents=True, exist_ok=True)
     qc_dir.mkdir(parents=True, exist_ok=True)
     long.to_parquet(long_path, index=False)
@@ -1001,7 +1092,7 @@ def run(
     summary = reports["20b_baseline_lab_selection_summary.csv"]
     logger.info(
         "Patients spine=%d eligible=%d any_BTRIS=%d",
-        len(spine),
+        len(patient_spine),
         wide["lab_baseline_eligible"].sum(),
         wide["has_any_btris_lab"].sum(),
     )

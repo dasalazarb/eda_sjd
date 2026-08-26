@@ -181,6 +181,28 @@ def test_low_interpretation_never_invents_cutoff(
         assert result.interpreted_status is expected
 
 
+@pytest.mark.parametrize(
+    ("numeric", "reference_high", "expected"),
+    [(11, 10, True), (10, 10, False), (9, 10, False)],
+)
+def test_numeric_serology_uses_contemporaneous_reference_high(
+    numeric: float, reference_high: float, expected: bool
+) -> None:
+    """Quantitative serology is interpreted only against available assay range."""
+    result = MODULE.interpret_result(
+        {"result_numeric": numeric, "reference_high": reference_high}, "positive"
+    )
+    assert result.interpreted_status is expected
+    assert result.interpretation_source == "reference_range"
+
+
+def test_numeric_serology_without_range_or_cutoff_is_missing() -> None:
+    """A quantitative serology value alone does not imply positivity."""
+    result = MODULE.interpret_result({"result_numeric": 100}, "positive")
+    assert pd.isna(result.interpreted_status)
+    assert result.interpretation_source == "uninterpretable"
+
+
 def test_cryoglobulin_direct_only_and_historical_status() -> None:
     """IFE does not substitute, and old direct positivity remains historical."""
     ife = MODULE.derive_dynamic_feature(
@@ -213,6 +235,7 @@ def test_equivalent_final_and_conflicting_same_day_resolution() -> None:
                 result_numeric=3,
                 reference_low=4,
                 observation_identifier="a",
+                order_identifier="order-1",
             ),
             record(
                 "wbc",
@@ -221,6 +244,7 @@ def test_equivalent_final_and_conflicting_same_day_resolution() -> None:
                 result_numeric=3,
                 reference_low=4,
                 observation_identifier="b",
+                order_identifier="order-1",
             ),
         ]
     )
@@ -240,6 +264,68 @@ def test_equivalent_final_and_conflicting_same_day_resolution() -> None:
     assert pd.isna(conflict["primary_baseline_status"])
 
 
+def test_identical_results_without_strong_identity_are_not_specimen_deduplicated() -> (
+    None
+):
+    """Same day/result and generic specimen type do not prove one specimen."""
+    rows = pd.DataFrame(
+        [
+            record(
+                "wbc",
+                0,
+                "",
+                result_numeric=3,
+                reference_low=4,
+                observation_identifier="a",
+                specimen_type="Blood",
+                assay="assay-a",
+            ),
+            record(
+                "wbc",
+                0,
+                "",
+                result_numeric=3,
+                reference_low=4,
+                observation_identifier="b",
+                specimen_type="Blood",
+                assay="assay-b",
+            ),
+        ]
+    )
+    result = MODULE.derive_dynamic_feature(patient(), rows, "leukopenia", True)
+    assert result["primary_baseline_status"] is True
+    assert result["deduplicate_same_specimen"] is False
+
+
+def test_preliminary_final_preference_requires_strong_identity() -> None:
+    """Final status cannot resolve discordant observations from distinct assays."""
+    rows = pd.DataFrame(
+        [
+            record(
+                "wbc",
+                0,
+                "",
+                result_numeric=3,
+                reference_low=4,
+                result_status="preliminary",
+                assay="assay-a",
+            ),
+            record(
+                "wbc",
+                0,
+                "",
+                result_numeric=8,
+                reference_low=4,
+                result_status="final",
+                assay="assay-b",
+            ),
+        ]
+    )
+    result = MODULE.derive_dynamic_feature(patient(), rows, "leukopenia", True)
+    assert result["same_day_conflict"] is True
+    assert pd.isna(result["primary_baseline_status"])
+
+
 def test_patient_universe_and_ineligible_patient() -> None:
     """Every spine patient gets seven rows and ineligible patients select nothing."""
     columns = list(MODULE.REQUIRED_LAB_COLUMNS | {"observation_identifier"})
@@ -253,9 +339,45 @@ def test_patient_universe_and_ineligible_patient() -> None:
     assert not wide.loc[wide["patient_id"] == "P2", "lab_baseline_eligible"].item()
 
 
-def test_duplicate_spine_patient_hard_fails() -> None:
-    """Patient-level uniqueness is enforced before derivation."""
-    labs = pd.DataFrame(columns=list(MODULE.REQUIRED_LAB_COLUMNS))
-    spine = pd.DataFrame([patient(), patient()])
-    with pytest.raises(ValueError, match="one row per patient"):
-        MODULE.validate_inputs(labs, spine)
+def test_episode_level_spine_collapses_to_one_patient() -> None:
+    """Equivalent baseline metadata across clinical episodes collapses safely."""
+    spine = pd.DataFrame(
+        [
+            {
+                "patient_id": "P1",
+                "clinical_episode_id": "E1",
+                "clinical_baseline_episode_id": "E1",
+                "clinical_baseline_date": pd.Timestamp("2020-01-01"),
+            },
+            {
+                "patient_id": "P1",
+                "clinical_episode_id": "E2",
+                "clinical_baseline_episode_id": "E1",
+                "clinical_baseline_date": pd.Timestamp("2020-01-01"),
+            },
+        ]
+    )
+    patient_spine = MODULE.build_patient_baseline_frame(spine)
+    assert len(patient_spine) == 1
+    assert patient_spine.loc[0, "patient_id"] == "P1"
+    assert patient_spine.loc[0, "clinical_baseline_episode_id"] == "E1"
+
+
+def test_conflicting_patient_baseline_hard_fails() -> None:
+    """Distinct baseline metadata for one patient fails rather than choosing one."""
+    spine = pd.DataFrame(
+        [
+            {
+                "patient_id": "P1",
+                "clinical_baseline_episode_id": "E1",
+                "clinical_baseline_date": pd.Timestamp("2020-01-01"),
+            },
+            {
+                "patient_id": "P1",
+                "clinical_baseline_episode_id": "E2",
+                "clinical_baseline_date": pd.Timestamp("2021-01-01"),
+            },
+        ]
+    )
+    with pytest.raises(ValueError, match="conflicting"):
+        MODULE.build_patient_baseline_frame(spine)
