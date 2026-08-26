@@ -59,10 +59,16 @@ def record(
     ("token", "expected"),
     [
         ("positive", True),
+        ("Positive 1:320", True),
+        ("Positive >=1:2560", True),
         ("negative", False),
+        ("<1:80 Negative", False),
+        ("<1:80 (Negative)", False),
         ("nonreactive", False),
         ("not detected", False),
+        ("Not Detectable", False),
         ("equivocal", pd.NA),
+        ("borderline", pd.NA),
         ("not reported", pd.NA),
     ],
 )
@@ -493,9 +499,7 @@ def test_stable_positive_requires_positive_prebaseline_evidence() -> None:
     long.loc[index, "n_positive_prebaseline"] = 0
     hard_qc = MODULE._build_hard_qc(long, pd.DataFrame({"patient_id": ["P1"]}), 0)
     assert (
-        _violations(
-            hard_qc, "stable_primary_positive_without_positive_prebaseline"
-        )
+        _violations(hard_qc, "stable_primary_positive_without_positive_prebaseline")
         == 1
     )
 
@@ -508,9 +512,7 @@ def test_stable_negative_requires_negative_prebaseline_evidence() -> None:
     long.loc[index, "n_negative_prebaseline"] = 0
     hard_qc = MODULE._build_hard_qc(long, pd.DataFrame({"patient_id": ["P1"]}), 0)
     assert (
-        _violations(
-            hard_qc, "stable_primary_negative_without_negative_prebaseline"
-        )
+        _violations(hard_qc, "stable_primary_negative_without_negative_prebaseline")
         == 1
     )
 
@@ -524,9 +526,7 @@ def test_stable_negative_cannot_override_positive_prebaseline_evidence() -> None
     long.loc[index, "n_negative_prebaseline"] = 1
     hard_qc = MODULE._build_hard_qc(long, pd.DataFrame({"patient_id": ["P1"]}), 0)
     assert (
-        _violations(
-            hard_qc, "stable_primary_negative_despite_positive_prebaseline"
-        )
+        _violations(hard_qc, "stable_primary_negative_despite_positive_prebaseline")
         == 1
     )
 

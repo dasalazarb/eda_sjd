@@ -61,6 +61,13 @@ OPTIONAL_PROVENANCE = [
     "order_identifier",
     "assay",
     "observation_identifier",
+    "reference_range_raw",
+    "reference_range_parse_status",
+    "result_numeric_exact",
+    "result_operator",
+    "result_numeric_bound",
+    "observation_comment",
+    "observation_note",
 ]
 FEATURES = (
     "anti_ro_ssa",
@@ -102,7 +109,14 @@ WIDE_NAMES = {
     "leukopenia": "baseline_leukopenia",
 }
 POSITIVE = {"positive", "pos", "detected", "reactive"}
-NEGATIVE = {"negative", "neg", "not detected", "nonreactive", "non reactive"}
+NEGATIVE = {
+    "negative",
+    "neg",
+    "not detected",
+    "not detectable",
+    "nonreactive",
+    "non reactive",
+}
 LOW = {"low", "below normal", "decreased"}
 NORMAL_HIGH = {"normal", "high", "within normal limits", "within range"}
 FINAL = {"final", "verified"}
@@ -170,6 +184,13 @@ def interpret_result(
             if token in POSITIVE:
                 return Interpretation(True, source, "interpretable")
             if token in NEGATIVE:
+                return Interpretation(False, source, "interpretable")
+            # ANA status is sometimes reported alongside its titer. Only the
+            # explicit standalone status word is interpreted; numeric/operator
+            # evidence remains untouched and assay-agnostic.
+            if re.search(r"\bpositive\b", token):
+                return Interpretation(True, source, "interpretable")
+            if re.search(r"\bnegative\b", token):
                 return Interpretation(False, source, "interpretable")
         numeric = pd.to_numeric(row.get("result_numeric"), errors="coerce")
         reference_high = pd.to_numeric(row.get("reference_high"), errors="coerce")
@@ -837,9 +858,7 @@ def build_core_input_evidence_qc(labs: pd.DataFrame) -> pd.DataFrame:
     for analyte, mode in CORE_INPUT_EVIDENCE_MODES.items():
         group = labs[labs["canonical_analyte"] == analyte]
         n_rows = len(group)
-        populated = {
-            column: _nonmissing(group[column]) for column in evidence_columns
-        }
+        populated = {column: _nonmissing(group[column]) for column in evidence_columns}
         counts = {column: int(mask.sum()) for column, mask in populated.items()}
         any_interpretation = (
             populated["reported_interpretation"]
@@ -900,8 +919,7 @@ def _build_hard_qc(
         ),
         "ineligible_patient_with_selected_primary": int(
             (
-                ~long["lab_baseline_eligible"]
-                & long["primary_baseline_status"].notna()
+                ~long["lab_baseline_eligible"] & long["primary_baseline_status"].notna()
             ).sum()
         ),
         "baseline_mismatch_vs_spine": mismatches,
@@ -1262,9 +1280,7 @@ def run(
             row.n_same_day_conflicts,
             row.n_longitudinal_discordance,
         )
-    evidence = reports["20b_core_input_evidence_qc.csv"].set_index(
-        "canonical_analyte"
-    )
+    evidence = reports["20b_core_input_evidence_qc.csv"].set_index("canonical_analyte")
     logger.info(
         "Core input interpretation evidence: SSA ref_high=%.1f%%; "
         "SSB ref_high=%.1f%%; RF ref_high=%.1f%%; C4 ref_low=%.1f%%; "
