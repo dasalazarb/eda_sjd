@@ -82,6 +82,16 @@ DYNAMIC_SOURCES = {
     "low_c4": "complement_c4",
     "leukopenia": "wbc",
 }
+CORE_INPUT_EVIDENCE_MODES = {
+    "anti_ro_ssa": "positive",
+    "anti_la_ssb": "positive",
+    "ana_status": "positive",
+    "ana_hep2_status": "positive",
+    "rheumatoid_factor": "positive",
+    "cryoglobulins": "positive",
+    "complement_c4": "low",
+    "wbc": "low",
+}
 WIDE_NAMES = {
     "anti_ro_ssa": "baseline_anti_ro_ssa",
     "anti_la_ssb": "baseline_anti_la_ssb",
@@ -794,6 +804,224 @@ def _status_changed(left: pd.Series, right: pd.Series) -> pd.Series:
     return ~(left.astype("string").fillna("NA") == right.astype("string").fillna("NA"))
 
 
+def _nonmissing(series: pd.Series) -> pd.Series:
+    """Identify populated values, treating blank strings as missing."""
+    return series.notna() & series.astype("string").str.strip().ne("").fillna(False)
+
+
+def build_core_input_evidence_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Summarize evidence available to interpret core laboratory analytes.
+
+    Parameters
+    ----------
+    labs : pd.DataFrame
+        Step-20 long laboratory records. Patient-level values and dates are used
+        only to calculate aggregate counts and are never included in the output.
+
+    Returns
+    -------
+    pd.DataFrame
+        One aggregate row per core canonical analyte, including availability
+        counts, row percentages, and expected interpretation mode.
+    """
+    rows: list[dict[str, Any]] = []
+    evidence_columns = [
+        "result_raw",
+        "result_numeric",
+        "result_text",
+        "reported_interpretation",
+        "reference_low",
+        "reference_high",
+        "unit",
+    ]
+    for analyte, mode in CORE_INPUT_EVIDENCE_MODES.items():
+        group = labs[labs["canonical_analyte"] == analyte]
+        n_rows = len(group)
+        populated = {
+            column: _nonmissing(group[column]) for column in evidence_columns
+        }
+        counts = {column: int(mask.sum()) for column, mask in populated.items()}
+        any_interpretation = (
+            populated["reported_interpretation"]
+            | populated["result_text"]
+            | populated["reference_low"]
+            | populated["reference_high"]
+        )
+        if mode == "positive":
+            numeric_without_evidence = (
+                populated["result_numeric"]
+                & ~populated["reference_high"]
+                & ~populated["reported_interpretation"]
+                & ~populated["result_text"]
+            )
+        else:
+            numeric_without_evidence = (
+                populated["result_numeric"]
+                & ~populated["reference_low"]
+                & ~populated["reported_interpretation"]
+            )
+        row: dict[str, Any] = {
+            "canonical_analyte": analyte,
+            "expected_interpretation_mode": mode,
+            "n_rows": n_rows,
+            "n_patients": int(group["patient_id"].nunique(dropna=True)),
+        }
+        for column in evidence_columns:
+            row[f"n_{column}_nonmissing"] = counts[column]
+            row[f"pct_{column}_nonmissing"] = (
+                counts[column] / n_rows * 100 if n_rows else 0.0
+            )
+        row.update(
+            {
+                "n_rows_with_any_interpretation_evidence": int(
+                    any_interpretation.sum()
+                ),
+                "pct_rows_with_any_interpretation_evidence": (
+                    any_interpretation.mean() * 100 if n_rows else 0.0
+                ),
+                "n_rows_numeric_but_no_reference_or_interpretation": int(
+                    numeric_without_evidence.sum()
+                ),
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _build_hard_qc(
+    long: pd.DataFrame, wide: pd.DataFrame, mismatches: int
+) -> pd.DataFrame:
+    """Build invariant checks for derived baseline laboratory statuses."""
+    dynamic = long[long["baseline_feature"].isin(DYNAMIC_SOURCES)]
+    stable = long[long["baseline_feature"].isin(STABLE_SOURCES)]
+    hard = {
+        "more_than_one_primary_per_patient_feature": int(
+            long.duplicated(["patient_id", "baseline_feature"]).sum()
+        ),
+        "ineligible_patient_with_selected_primary": int(
+            (
+                ~long["lab_baseline_eligible"]
+                & long["primary_baseline_status"].notna()
+            ).sum()
+        ),
+        "baseline_mismatch_vs_spine": mismatches,
+        "stable_primary_from_postbaseline_only": int(
+            (
+                long["baseline_feature"].isin(STABLE_SOURCES)
+                & long["primary_baseline_status"].notna()
+                & (long["n_interpretable_prebaseline_measurements"] == 0)
+            ).sum()
+        ),
+        "stable_primary_positive_without_positive_prebaseline": int(
+            (
+                stable["primary_baseline_status"].eq(True)
+                & stable["n_positive_prebaseline"].eq(0)
+            ).sum()
+        ),
+        "stable_primary_negative_without_negative_prebaseline": int(
+            (
+                stable["primary_baseline_status"].eq(False)
+                & stable["n_negative_prebaseline"].eq(0)
+            ).sum()
+        ),
+        "stable_primary_negative_despite_positive_prebaseline": int(
+            (
+                stable["primary_baseline_status"].eq(False)
+                & stable["n_positive_prebaseline"].gt(0)
+            ).sum()
+        ),
+        "dynamic_prebaseline_older_than_365d": int(
+            (
+                (dynamic["days_from_clinical_baseline"] < -365)
+                & dynamic["selected_lab_date"].notna()
+            ).sum()
+        ),
+        "dynamic_rescue_after_30d": int(
+            (
+                dynamic["postbaseline_rescue"]
+                & (dynamic["days_from_clinical_baseline"] > 30)
+            ).sum()
+        ),
+        "dynamic_rescue_with_eligible_prebaseline": int(
+            (
+                dynamic["postbaseline_rescue"]
+                & (dynamic["n_eligible_prebaseline_measurements"] > 0)
+            ).sum()
+        ),
+        "conflict_with_nonmissing_primary": int(
+            (long["same_day_conflict"] & long["result_interpretation"].notna()).sum()
+        ),
+        "ssa_from_ro52_ro60": int(
+            (
+                (long["baseline_feature"] == "anti_ro_ssa")
+                & long["source_canonical_analyte"].isin(["anti_ro52", "anti_ro60"])
+            ).sum()
+        ),
+        "ana_from_titer_pattern_only": int(
+            (
+                (long["baseline_feature"] == "ana")
+                & long["source_canonical_analyte"].isin(
+                    [
+                        "ana_hep2_titer",
+                        "ana_hep2_pattern",
+                        "ana_hep2_cytoplasmic_pattern",
+                    ]
+                )
+            ).sum()
+        ),
+        "cryoglobulinemia_from_ife_only": int(
+            (
+                (long["baseline_feature"] == "cryoglobulinemia")
+                & (long["source_canonical_analyte"] == "cryoglobulins_ife")
+            ).sum()
+        ),
+        "low_c4_without_evidence": int(
+            (
+                (long["baseline_feature"] == "low_c4")
+                & long["primary_baseline_status"].notna()
+                & ~long["interpretation_source"].isin(
+                    [
+                        "reported_interpretation",
+                        "reference_range",
+                        "prespecified_cutoff",
+                    ]
+                )
+            ).sum()
+        ),
+        "leukopenia_without_evidence": int(
+            (
+                (long["baseline_feature"] == "leukopenia")
+                & long["primary_baseline_status"].notna()
+                & ~long["interpretation_source"].isin(
+                    [
+                        "reported_interpretation",
+                        "reference_range",
+                        "prespecified_cutoff",
+                    ]
+                )
+            ).sum()
+        ),
+        "missing_uninterpretable_converted_to_negative": int(
+            (
+                long["baseline_feature"].isin(DYNAMIC_SOURCES)
+                & long["interpretation_source"].eq("uninterpretable")
+                & long["primary_baseline_status"].eq(False)
+            ).sum()
+        ),
+        "duplicate_patient_rows_wide": int(wide["patient_id"].duplicated().sum()),
+    }
+    return pd.DataFrame(
+        [
+            {
+                "qc_rule": key,
+                "n_violations": value,
+                "status": "PASS" if value == 0 else "FAIL",
+            }
+            for key, value in hard.items()
+        ]
+    )
+
+
 def build_qc(
     long: pd.DataFrame,
     wide: pd.DataFrame,
@@ -935,113 +1163,8 @@ def build_qc(
                 "n_uninterpretable": int(closest.isna().sum()),
             }
         )
-    dynamic = long[long["baseline_feature"].isin(DYNAMIC_SOURCES)]
-    hard = {
-        "more_than_one_primary_per_patient_feature": int(
-            long.duplicated(["patient_id", "baseline_feature"]).sum()
-        ),
-        "ineligible_patient_with_selected_primary": int(
-            (
-                ~long["lab_baseline_eligible"] & long["primary_baseline_status"].notna()
-            ).sum()
-        ),
-        "baseline_mismatch_vs_spine": mismatches,
-        "stable_primary_from_postbaseline_only": int(
-            (
-                long["baseline_feature"].isin(STABLE_SOURCES)
-                & long["primary_baseline_status"].notna()
-                & (long["n_interpretable_prebaseline_measurements"] == 0)
-            ).sum()
-        ),
-        "dynamic_prebaseline_older_than_365d": int(
-            (
-                (dynamic["days_from_clinical_baseline"] < -365)
-                & dynamic["selected_lab_date"].notna()
-            ).sum()
-        ),
-        "dynamic_rescue_after_30d": int(
-            (
-                dynamic["postbaseline_rescue"]
-                & (dynamic["days_from_clinical_baseline"] > 30)
-            ).sum()
-        ),
-        "dynamic_rescue_with_eligible_prebaseline": int(
-            (
-                dynamic["postbaseline_rescue"]
-                & (dynamic["n_eligible_prebaseline_measurements"] > 0)
-            ).sum()
-        ),
-        "conflict_with_nonmissing_primary": int(
-            (long["same_day_conflict"] & long["result_interpretation"].notna()).sum()
-        ),
-        "ssa_from_ro52_ro60": int(
-            (
-                (long["baseline_feature"] == "anti_ro_ssa")
-                & long["source_canonical_analyte"].isin(["anti_ro52", "anti_ro60"])
-            ).sum()
-        ),
-        "ana_from_titer_pattern_only": int(
-            (
-                (long["baseline_feature"] == "ana")
-                & long["source_canonical_analyte"].isin(
-                    [
-                        "ana_hep2_titer",
-                        "ana_hep2_pattern",
-                        "ana_hep2_cytoplasmic_pattern",
-                    ]
-                )
-            ).sum()
-        ),
-        "cryoglobulinemia_from_ife_only": int(
-            (
-                (long["baseline_feature"] == "cryoglobulinemia")
-                & (long["source_canonical_analyte"] == "cryoglobulins_ife")
-            ).sum()
-        ),
-        "low_c4_without_evidence": int(
-            (
-                (long["baseline_feature"] == "low_c4")
-                & long["primary_baseline_status"].notna()
-                & ~long["interpretation_source"].isin(
-                    [
-                        "reported_interpretation",
-                        "reference_range",
-                        "prespecified_cutoff",
-                    ]
-                )
-            ).sum()
-        ),
-        "leukopenia_without_evidence": int(
-            (
-                (long["baseline_feature"] == "leukopenia")
-                & long["primary_baseline_status"].notna()
-                & ~long["interpretation_source"].isin(
-                    [
-                        "reported_interpretation",
-                        "reference_range",
-                        "prespecified_cutoff",
-                    ]
-                )
-            ).sum()
-        ),
-        "missing_uninterpretable_converted_to_negative": int(
-            (
-                (long["interpretation_source"] == "uninterpretable")
-                & ~long["primary_baseline_status"].fillna(True)
-            ).sum()
-        ),
-        "duplicate_patient_rows_wide": int(wide["patient_id"].duplicated().sum()),
-    }
-    hard_qc = pd.DataFrame(
-        [
-            {
-                "qc_rule": key,
-                "n_violations": value,
-                "status": "PASS" if value == 0 else "FAIL",
-            }
-            for key, value in hard.items()
-        ]
-    )
+    hard_qc = _build_hard_qc(long, wide, mismatches)
+    core_input_evidence_qc = build_core_input_evidence_qc(labs)
     interpretation = (
         long.groupby(["baseline_feature", "interpretation_source"], dropna=False)
         .size()
@@ -1097,6 +1220,7 @@ def build_qc(
         "20b_baseline_lab_missingness.csv": pd.DataFrame(missingness),
         "20b_baseline_lab_sensitivity_summary.csv": pd.DataFrame(sensitivity),
         "20b_baseline_lab_hard_qc.csv": hard_qc,
+        "20b_core_input_evidence_qc.csv": core_input_evidence_qc,
     }, hard_qc
 
 
@@ -1138,6 +1262,19 @@ def run(
             row.n_same_day_conflicts,
             row.n_longitudinal_discordance,
         )
+    evidence = reports["20b_core_input_evidence_qc.csv"].set_index(
+        "canonical_analyte"
+    )
+    logger.info(
+        "Core input interpretation evidence: SSA ref_high=%.1f%%; "
+        "SSB ref_high=%.1f%%; RF ref_high=%.1f%%; C4 ref_low=%.1f%%; "
+        "WBC ref_low=%.1f%%",
+        evidence.at["anti_ro_ssa", "pct_reference_high_nonmissing"],
+        evidence.at["anti_la_ssb", "pct_reference_high_nonmissing"],
+        evidence.at["rheumatoid_factor", "pct_reference_high_nonmissing"],
+        evidence.at["complement_c4", "pct_reference_low_nonmissing"],
+        evidence.at["wbc", "pct_reference_low_nonmissing"],
+    )
     violations = int(hard_qc["n_violations"].sum())
     logger.info("Hard QC violations=%d", violations)
     if violations:

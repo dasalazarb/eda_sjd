@@ -89,6 +89,34 @@ def test_stable_historical_status_and_discordance() -> None:
     assert result["longitudinal_discordance"] is True
 
 
+def test_stable_nearest_uninterpretable_is_not_negative_conversion() -> None:
+    """Historical negative remains valid when the nearest assay is uninterpretable."""
+    rows = pd.DataFrame(
+        [
+            record("anti_ro_ssa", -100, "negative"),
+            record(
+                "anti_ro_ssa",
+                -1,
+                "",
+                result_numeric=7.2,
+                result_raw=pd.NA,
+                result_text=pd.NA,
+            ),
+        ]
+    )
+    derived = MODULE.derive_stable_feature(patient(), rows, "anti_ro_ssa", True)
+    assert derived["primary_baseline_status"] is False
+    assert pd.isna(derived["closest_prebaseline_status"])
+
+    long = _minimal_long_for_hard_qc()
+    index = long["baseline_feature"].eq("anti_ro_ssa")
+    for column, value in derived.items():
+        if column in long:
+            long.loc[index, column] = value
+    hard_qc = MODULE._build_hard_qc(long, pd.DataFrame({"patient_id": ["P1"]}), 0)
+    assert _violations(hard_qc, "missing_uninterpretable_converted_to_negative") == 0
+
+
 def test_stable_negative_no_test_and_postbaseline_sensitivity() -> None:
     """Not tested remains NA, while postbaseline evidence never backfills primary."""
     negative = MODULE.derive_stable_feature(
@@ -443,3 +471,127 @@ def test_conflicting_patient_baseline_hard_fails() -> None:
     )
     with pytest.raises(ValueError, match="conflicting"):
         MODULE.build_patient_baseline_frame(spine)
+
+
+def _minimal_long_for_hard_qc() -> pd.DataFrame:
+    """Return one derived row per feature for isolated hard-QC tests."""
+    columns = list(MODULE.REQUIRED_LAB_COLUMNS | {"observation_identifier"})
+    labs = pd.DataFrame(columns=columns)
+    return MODULE.derive_long(labs, pd.DataFrame([patient()]))
+
+
+def _violations(hard_qc: pd.DataFrame, rule: str) -> int:
+    """Return the violation count for one named hard-QC rule."""
+    return int(hard_qc.set_index("qc_rule").at[rule, "n_violations"])
+
+
+def test_stable_positive_requires_positive_prebaseline_evidence() -> None:
+    """Stable primary positivity cannot exist without historical positive evidence."""
+    long = _minimal_long_for_hard_qc()
+    index = long["baseline_feature"].eq("anti_ro_ssa")
+    long.loc[index, "primary_baseline_status"] = True
+    long.loc[index, "n_positive_prebaseline"] = 0
+    hard_qc = MODULE._build_hard_qc(long, pd.DataFrame({"patient_id": ["P1"]}), 0)
+    assert (
+        _violations(
+            hard_qc, "stable_primary_positive_without_positive_prebaseline"
+        )
+        == 1
+    )
+
+
+def test_stable_negative_requires_negative_prebaseline_evidence() -> None:
+    """Stable primary negativity cannot exist without historical negative evidence."""
+    long = _minimal_long_for_hard_qc()
+    index = long["baseline_feature"].eq("anti_la_ssb")
+    long.loc[index, "primary_baseline_status"] = False
+    long.loc[index, "n_negative_prebaseline"] = 0
+    hard_qc = MODULE._build_hard_qc(long, pd.DataFrame({"patient_id": ["P1"]}), 0)
+    assert (
+        _violations(
+            hard_qc, "stable_primary_negative_without_negative_prebaseline"
+        )
+        == 1
+    )
+
+
+def test_stable_negative_cannot_override_positive_prebaseline_evidence() -> None:
+    """Any historical stable positivity must prevent a negative primary status."""
+    long = _minimal_long_for_hard_qc()
+    index = long["baseline_feature"].eq("rheumatoid_factor")
+    long.loc[index, "primary_baseline_status"] = False
+    long.loc[index, "n_positive_prebaseline"] = 1
+    long.loc[index, "n_negative_prebaseline"] = 1
+    hard_qc = MODULE._build_hard_qc(long, pd.DataFrame({"patient_id": ["P1"]}), 0)
+    assert (
+        _violations(
+            hard_qc, "stable_primary_negative_despite_positive_prebaseline"
+        )
+        == 1
+    )
+
+
+def test_dynamic_uninterpretable_cannot_become_false() -> None:
+    """A selected dynamic result without evidence cannot become normal/negative."""
+    long = _minimal_long_for_hard_qc()
+    index = long["baseline_feature"].eq("low_c4")
+    long.loc[index, "interpretation_source"] = "uninterpretable"
+    long.loc[index, "primary_baseline_status"] = False
+    hard_qc = MODULE._build_hard_qc(long, pd.DataFrame({"patient_id": ["P1"]}), 0)
+    assert _violations(hard_qc, "missing_uninterpretable_converted_to_negative") == 1
+
+
+def test_core_input_evidence_qc_counts_only_aggregate_availability() -> None:
+    """Core evidence QC reports correct aggregate counts and percentages."""
+    labs = pd.DataFrame(
+        [
+            {
+                "patient_id": "P1",
+                "canonical_analyte": "anti_ro_ssa",
+                "result_raw": "7.2",
+                "result_numeric": 7.2,
+                "result_text": pd.NA,
+                "reported_interpretation": pd.NA,
+                "reference_low": pd.NA,
+                "reference_high": pd.NA,
+                "unit": "U/mL",
+            },
+            {
+                "patient_id": "P2",
+                "canonical_analyte": "anti_ro_ssa",
+                "result_raw": "positive",
+                "result_numeric": pd.NA,
+                "result_text": "positive",
+                "reported_interpretation": "positive",
+                "reference_low": pd.NA,
+                "reference_high": 1.0,
+                "unit": pd.NA,
+            },
+            {
+                "patient_id": "P1",
+                "canonical_analyte": "complement_c4",
+                "result_raw": "8",
+                "result_numeric": 8,
+                "result_text": pd.NA,
+                "reported_interpretation": pd.NA,
+                "reference_low": pd.NA,
+                "reference_high": 40,
+                "unit": "mg/dL",
+            },
+        ]
+    )
+    qc = MODULE.build_core_input_evidence_qc(labs)
+    assert "patient_id" not in qc.columns
+    assert len(qc) == len(MODULE.CORE_INPUT_EVIDENCE_MODES)
+
+    ssa = qc.set_index("canonical_analyte").loc["anti_ro_ssa"]
+    assert ssa["n_rows"] == 2
+    assert ssa["n_patients"] == 2
+    assert ssa["n_result_numeric_nonmissing"] == 1
+    assert ssa["pct_result_numeric_nonmissing"] == 50.0
+    assert ssa["n_rows_with_any_interpretation_evidence"] == 1
+    assert ssa["pct_rows_with_any_interpretation_evidence"] == 50.0
+    assert ssa["n_rows_numeric_but_no_reference_or_interpretation"] == 1
+
+    c4 = qc.set_index("canonical_analyte").loc["complement_c4"]
+    assert c4["n_rows_numeric_but_no_reference_or_interpretation"] == 1
