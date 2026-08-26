@@ -326,3 +326,118 @@ def test_required_semantic_components_remain_distinct() -> None:
         "platelet_count",
     ]
     assert output["canonical_analyte"].is_unique
+
+
+@pytest.mark.parametrize(
+    "order,cluster,analyte,family,role",
+    [
+        ("ESR", "ESR (Blood)", "esr", "dynamic_inflammatory", "exploratory"),
+        (
+            "CRP, High Sensitivity, Comprehensive",
+            "C-Reactive Protein, High Sensitivity (Blood)",
+            "crp_high_sensitivity",
+            "dynamic_inflammatory",
+            "exploratory",
+        ),
+        ("Hepatic Panel", "ALT (Blood)", "alt", "dynamic_hepatic", "supporting"),
+        ("Hepatic Panel", "AST (Blood)", "ast", "dynamic_hepatic", "supporting"),
+        (
+            "Hemoglobin A1C",
+            "Hemoglobin A1C (Blood)",
+            "hemoglobin_a1c",
+            "chronic_metabolic",
+            "context",
+        ),
+        (
+            "Hemoglobin A1C",
+            "Est. Avg. Glucose (Blood)",
+            "estimated_average_glucose",
+            "chronic_metabolic",
+            "supporting",
+        ),
+        (
+            "Lipid Panel",
+            "LDL Cholesterol Calculated (Blood)",
+            "ldl_cholesterol_calculated",
+            "chronic_metabolic",
+            "context",
+        ),
+        (
+            "Lipid Panel",
+            "LDL Cholesterol Direct (Blood)",
+            "ldl_cholesterol_direct",
+            "chronic_metabolic",
+            "context",
+        ),
+        (
+            "Thyroid Stimulating Hormone",
+            "TSH (Blood)",
+            "tsh",
+            "chronic_endocrine",
+            "context",
+        ),
+        ("HLA", "HLA-A* (Blood)", "hla_a", "fixed_genetic", "exploratory"),
+        (
+            "Screening",
+            "HCV (HepC) Ab (Blood)",
+            "hepatitis_c_antibody",
+            "infection_screening",
+            "context",
+        ),
+        (
+            "PT/PTT",
+            "PTT (Blood)",
+            "partial_thromboplastin_time",
+            "procedural",
+            "context",
+        ),
+        (
+            "Pregnancy",
+            "Pregnancy Test (Urine)",
+            "urine_pregnancy_test",
+            "pregnancy_time_specific",
+            "context",
+        ),
+    ],
+)
+def test_extended_clinical_semantics(order, cluster, analyte, family, role) -> None:
+    output = btris.annotate_expected_pairs(
+        btris.normalize_lab_records(_raw(["2020-01-01"], order, cluster)),
+        _reference((order, cluster)),
+    )
+    assert output.loc[
+        0, ["canonical_analyte", "lab_family", "analytic_role"]
+    ].tolist() == [analyte, family, role]
+
+
+def test_semantic_intent_distinguishes_reviewed_unused_from_unexpected() -> None:
+    reference = _reference(("CBC + Diff", "Schistocytes (Blood)"))
+    rows = pd.concat(
+        [
+            _raw(["2020-01-01"], "CBC + Diff", "Schistocytes (Blood)"),
+            _raw(["2020-01-02"], "Acute Care Panel", pd.NA),
+            _raw(["2020-01-03"], "Anti-N SARS-CoV-2 Antibodies", pd.NA),
+        ]
+    )
+    output = btris.annotate_expected_pairs(btris.normalize_lab_records(rows), reference)
+    qc = btris.build_semantic_mapping_qc(output)
+    assert output["semantic_mapping_status"].tolist() == [
+        "deliberately_unused",
+        "unexpected_unmapped",
+        "unexpected_unmapped",
+    ]
+    assert qc["semantic_mapping_complete"].tolist() == [True, False, False]
+    assert len(btris.build_semantic_unresolved_qc(output)) == 2
+
+
+def test_semantic_annotation_does_not_change_episode_matching_counts() -> None:
+    normalized = btris.normalize_lab_records(_raw(["2020-01-03", "2021-01-10"]))
+    before, _ = btris.attach_clinical_context(normalized, _spine())
+    annotated = btris.annotate_expected_pairs(
+        normalized, _reference(("C3/C4", "Complement C4 (Blood)"))
+    )
+    after, _ = btris.attach_clinical_context(annotated, _spine())
+    assert (
+        before["episode_match_method"].value_counts().to_dict()
+        == after["episode_match_method"].value_counts().to_dict()
+    )

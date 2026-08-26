@@ -33,6 +33,7 @@ OUTPUT_COLUMNS = [
     "canonical_analyte",
     "lab_family",
     "analytic_role",
+    "semantic_mapping_status",
     "lab_date",
     "result_raw",
     "result_numeric",
@@ -199,6 +200,313 @@ CLUSTER_SEMANTICS = {
     ),
 }
 
+# Clinically useful non-core analytes. Pair-specific entries take precedence over
+# cluster entries where the same observation label has a different assay meaning.
+PAIR_SEMANTICS = {
+    ("ESR", "ESR (Blood)"): ("esr", "dynamic_inflammatory", "exploratory"),
+    (
+        "CRP, High Sensitivity, Comprehensive",
+        "C-Reactive Protein, High Sensitivity (Blood)",
+    ): ("crp_high_sensitivity", "dynamic_inflammatory", "exploratory"),
+    ("Mineral Panel", "Albumin (Blood)"): (
+        "albumin",
+        "dynamic_renal_metabolic",
+        "supporting",
+    ),
+    ("Protein, Total", "Protein Total (Blood)"): (
+        "protein_total",
+        "dynamic_metabolic",
+        "context",
+    ),
+    ("Immunofixation Electrophoresis, Serum", "Protein Total (Blood)"): (
+        "protein_total",
+        "dynamic_immunologic",
+        "supporting",
+    ),
+    ("Anti-Endomysial IgA Antibody", "Endomysial IgA Ab, serum (Blood)"): (
+        "anti_endomysial_iga",
+        "stable_autoimmune",
+        "context",
+    ),
+    ("Angiotensin Converting Enzyme", "Angiotensin Conv.Enzyme (Blood)"): (
+        "angiotensin_converting_enzyme",
+        "dynamic_diagnostic_context",
+        "exploratory",
+    ),
+    ("Thyroid Stimulating Hormone", "TSH (Blood)"): (
+        "tsh",
+        "chronic_endocrine",
+        "context",
+    ),
+    ("Vitamin D, 25 Hydroxy, Total", "Vitamin D 25-Hydroxy Total (Blood)"): (
+        "vitamin_d_25oh_total",
+        "chronic_nutritional",
+        "context",
+    ),
+}
+
+CLUSTER_SEMANTICS.update(
+    {
+        "ALT (Blood)": ("alt", "dynamic_hepatic", "supporting"),
+        "AST (Blood)": ("ast", "dynamic_hepatic", "supporting"),
+        "Alkaline Phosphatase (Blood)": (
+            "alkaline_phosphatase",
+            "dynamic_hepatic",
+            "supporting",
+        ),
+        "Bilirubin Direct (Blood)": (
+            "bilirubin_direct",
+            "dynamic_hepatic",
+            "supporting",
+        ),
+        "Bilirubin Total (Blood)": ("bilirubin_total", "dynamic_hepatic", "supporting"),
+        "Calcium (Blood)": ("calcium", "dynamic_renal_metabolic", "supporting"),
+        "Magnesium (Blood)": ("magnesium", "dynamic_renal_metabolic", "supporting"),
+        "Phosphorus (Blood)": ("phosphorus", "dynamic_renal_metabolic", "supporting"),
+        "Hemoglobin A1C (Blood)": ("hemoglobin_a1c", "chronic_metabolic", "context"),
+        "Est. Avg. Glucose (Blood)": (
+            "estimated_average_glucose",
+            "chronic_metabolic",
+            "supporting",
+        ),
+        "Cholesterol (Blood)": ("total_cholesterol", "chronic_metabolic", "context"),
+        "HDL Cholesterol (Blood)": ("hdl_cholesterol", "chronic_metabolic", "context"),
+        "LDL Cholesterol Calculated (Blood)": (
+            "ldl_cholesterol_calculated",
+            "chronic_metabolic",
+            "context",
+        ),
+        "LDL Cholesterol Direct (Blood)": (
+            "ldl_cholesterol_direct",
+            "chronic_metabolic",
+            "context",
+        ),
+        "Triglycerides (Blood)": ("triglycerides", "chronic_metabolic", "context"),
+        "Creatine Kinase (Blood)": ("creatine_kinase", "dynamic_muscle", "supporting"),
+        "Lactate Dehydrogenase (LDH) (Blood)": (
+            "lactate_dehydrogenase",
+            "dynamic_hematologic",
+            "context",
+        ),
+        "Amylase (Blood)": ("amylase", "dynamic_organ_specific", "exploratory"),
+        "Uric Acid (Blood)": ("uric_acid", "dynamic_metabolic", "context"),
+        "Ferritin (Blood)": ("ferritin", "chronic_nutritional", "context"),
+        "Iron % Saturation (Blood)": (
+            "iron_saturation",
+            "chronic_nutritional",
+            "context",
+        ),
+        "Iron (Blood)": ("serum_iron", "chronic_nutritional", "context"),
+        "Transferrin (Blood)": ("transferrin", "chronic_nutritional", "context"),
+        "IgG Total (Blood)": ("igg_total", "dynamic_immunologic", "supporting"),
+        **{
+            f"IgG Subclass {n} (Blood)": (
+                f"igg_subclass_{n}",
+                "dynamic_immunologic",
+                "supporting",
+            )
+            for n in range(1, 5)
+        },
+        "Albumin [Ord, Pro or IFE] (Blood)": (
+            "ife_albumin",
+            "dynamic_immunologic",
+            "supporting",
+        ),
+        "Alpha 1 Globulin (Blood)": (
+            "alpha1_globulin",
+            "dynamic_immunologic",
+            "supporting",
+        ),
+        "Alpha 2 Globulin (Blood)": (
+            "alpha2_globulin",
+            "dynamic_immunologic",
+            "supporting",
+        ),
+        "Beta 1 (Blood)": ("beta1_globulin", "dynamic_immunologic", "supporting"),
+        "Beta 2 (Blood)": ("beta2_globulin", "dynamic_immunologic", "supporting"),
+        "Beta Globulin (Blood)": ("beta_globulin", "dynamic_immunologic", "supporting"),
+        "Gamma Globulin (Blood)": (
+            "gamma_globulin",
+            "dynamic_immunologic",
+            "supporting",
+        ),
+        "Immunofixation Electrophoresis Serum (Blood)": (
+            "immunofixation_serum_interpretation",
+            "dynamic_immunologic",
+            "supporting",
+        ),
+        "Monoclonal Band (M-Spike) Serum Electrophoresis (Blood)": (
+            "monoclonal_band_m_spike",
+            "dynamic_immunologic",
+            "supporting",
+        ),
+        "Protein Total [Ord:  Electroph., Serum] (Blood)": (
+            "protein_total_electrophoresis",
+            "dynamic_immunologic",
+            "supporting",
+        ),
+        "Anti-CCP Ab (Blood)": ("anti_ccp", "stable_autoimmune", "context"),
+        "DNA Double-Stranded Ab (Blood)": (
+            "anti_dsdna",
+            "stable_autoimmune",
+            "context",
+        ),
+        "DNA Double-Stranded Ab, IgG (Blood)": (
+            "anti_dsdna_igg",
+            "stable_autoimmune",
+            "context",
+        ),
+        "Anti-Cardiolipin IgG Quant (Blood)": (
+            "anticardiolipin_igg",
+            "stable_autoimmune",
+            "context",
+        ),
+        "Anti-Cardiolipin IgM Quant (Blood)": (
+            "anticardiolipin_igm",
+            "stable_autoimmune",
+            "context",
+        ),
+        "Anti-Thyroglobulin (Blood)": (
+            "anti_thyroglobulin",
+            "stable_autoimmune",
+            "context",
+        ),
+        "Anti-Thyroglobulin Index (Blood)": (
+            "anti_thyroglobulin_index",
+            "stable_autoimmune",
+            "context",
+        ),
+        "Anti-Thyroid Peroxidase (Blood)": ("anti_tpo", "stable_autoimmune", "context"),
+        "Jo 1 Ab, IgG (Blood)": ("anti_jo1", "stable_autoimmune", "context"),
+        "RNP Ab, IgG (Blood)": ("anti_rnp", "stable_autoimmune", "context"),
+        "Scl 70 Ab, IgG (Blood)": ("anti_scl70", "stable_autoimmune", "context"),
+        "Sm Ab, IgG (Blood)": ("anti_sm", "stable_autoimmune", "context"),
+        "HLA-A* (Blood)": ("hla_a", "fixed_genetic", "exploratory"),
+        "HLA-B* (Blood)": ("hla_b", "fixed_genetic", "exploratory"),
+        "HLA-Cw* (Blood)": ("hla_c", "fixed_genetic", "exploratory"),
+        "HLA-DQB1* / DQ* (Blood)": ("hla_dqb1", "fixed_genetic", "exploratory"),
+        "HLA-DRB1* (Blood)": ("hla_drb1", "fixed_genetic", "exploratory"),
+        "HLA-DRB_* (Blood)": ("hla_drb", "fixed_genetic", "exploratory"),
+        "HLA-DPB* (Sequenced Based) (Blood)": (
+            "hla_dpb",
+            "fixed_genetic",
+            "exploratory",
+        ),
+        "HBc (HepB core) Ab (Blood)": (
+            "hepatitis_b_core_antibody",
+            "infection_screening",
+            "context",
+        ),
+        "HBs (HepB surface) Ab (Blood)": (
+            "hepatitis_b_surface_antibody",
+            "infection_screening",
+            "context",
+        ),
+        "HBs (HepB surface) Ab Not Reported (Blood)": (
+            "hepatitis_b_surface_antibody_not_reported",
+            "infection_screening",
+            "context",
+        ),
+        "HBs (HepB surface) Ag (Blood)": (
+            "hepatitis_b_surface_antigen",
+            "infection_screening",
+            "context",
+        ),
+        "HCV (HepC) Ab (Blood)": (
+            "hepatitis_c_antibody",
+            "infection_screening",
+            "context",
+        ),
+        "HTLV-I/II Ab (Blood)": ("htlv_1_2_antibody", "infection_screening", "context"),
+        "Coronavirus SARS-CoV-2 Anti-N Antibody (Blood)": (
+            "sars_cov2_anti_n",
+            "infection_screening",
+            "context",
+        ),
+        "VZV Ab IgG Numeric (Blood)": (
+            "varicella_zoster_igg",
+            "infection_screening",
+            "context",
+        ),
+        "PT (Blood)": ("prothrombin_time", "procedural", "context"),
+        "PT INR (Blood)": ("inr", "procedural", "context"),
+        "PTT (Blood)": ("partial_thromboplastin_time", "procedural", "context"),
+        "PTT Comment (Blood)": ("ptt_comment", "procedural", "currently_unused"),
+        "Beta HCG Pregnancy (Blood)": (
+            "beta_hcg_pregnancy",
+            "pregnancy_time_specific",
+            "context",
+        ),
+        "Pregnancy Test (Urine)": (
+            "urine_pregnancy_test",
+            "pregnancy_time_specific",
+            "context",
+        ),
+        "Protein Comment (Urine)": (
+            "pregnancy_test_protein_comment",
+            "pregnancy_time_specific",
+            "currently_unused",
+        ),
+    }
+)
+
+for cluster, analyte in {
+    "Mycobacterium Tuberculosis Antigen 1 minus Nil, GoldPlus (Blood)": "quantiferon_tb1_minus_nil",
+    "Mycobacterium Tuberculosis Antigen 2 minus Nil, GoldPlus (Blood)": "quantiferon_tb2_minus_nil",
+    "Mycobacterium Tuberculosis Mitogen minus Nil, GoldPlus (Blood)": "quantiferon_mitogen_minus_nil",
+    "Mycobacterium Tuberculosis Nil Value, GoldPlus (Blood)": "quantiferon_nil",
+    "Mycobacterium Tuberculosis QuantiFERON, GoldPlus (Blood)": "quantiferon_final_interpretation",
+}.items():
+    CLUSTER_SEMANTICS[cluster] = (analyte, "infection_screening", "context")
+
+for cluster, analyte in {
+    "Basophil % (Blood)": "basophil_percent",
+    "Basophil Abs (Blood)": "basophil_absolute",
+    "Eosinophil % (Blood)": "eosinophil_percent",
+    "Eosinophil Abs (Blood)": "eosinophil_absolute",
+    "Immature Granulocytes % (Blood)": "immature_granulocyte_percent",
+    "Immature Granulocytes Abs (Blood)": "immature_granulocyte_absolute",
+    "Lymphocytes % (Blood)": "lymphocyte_percent",
+    "MCH (Blood)": "mch",
+    "MCHC (Blood)": "mchc",
+    "MCV (Blood)": "mcv",
+    "MPV (Blood)": "mpv",
+    "Monocytes % (Blood)": "monocyte_percent",
+    "Monocytes Abs (Blood)": "monocyte_absolute",
+    "Neutrophil % (Blood)": "neutrophil_percent",
+    "Nucleated RBC % (Blood)": "nucleated_rbc_percent",
+    "Nucleated RBC Abs (Blood)": "nucleated_rbc_absolute",
+    "RDW (Blood)": "rdw",
+}.items():
+    CLUSTER_SEMANTICS[cluster] = (analyte, "dynamic_hematologic", "supporting")
+
+for cluster, analyte in {
+    "Appearance (Urinalysis)": "urine_appearance",
+    "Bacteria (Urinalysis)": "urine_bacteria",
+    "Bilirubin (Urinalysis)": "urine_bilirubin",
+    "Color (Urinalysis)": "urine_color",
+    "Glucose, Qualitative (Urinalysis)": "urine_glucose_qualitative",
+    "Ketones (Urinalysis)": "urine_ketones",
+    "Leukocyte Esterase (Urinalysis)": "urine_leukocyte_esterase",
+    "Microscopic Exam (Urinalysis)": "urine_microscopic_exam",
+    "Nitrite (Urinalysis)": "urine_nitrite",
+    "pH (Urinalysis)": "urine_ph",
+    "Squamous Cells (Urinalysis)": "urine_squamous_cells",
+    "Urobilinogen (Urinalysis)": "urine_urobilinogen",
+}.items():
+    CLUSTER_SEMANTICS[cluster] = (analyte, "dynamic_renal_urinary", "supporting")
+
+
+def _semantic_assignment(order_name: object, cluster_name: object):
+    """Return the exact pair assignment before an approved cluster fallback."""
+    pair = (order_name, cluster_name)
+    return (
+        SEMANTIC_OVERRIDES.get(pair)
+        or PAIR_SEMANTICS.get(pair)
+        or CLUSTER_SEMANTICS.get(cluster_name)
+    )
+
+
 COLUMN_ALIASES = {
     "patient_id": ["patient_id", "ids__patient_record_number", "MRN", "Patient ID"],
     "order_name": ["Order Name", "order_name"],
@@ -322,9 +630,7 @@ def load_reference(path: Path, require_complete: bool = True) -> pd.DataFrame:
             reference[column] = default
     for index, row in reference.iterrows():
         pair = (row["order_name"], row["cluster_name"])
-        override = SEMANTIC_OVERRIDES.get(pair) or CLUSTER_SEMANTICS.get(
-            row["cluster_name"]
-        )
+        override = _semantic_assignment(*pair)
         if override:
             reference.loc[
                 index, ["canonical_analyte", "lab_family", "analytic_role"]
@@ -405,9 +711,9 @@ def annotate_expected_pairs(
         }
     )
     for index, row in metadata.iterrows():
-        override = SEMANTIC_OVERRIDES.get(
-            (row["order_name_canonical"], row["cluster_name_canonical"])
-        ) or CLUSTER_SEMANTICS.get(row["cluster_name_canonical"])
+        override = _semantic_assignment(
+            row["order_name_canonical"], row["cluster_name_canonical"]
+        )
         if override:
             metadata.loc[
                 index, ["canonical_analyte", "lab_family", "analytic_role"]
@@ -425,6 +731,26 @@ def annotate_expected_pairs(
     out.loc[matched & alias_used, "mapping_status"] = "explicit_alias"
     out["unexpected_cluster_name"] = ~matched
     out.loc[~matched, ["canonical_analyte", "lab_family", "analytic_role"]] = pd.NA
+    # Remaining rows are members of the reviewed 256-pair inventory rather than
+    # accidental discoveries. Classify their provenance explicitly even when no
+    # current analysis consumes the textual/rare descriptive result.
+    reviewed_unused = matched & out["analytic_role"].eq("currently_unused")
+    hematology_unused = reviewed_unused & out["order_name_canonical"].str.contains(
+        "CBC|Diff", case=False, na=False
+    )
+    urinary_unused = reviewed_unused & out["cluster_name_canonical"].str.contains(
+        "Urine|Urinalysis", case=False, na=False
+    )
+    out.loc[reviewed_unused, "lab_family"] = "documentary_support"
+    out.loc[hematology_unused, "lab_family"] = "dynamic_hematologic"
+    out.loc[urinary_unused, "lab_family"] = "dynamic_renal_urinary"
+    active_roles = {"core", "supporting", "context", "exploratory"}
+    out["semantic_mapping_status"] = "deliberately_unused"
+    for role in active_roles:
+        out.loc[matched & out["analytic_role"].eq(role), "semantic_mapping_status"] = (
+            f"mapped_{role}"
+        )
+    out.loc[~matched, "semantic_mapping_status"] = "unexpected_unmapped"
     return out
 
 
@@ -646,16 +972,80 @@ def build_semantic_mapping_qc(labs: pd.DataFrame) -> pd.DataFrame:
         "canonical_analyte",
         "lab_family",
         "analytic_role",
+        "semantic_mapping_status",
     ]
     qc = (
         labs.groupby(columns, dropna=False)
         .agg(n_rows=("patient_id", "size"), n_patients=("patient_id", "nunique"))
         .reset_index()
     )
-    qc["semantic_mapping_complete"] = (
-        qc[["canonical_analyte", "lab_family", "analytic_role"]].notna().all(axis=1)
+    used = (
+        qc["canonical_analyte"].notna()
+        & qc["lab_family"].ne("other")
+        & qc["analytic_role"].isin({"core", "supporting", "context", "exploratory"})
     )
+    deliberately_unused = qc["semantic_mapping_status"].eq("deliberately_unused") & qc[
+        "lab_family"
+    ].ne("other")
+    qc["semantic_mapping_complete"] = used | deliberately_unused
     return qc
+
+
+def build_semantic_status_summary(labs: pd.DataFrame) -> pd.DataFrame:
+    """Summarize observed pairs, rows, and patients by semantic intent."""
+    pair_columns = ["order_name_canonical", "cluster_name_canonical"]
+    return (
+        labs.groupby("semantic_mapping_status", dropna=False)
+        .agg(
+            n_pairs=(pair_columns[0], lambda values: 0),
+            n_rows=("patient_id", "size"),
+            n_patients=("patient_id", "nunique"),
+        )
+        .drop(columns="n_pairs")
+        .join(
+            labs.groupby("semantic_mapping_status", dropna=False)[pair_columns]
+            .apply(lambda group: len(group.drop_duplicates()))
+            .rename("n_pairs")
+        )[["n_pairs", "n_rows", "n_patients"]]
+        .reset_index()
+    )
+
+
+def build_semantic_unresolved_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Return only observed pairs whose semantic meaning remains unresolved."""
+    completeness = build_semantic_mapping_qc(labs)[
+        ["order_name_canonical", "cluster_name_canonical", "semantic_mapping_complete"]
+    ]
+    annotated = labs.merge(
+        completeness,
+        on=["order_name_canonical", "cluster_name_canonical"],
+        how="left",
+        validate="many_to_one",
+    )
+    columns = [
+        "order_name_original",
+        "order_name_canonical",
+        "cluster_name_original",
+        "cluster_name_canonical",
+        "mapping_status",
+        "canonical_analyte",
+        "lab_family",
+        "analytic_role",
+    ]
+    return (
+        annotated.loc[
+            ~annotated["semantic_mapping_complete"],
+            columns + ["patient_id", "lab_date"],
+        ]
+        .groupby(columns, dropna=False)
+        .agg(
+            n_rows=("patient_id", "size"),
+            n_patients=("patient_id", "nunique"),
+            min_date=("lab_date", "min"),
+            max_date=("lab_date", "max"),
+        )
+        .reset_index()
+    )
 
 
 CORE_ANALYTES = [
@@ -798,6 +1188,8 @@ def main() -> None:
     coverage = build_cluster_coverage(labs, reference)
     alias_qc = build_alias_qc(labs)
     semantic_qc = build_semantic_mapping_qc(labs)
+    semantic_status_summary = build_semantic_status_summary(labs)
+    semantic_unresolved = build_semantic_unresolved_qc(labs)
     core_qc = build_core_mapping_qc(labs)
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.report_dir.mkdir(parents=True, exist_ok=True)
@@ -809,6 +1201,12 @@ def main() -> None:
     alias_qc.to_csv(config.report_dir / "20_lab_alias_mapping_qc.csv", index=False)
     semantic_qc.to_csv(
         config.report_dir / "20_lab_semantic_mapping_qc.csv", index=False
+    )
+    semantic_status_summary.to_csv(
+        config.report_dir / "20_lab_semantic_mapping_status_summary.csv", index=False
+    )
+    semantic_unresolved.to_csv(
+        config.report_dir / "20_lab_semantic_unresolved_qc.csv", index=False
     )
     core_qc.to_csv(config.report_dir / "20_core_lab_mapping_qc.csv", index=False)
     ambiguous.to_csv(config.report_dir / "20_lab_episode_ambiguous.csv", index=False)
