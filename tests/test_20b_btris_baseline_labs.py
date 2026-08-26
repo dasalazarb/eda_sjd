@@ -363,6 +363,68 @@ def test_episode_level_spine_collapses_to_one_patient() -> None:
     assert patient_spine.loc[0, "clinical_baseline_episode_id"] == "E1"
 
 
+def test_episode_spine_uses_step20_patient_id_normalization() -> None:
+    """Spine MRN formatting differences do not erase all BTRIS coverage."""
+    spine = pd.DataFrame(
+        [
+            {
+                "patient_id": " 001-234 ",
+                "clinical_baseline_episode_id": "E1",
+                "clinical_baseline_date": pd.Timestamp("2020-01-01"),
+            },
+            {
+                "patient_id": "001/234",
+                "clinical_baseline_episode_id": "E1",
+                "clinical_baseline_date": pd.Timestamp("2020-01-01"),
+            },
+        ]
+    )
+    patient_spine = MODULE.build_patient_baseline_frame(spine)
+    assert patient_spine["patient_id"].tolist() == ["1234"]
+
+
+def test_derive_long_matches_normalized_lab_and_spine_identifiers() -> None:
+    """Patient membership is based on the shared normalized step-20 key."""
+    lab_row = {column: pd.NA for column in MODULE.REQUIRED_LAB_COLUMNS}
+    lab_row.update(
+        {
+            "patient_id": "001-234",
+            "clinical_baseline_episode_id": "E1",
+            "clinical_baseline_date": pd.Timestamp("2020-01-01"),
+            "canonical_analyte": "anti_ro_ssa",
+            "days_from_clinical_baseline": 0,
+            "lab_date": pd.Timestamp("2020-01-01"),
+            "result_raw": "positive",
+            "result_text": "positive",
+            "result_valid_for_analysis": True,
+            "order_name_original": "ENA Evaluation",
+            "cluster_name_original": "SS-A/Ro Ab, IgG (Blood)",
+        }
+    )
+    patient_spine = pd.DataFrame([patient("1234")])
+    long = MODULE.derive_long(pd.DataFrame([lab_row]), patient_spine)
+    ssa = long[long["baseline_feature"] == "anti_ro_ssa"].iloc[0]
+    assert bool(ssa["has_any_btris_lab"])
+    assert bool(ssa["primary_baseline_status"])
+
+
+def test_baseline_mismatch_counts_patients_not_source_rows() -> None:
+    """Hard-QC mismatch magnitude is patient-level rather than lab-row-level."""
+    lab_rows = []
+    for _ in range(3):
+        row = {column: pd.NA for column in MODULE.REQUIRED_LAB_COLUMNS}
+        row.update(
+            {
+                "patient_id": "001-234",
+                "clinical_baseline_episode_id": "wrong",
+                "clinical_baseline_date": pd.Timestamp("2021-01-01"),
+            }
+        )
+        lab_rows.append(row)
+    patient_spine = pd.DataFrame([patient("1234")])
+    assert MODULE.validate_inputs(pd.DataFrame(lab_rows), patient_spine) == 1
+
+
 def test_conflicting_patient_baseline_hard_fails() -> None:
     """Distinct baseline metadata for one patient fails rather than choosing one."""
     spine = pd.DataFrame(

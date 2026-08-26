@@ -114,6 +114,23 @@ def _norm(value: Any) -> str:
     return re.sub(r"[\s_-]+", " ", str(value).strip().lower()).strip(" .:;")
 
 
+def _normalize_patient_id(series: pd.Series) -> pd.Series:
+    """Apply the step-20 patient identifier contract to a series.
+
+    Step 20 writes normalized identifiers after removing common MRN separators
+    and leading zeroes.  The episode spine remains authoritative but stores its
+    original identifier representation, so its patient view must use the same
+    key before it can be compared with the step-20 analytical table.
+    """
+    normalized = (
+        series.astype("string")
+        .str.strip()
+        .str.replace(r"[-/\\\s]", "", regex=True)
+        .str.replace(r"^0+", "", regex=True)
+    )
+    return normalized.mask(normalized.isin(["", "nan", "None"]))
+
+
 def interpret_result(
     row: Mapping[str, Any], kind: str, prespecified_cutoff: float | None = None
 ) -> Interpretation:
@@ -622,6 +639,9 @@ def build_patient_baseline_frame(episode_spine: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Spine missing required columns: {sorted(missing_spine)}")
 
     patient_spine = episode_spine[required_spine].copy()
+    patient_spine["patient_id"] = _normalize_patient_id(patient_spine["patient_id"])
+    if patient_spine["patient_id"].isna().any():
+        raise ValueError("Clinical episode spine contains missing patient identifiers")
     patient_spine["clinical_baseline_date"] = pd.to_datetime(
         patient_spine["clinical_baseline_date"], errors="coerce"
     )
@@ -649,9 +669,19 @@ def validate_inputs(labs: pd.DataFrame, patient_spine: pd.DataFrame) -> int:
         raise ValueError(f"Spine missing required columns: {sorted(missing_spine)}")
     if patient_spine["patient_id"].duplicated().any():
         raise ValueError("Patient baseline frame must contain one row per patient_id")
-    check = labs[
+    lab_baselines = labs[
         ["patient_id", "clinical_baseline_episode_id", "clinical_baseline_date"]
-    ].merge(
+    ].copy()
+    lab_baselines["patient_id"] = _normalize_patient_id(lab_baselines["patient_id"])
+    lab_baselines["clinical_baseline_date"] = pd.to_datetime(
+        lab_baselines["clinical_baseline_date"], errors="coerce"
+    )
+    lab_baselines = lab_baselines.drop_duplicates()
+    conflicting_labs = lab_baselines[lab_baselines["patient_id"].duplicated(keep=False)]
+    if not conflicting_labs.empty:
+        return int(conflicting_labs["patient_id"].nunique(dropna=False))
+
+    check = lab_baselines.merge(
         patient_spine[list(required_spine)],
         on="patient_id",
         how="left",
@@ -669,12 +699,13 @@ def validate_inputs(labs: pd.DataFrame, patient_spine: pd.DataFrame) -> int:
         check["clinical_baseline_episode_id_lab"].isna()
         & check["clinical_baseline_episode_id_spine"].isna()
     )
-    return int((~dates_equal | ~ids_equal).sum())
+    return int(check.loc[~dates_equal | ~ids_equal, "patient_id"].nunique(dropna=False))
 
 
 def derive_long(labs: pd.DataFrame, spine: pd.DataFrame) -> pd.DataFrame:
     """Build one explicit row per patient and core feature."""
     work = labs.copy()
+    work["patient_id"] = _normalize_patient_id(work["patient_id"])
     for column in ["lab_date", "clinical_baseline_date", "specimen_datetime"]:
         if column in work:
             work[column] = pd.to_datetime(work[column], errors="coerce")
@@ -771,6 +802,8 @@ def build_qc(
     mismatches: int,
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
     """Build selection, missingness, sensitivity, and hard-QC tables."""
+    labs = labs.copy()
+    labs["patient_id"] = _normalize_patient_id(labs["patient_id"])
     summaries, temporal, missingness, sensitivity = [], [], [], []
     for feature, group in long.groupby("baseline_feature", sort=False):
         selected = group["primary_baseline_status"].notna()
