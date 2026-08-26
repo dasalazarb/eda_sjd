@@ -338,18 +338,44 @@ def attach_clinical_context(
         inside = candidates[
             (candidates["episode_start_date"] <= lab["lab_date"])
             & (lab["lab_date"] <= candidates["episode_end_date"])
-        ]
-        pool = inside if not inside.empty else candidates
-        pool = pool.assign(
-            _distance=(pool["clinical_anchor_date"] - lab["lab_date"]).dt.days.abs()
-        )
-        minimum = pool["_distance"].min() if not pool.empty else pd.NA
-        winners = (
-            pool[pool["_distance"].eq(minimum)] if pd.notna(minimum) else pool.iloc[0:0]
-        )
-        eligible = not inside.empty or (
-            pd.notna(minimum) and minimum <= ANCHOR_MATCH_DAYS
-        )
+        ].copy()
+        minimum = pd.NA
+
+        if not inside.empty:
+            # Being inside the authoritative episode window has priority over
+            # anchor proximity. A single containing episode remains a valid
+            # match even when its optional anchor is missing.
+            inside["_distance"] = (
+                inside["clinical_anchor_date"] - lab["lab_date"]
+            ).dt.days.abs()
+            if len(inside) == 1:
+                winners = inside.copy()
+            else:
+                valid_anchor = inside[inside["_distance"].notna()].copy()
+                if valid_anchor.empty:
+                    # With overlapping windows and no usable anchors there is
+                    # no objective basis for selecting one episode.
+                    winners = inside.copy()
+                else:
+                    minimum = valid_anchor["_distance"].min()
+                    winners = valid_anchor[valid_anchor["_distance"].eq(minimum)].copy()
+            eligible = True
+        else:
+            # Outside all windows, only a valid anchor within ±10 days can
+            # provide the secondary episode association.
+            pool = candidates.copy()
+            pool["_distance"] = (
+                pool["clinical_anchor_date"] - lab["lab_date"]
+            ).dt.days.abs()
+            valid_anchor = pool[pool["_distance"].notna()].copy()
+            if valid_anchor.empty:
+                winners = valid_anchor
+                eligible = False
+            else:
+                minimum = valid_anchor["_distance"].min()
+                winners = valid_anchor[valid_anchor["_distance"].eq(minimum)].copy()
+                eligible = minimum <= ANCHOR_MATCH_DAYS
+
         ambiguous = eligible and len(winners) > 1
         if ambiguous:
             record = {
@@ -367,7 +393,11 @@ def attach_clinical_context(
                 ]
                 record[f"candidate_distance_{number}"] = candidate["_distance"]
             ambiguous_rows.append(record)
-        winner = winners.iloc[0] if eligible and not ambiguous else None
+        winner = (
+            winners.iloc[0]
+            if eligible and not ambiguous and not winners.empty
+            else None
+        )
         method = (
             "ambiguous"
             if ambiguous
@@ -389,7 +419,7 @@ def attach_clinical_context(
                 ),
                 "days_from_clinical_anchor": (
                     (lab["lab_date"] - winner["clinical_anchor_date"]).days
-                    if winner is not None
+                    if winner is not None and pd.notna(winner["clinical_anchor_date"])
                     else pd.NA
                 ),
                 "episode_match_method": method,

@@ -85,6 +85,46 @@ def test_episode_matching_priorities_and_unmatched_retention() -> None:
     assert pd.isna(output.iloc[2]["matched_clinical_episode_id"])
 
 
+def test_inside_episode_with_missing_anchor_is_retained() -> None:
+    spine = _spine().iloc[[0]].copy()
+    spine.loc[:, "clinical_anchor_date"] = pd.NaT
+    labs = btris.normalize_lab_records(_raw(["2020-01-03"]))
+
+    output, ambiguous = btris.attach_clinical_context(labs, spine)
+
+    assert len(output) == 1
+    assert output.loc[0, "matched_clinical_episode_id"] == "e1"
+    assert output.loc[0, "episode_match_method"] == "inside_episode_window"
+    assert pd.isna(output.loc[0, "matched_clinical_anchor_date"])
+    assert pd.isna(output.loc[0, "days_from_clinical_anchor"])
+    assert not bool(output.loc[0, "episode_match_ambiguous"])
+    assert ambiguous.empty
+
+
+def test_overlapping_episodes_with_missing_anchors_are_ambiguous() -> None:
+    spine = _spine().iloc[[0]].copy()
+    second = spine.copy()
+    second.loc[:, "clinical_episode_id"] = "e2"
+    spine.loc[:, "clinical_anchor_date"] = pd.NaT
+    second.loc[:, "clinical_anchor_date"] = pd.NaT
+    episodes = pd.concat([spine, second], ignore_index=True)
+    labs = btris.normalize_lab_records(_raw(["2020-01-03"]))
+
+    output, ambiguous = btris.attach_clinical_context(labs, episodes)
+
+    assert len(output) == 1
+    assert output.loc[0, "episode_match_method"] == "ambiguous"
+    assert bool(output.loc[0, "episode_match_ambiguous"])
+    assert pd.isna(output.loc[0, "matched_clinical_episode_id"])
+    assert pd.isna(output.loc[0, "matched_clinical_anchor_date"])
+    assert pd.isna(output.loc[0, "days_from_clinical_anchor"])
+    assert len(ambiguous) == 1
+    assert {
+        ambiguous.loc[0, "candidate_episode_id_1"],
+        ambiguous.loc[0, "candidate_episode_id_2"],
+    } == {"e1", "e2"}
+
+
 def test_exact_tie_is_ambiguous_and_not_assigned() -> None:
     spine = _spine().iloc[[0]].copy()
     second = spine.copy()
