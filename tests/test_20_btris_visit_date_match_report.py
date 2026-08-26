@@ -57,6 +57,60 @@ def _spine() -> pd.DataFrame:
     )
 
 
+def test_source_schema_qc_is_structural_and_has_one_row_per_column() -> None:
+    raw = pd.DataFrame(
+        {"Foo": ["secret"], "Bar": ["2020-01-01"], "UnitX": ["mg/dL"]}
+    )
+
+    qc = btris.build_source_schema_qc(raw, "Lab.csv")
+
+    assert qc["raw_column_name"].tolist() == ["Foo", "Bar", "UnitX"]
+    assert list(qc.columns) == [
+        "source_file",
+        "raw_column_name",
+        "dtype",
+        "n_rows",
+        "n_nonmissing",
+        "pct_nonmissing",
+    ]
+    assert not qc.astype("string").eq("secret").any(axis=None)
+
+
+def test_field_resolution_uses_only_confirmed_aliases_and_exposes_no_values() -> None:
+    raw = pd.DataFrame({"UnitX": ["secret-unit"], "Result": ["secret-result"]})
+
+    unresolved = btris.build_field_resolution_qc(raw, "Lab.csv")
+    confirmed = btris.build_field_resolution_qc(
+        raw, "Lab.csv", column_aliases={"unit": ["UnitX"]}
+    )
+
+    unresolved_unit = unresolved[unresolved["target_field"].eq("unit")].iloc[0]
+    confirmed_unit = confirmed[confirmed["target_field"].eq("unit")].iloc[0]
+    assert not bool(unresolved_unit["resolved"])
+    assert pd.isna(unresolved_unit["resolved_raw_column"])
+    assert bool(confirmed_unit["resolved"])
+    assert confirmed_unit["resolved_raw_column"] == "UnitX"
+    assert not confirmed.astype("string").isin(["secret-unit", "secret-result"]).any(
+        axis=None
+    )
+
+
+def test_qualitative_token_qc_normalizes_but_does_not_classify() -> None:
+    labs = pd.DataFrame(
+        {
+            "canonical_analyte": ["anti_ro_ssa"] * 3,
+            "result_text": ["Positive", " positive ", "<1.0"],
+        }
+    )
+
+    qc = btris.build_core_qualitative_token_qc(labs)
+
+    assert qc.set_index("normalized_result_text")["n_rows"].to_dict() == {
+        "positive": 2,
+        "<1.0": 1,
+    }
+
+
 @pytest.mark.parametrize(
     "date,expected",
     [

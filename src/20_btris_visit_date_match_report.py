@@ -547,6 +547,23 @@ PRESERVED_METADATA = {
     "assay": ["Assay", "Method"],
     "observation_identifier": ["Observation ID", "Result ID"],
 }
+FIELD_RESOLUTION_TARGETS = [
+    "patient_id",
+    "order_name",
+    "cluster_name",
+    "lab_date",
+    "result_raw",
+    "unit",
+    "reference_low",
+    "reference_high",
+    "reported_interpretation",
+    "result_status",
+    "specimen_datetime",
+    "specimen_type",
+    "order_identifier",
+    "assay",
+    "observation_identifier",
+]
 
 
 @dataclass(frozen=True)
@@ -584,6 +601,83 @@ def _normalize_patient_id(series: pd.Series) -> pd.Series:
         .str.replace(r"^0+", "", regex=True)
     )
     return normalized.mask(normalized.isin(["", "nan", "None"]))
+
+
+def build_source_schema_qc(raw: pd.DataFrame, source_file: str) -> pd.DataFrame:
+    """Summarize the structure and completeness of one raw BTRIS extract.
+
+    Parameters
+    ----------
+    raw : pd.DataFrame
+        Raw extract before field normalization.
+    source_file : str
+        Source-file provenance label.
+
+    Returns
+    -------
+    pd.DataFrame
+        One structural summary row per raw column, without source values.
+    """
+    n_rows = len(raw)
+    return pd.DataFrame(
+        [
+            {
+                "source_file": source_file,
+                "raw_column_name": str(column),
+                "dtype": str(raw[column].dtype),
+                "n_rows": n_rows,
+                "n_nonmissing": int(raw[column].notna().sum()),
+                "pct_nonmissing": (
+                    float(raw[column].notna().mean() * 100) if n_rows else 0.0
+                ),
+            }
+            for column in raw.columns
+        ]
+    )
+
+
+def build_field_resolution_qc(
+    raw: pd.DataFrame,
+    source_file: str,
+    column_aliases: dict[str, list[str]] | None = None,
+) -> pd.DataFrame:
+    """Audit exact alias resolution for required normalized fields.
+
+    Parameters
+    ----------
+    raw : pd.DataFrame
+        Raw extract before field normalization.
+    source_file : str
+        Source-file provenance label.
+    column_aliases : dict[str, list[str]], optional
+        Alias mapping to audit. Defaults to the production mappings.
+
+    Returns
+    -------
+    pd.DataFrame
+        One resolution result per required target field.
+    """
+    aliases = {**COLUMN_ALIASES, **PRESERVED_METADATA}
+    if column_aliases is not None:
+        aliases.update(column_aliases)
+    rows = []
+    for target in FIELD_RESOLUTION_TARGETS:
+        source = _resolve(raw.columns, aliases.get(target, []))
+        n_nonmissing = int(raw[source].notna().sum()) if source else 0
+        rows.append(
+            {
+                "source_file": source_file,
+                "target_field": target,
+                "resolved_raw_column": source if source else pd.NA,
+                "resolved": source is not None,
+                "n_rows": len(raw),
+                "n_nonmissing_resolved_column": n_nonmissing,
+                "pct_nonmissing_resolved_column": (
+                    n_nonmissing / len(raw) * 100 if len(raw) else 0.0
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def load_reference(path: Path, require_complete: bool = True) -> pd.DataFrame:
@@ -1060,6 +1154,138 @@ CORE_ANALYTES = [
     "complement_c4",
     "wbc",
 ]
+INTERPRETATION_EVIDENCE_ANALYTES = [
+    "anti_ro_ssa",
+    "anti_la_ssb",
+    "ana_status",
+    "ana_hep2_status",
+    "rheumatoid_factor",
+    "cryoglobulins",
+    "complement_c4",
+    "wbc",
+    "cryoglobulins_ife",
+]
+QUALITATIVE_QC_ANALYTES = INTERPRETATION_EVIDENCE_ANALYTES[:6]
+
+
+def normalize_qualitative_token(value: object) -> object:
+    """Normalize result text for aggregation without clinically classifying it.
+
+    Parameters
+    ----------
+    value : object
+        Raw textual result value.
+
+    Returns
+    -------
+    object
+        Case-folded, edge-stripped text or ``pd.NA`` for a missing value.
+    """
+    if pd.isna(value):
+        return pd.NA
+    return str(value).strip().casefold()
+
+
+def build_core_interpretation_evidence_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Summarize available interpretation evidence for core analytes.
+
+    Parameters
+    ----------
+    labs : pd.DataFrame
+        Normalized laboratory records with exact semantic annotations.
+
+    Returns
+    -------
+    pd.DataFrame
+        Completeness counts, percentages, and an informational evidence warning.
+    """
+    rows = []
+    for analyte in INTERPRETATION_EVIDENCE_ANALYTES:
+        found = labs[labs["canonical_analyte"].eq(analyte)]
+        n_rows = len(found)
+
+        def count(column: str) -> int:
+            return int(found[column].notna().sum())
+
+        def percent(n_nonmissing: int) -> float:
+            return n_nonmissing / n_rows * 100 if n_rows else 0.0
+
+        counts = {
+            "result_raw": count("result_raw"),
+            "result_numeric": count("result_numeric"),
+            "result_text": count("result_text"),
+            "unit": count("unit"),
+            "reported_interpretation": count("reported_interpretation"),
+            "reference_low": count("reference_low"),
+            "reference_high": count("reference_high"),
+        }
+        rows.append(
+            {
+                "canonical_analyte": analyte,
+                "n_rows": n_rows,
+                "n_patients": found["patient_id"].nunique(),
+                **{f"n_{name}_nonmissing": value for name, value in counts.items()},
+                **{
+                    f"pct_{name}_nonmissing": percent(counts[name])
+                    for name in [
+                        "result_numeric",
+                        "result_text",
+                        "unit",
+                        "reported_interpretation",
+                        "reference_low",
+                        "reference_high",
+                    ]
+                },
+                "core_reference_evidence_missing": bool(
+                    counts["result_numeric"] > 0
+                    and counts["reference_low"] == 0
+                    and counts["reference_high"] == 0
+                    and counts["reported_interpretation"] == 0
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_core_qualitative_token_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate normalized textual result tokens without patient-level details.
+
+    Parameters
+    ----------
+    labs : pd.DataFrame
+        Normalized laboratory records with exact semantic annotations.
+
+    Returns
+    -------
+    pd.DataFrame
+        Counts and within-analyte percentages for each normalized text token.
+    """
+    selected = labs[labs["canonical_analyte"].isin(QUALITATIVE_QC_ANALYTES)].copy()
+    selected["normalized_result_text"] = selected["result_text"].map(
+        normalize_qualitative_token
+    )
+    selected = selected.dropna(subset=["normalized_result_text"])
+    counts = (
+        selected.groupby(
+            ["canonical_analyte", "normalized_result_text"], dropna=False
+        )
+        .size()
+        .rename("n_rows")
+        .reset_index()
+    )
+    if counts.empty:
+        return pd.DataFrame(
+            columns=[
+                "canonical_analyte",
+                "normalized_result_text",
+                "n_rows",
+                "pct_within_analyte",
+            ]
+        )
+    counts["pct_within_analyte"] = counts["n_rows"] / counts.groupby(
+        "canonical_analyte"
+    )["n_rows"].transform("sum") * 100
+    return counts
 
 
 def build_core_mapping_qc(labs: pd.DataFrame) -> pd.DataFrame:
@@ -1131,20 +1357,26 @@ def build_baseline_context_qc(labs: pd.DataFrame) -> pd.DataFrame:
     return qc
 
 
-def _read_lab_files(root: Path) -> pd.DataFrame:
+def _read_lab_files(root: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     frames = []
+    schema_frames = []
+    resolution_frames = []
     for path in sorted(root.rglob("Lab*.csv")):
         protocol = next(
             (part.upper() for part in path.parts if part.upper() in {"11D", "15D"}), ""
         )
-        frames.append(
-            normalize_lab_records(
-                pd.read_csv(path, low_memory=False), str(path), protocol
-            )
-        )
+        raw = pd.read_csv(path, low_memory=False)
+        source_file = str(path)
+        schema_frames.append(build_source_schema_qc(raw, source_file))
+        resolution_frames.append(build_field_resolution_qc(raw, source_file))
+        frames.append(normalize_lab_records(raw, source_file, protocol))
     if not frames:
         raise FileNotFoundError(f"No filtered Lab*.csv files found below {root}")
-    return pd.concat(frames, ignore_index=True)
+    return (
+        pd.concat(frames, ignore_index=True),
+        pd.concat(schema_frames, ignore_index=True),
+        pd.concat(resolution_frames, ignore_index=True),
+    )
 
 
 def _parse_args() -> LabConfig:
@@ -1182,7 +1414,7 @@ def main() -> None:
     logger = setup_logger("20_btris_lab_records_long")
     reference = load_reference(config.reference_path)
     spine = pd.read_parquet(config.spine_path)
-    labs_input = _read_lab_files(config.btris_root)
+    labs_input, schema_qc, field_resolution_qc = _read_lab_files(config.btris_root)
     annotated = annotate_expected_pairs(labs_input, reference)
     labs, ambiguous = attach_clinical_context(annotated, spine)
     coverage = build_cluster_coverage(labs, reference)
@@ -1191,6 +1423,8 @@ def main() -> None:
     semantic_status_summary = build_semantic_status_summary(labs)
     semantic_unresolved = build_semantic_unresolved_qc(labs)
     core_qc = build_core_mapping_qc(labs)
+    interpretation_evidence_qc = build_core_interpretation_evidence_qc(labs)
+    qualitative_token_qc = build_core_qualitative_token_qc(labs)
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.report_dir.mkdir(parents=True, exist_ok=True)
     labs[
@@ -1198,6 +1432,18 @@ def main() -> None:
         + [column for column in PRESERVED_METADATA if column in labs.columns]
     ].to_parquet(config.output_path, index=False)
     coverage.to_csv(config.report_dir / "20_lab_cluster_coverage.csv", index=False)
+    schema_qc.to_csv(
+        config.report_dir / "20_btris_source_schema_qc.csv", index=False
+    )
+    field_resolution_qc.to_csv(
+        config.report_dir / "20_btris_field_resolution_qc.csv", index=False
+    )
+    interpretation_evidence_qc.to_csv(
+        config.report_dir / "20_core_interpretation_evidence_qc.csv", index=False
+    )
+    qualitative_token_qc.to_csv(
+        config.report_dir / "20_core_qualitative_token_qc.csv", index=False
+    )
     alias_qc.to_csv(config.report_dir / "20_lab_alias_mapping_qc.csv", index=False)
     semantic_qc.to_csv(
         config.report_dir / "20_lab_semantic_mapping_qc.csv", index=False
