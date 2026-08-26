@@ -21,15 +21,19 @@ EXPECTED_PAIR_COUNT = 256
 ANCHOR_MATCH_DAYS = 10
 OUTPUT_COLUMNS = [
     "patient_id",
+    "has_clinical_baseline",
     "clinical_baseline_episode_id",
     "clinical_baseline_date",
-    "order_name",
-    "cluster_name",
+    "days_from_clinical_baseline",
+    "order_name_original",
+    "order_name_canonical",
+    "cluster_name_original",
+    "cluster_name_canonical",
+    "mapping_status",
     "canonical_analyte",
     "lab_family",
     "analytic_role",
     "lab_date",
-    "days_from_clinical_baseline",
     "result_raw",
     "result_numeric",
     "result_text",
@@ -50,10 +54,40 @@ OUTPUT_COLUMNS = [
     "source_file",
 ]
 
+ORDER_NAME_ALIASES = {
+    "AMYLASE": "Amylase",
+    "ANA HEp-2 Substrate, IgG": "ANA Hep-2 Substrate, IgG",
+    "Anti-CCP Ab": "Anti-CCP AB",
+    "CRYOGLOBULINS": "Cryoglobulins",
+    "RHEUMATOID FACTOR": "Rheumatoid Factor",
+    "URIC ACID": "Uric Acid",
+}
+
 # Semantic assignments are deliberately exact pair mappings.  The authoritative
 # 256-row pair inventory is supplied separately so additions never require fuzzy
 # matching or silently change analyte meaning.
 SEMANTIC_OVERRIDES = {
+    ("Anti-Nuclear Antibody", "Antinuclear Antibody (ANA) (Blood)"): (
+        "ana_status",
+        "stable_autoimmune",
+        "core",
+    ),
+    (
+        "ANA Hep-2 Substrate, IgG",
+        "Antinuclear Antibody (ANA) HEp-2 Substrate (Blood)",
+    ): ("ana_hep2_status", "stable_autoimmune", "core"),
+    (
+        "ANA Hep-2 Substrate, IgG",
+        "Antinuclear Antibody (ANA) HEp-2 Substrate Titer (Blood)",
+    ): ("ana_hep2_titer", "stable_autoimmune", "core"),
+    (
+        "ANA Hep-2 Substrate, IgG",
+        "Antinuclear Antibody (ANA) HEp-2 Substrate Pattern (Blood)",
+    ): ("ana_hep2_pattern", "stable_autoimmune", "core"),
+    (
+        "ANA Hep-2 Substrate, IgG",
+        "Antinuclear Antibody (ANA) HEp-2 Cytoplasmic Pattern (Blood)",
+    ): ("ana_hep2_cytoplasmic_pattern", "stable_autoimmune", "supporting"),
     ("ENA Evaluation", "SS-A/Ro Ab, IgG (Blood)"): (
         "anti_ro_ssa",
         "stable_autoimmune",
@@ -68,6 +102,11 @@ SEMANTIC_OVERRIDES = {
         "complement_c4",
         "dynamic_immunologic",
         "core",
+    ),
+    ("C3/C4", "Complement C3 (Blood)"): (
+        "complement_c3",
+        "dynamic_immunologic",
+        "supporting",
     ),
     ("CBC + Diff", "WBC (Blood)"): ("wbc", "dynamic_hematologic", "core"),
     ("Rheumatoid Factor", "Rheumatoid Factor (Blood)"): (
@@ -88,6 +127,74 @@ SEMANTIC_OVERRIDES = {
     ("Ro52 & Ro60 Antibodies, IgG", "SS-Ro60 Ab, IgG (Blood)"): (
         "anti_ro60",
         "stable_autoimmune",
+        "supporting",
+    ),
+}
+
+# Exact cluster semantics may be shared by several approved order/source pairs.  They
+# are applied only after an exact reference-pair match; they never make a pair valid.
+CLUSTER_SEMANTICS = {
+    "Neutrophil Abs (Blood)": ("anc", "dynamic_hematologic", "supporting"),
+    "Lymphocytes Abs (Blood)": (
+        "lymphocyte_count",
+        "dynamic_hematologic",
+        "supporting",
+    ),
+    "Hemoglobin (Blood)": ("hemoglobin", "dynamic_hematologic", "supporting"),
+    "Platelet Count (Blood)": ("platelet_count", "dynamic_hematologic", "supporting"),
+    "Hematocrit (Blood)": ("hematocrit", "dynamic_hematologic", "supporting"),
+    "RBC (Blood)": ("rbc", "dynamic_hematologic", "supporting"),
+    "Creatinine (Blood)": ("creatinine", "dynamic_renal_metabolic", "supporting"),
+    "eGFR CKD-EPI 2021 Creatinine-Based (Blood)": (
+        "egfr_ckd_epi_2021",
+        "dynamic_renal_metabolic",
+        "supporting",
+    ),
+    "eGFR (African-American) (Blood)": (
+        "egfr_legacy_african_american",
+        "dynamic_renal_metabolic",
+        "context",
+    ),
+    "eGFR (non-African-American) (Blood)": (
+        "egfr_legacy_non_african_american",
+        "dynamic_renal_metabolic",
+        "context",
+    ),
+    "BUN (Blood)": ("bun", "dynamic_renal_metabolic", "supporting"),
+    "Glucose (Blood)": ("glucose", "dynamic_renal_metabolic", "context"),
+    "Protein, Qualitative (Urinalysis)": (
+        "urine_protein_qualitative",
+        "dynamic_renal_urinary",
+        "supporting",
+    ),
+    "RBC (Urinalysis)": ("urine_rbc", "dynamic_renal_urinary", "supporting"),
+    "WBC (Urinalysis)": ("urine_wbc", "dynamic_renal_urinary", "supporting"),
+    "Hemoglobin (Urinalysis)": (
+        "urine_hemoglobin",
+        "dynamic_renal_urinary",
+        "supporting",
+    ),
+    "Specific Gravity (Urinalysis)": (
+        "urine_specific_gravity",
+        "dynamic_renal_urinary",
+        "supporting",
+    ),
+    "WBC Casts (Urinalysis)": (
+        "urine_wbc_casts",
+        "dynamic_renal_urinary",
+        "supporting",
+    ),
+    "Granular Casts (Urinalysis)": (
+        "urine_granular_casts",
+        "dynamic_renal_urinary",
+        "supporting",
+    ),
+    "IgG (Blood)": ("igg", "dynamic_immunologic", "supporting"),
+    "IgA (Blood)": ("iga", "dynamic_immunologic", "supporting"),
+    "IgM (Blood)": ("igm", "dynamic_immunologic", "supporting"),
+    "Cryoglobulins, IFE (Blood)": (
+        "cryoglobulins_ife",
+        "dynamic_immunologic",
         "supporting",
     ),
 }
@@ -214,7 +321,10 @@ def load_reference(path: Path, require_complete: bool = True) -> pd.DataFrame:
         if column not in reference:
             reference[column] = default
     for index, row in reference.iterrows():
-        override = SEMANTIC_OVERRIDES.get((row["order_name"], row["cluster_name"]))
+        pair = (row["order_name"], row["cluster_name"])
+        override = SEMANTIC_OVERRIDES.get(pair) or CLUSTER_SEMANTICS.get(
+            row["cluster_name"]
+        )
         if override:
             reference.loc[
                 index, ["canonical_analyte", "lab_family", "analytic_role"]
@@ -232,7 +342,7 @@ def normalize_lab_records(
         out[target] = raw[source] if source else pd.NA
     missing = [
         name
-        for name in ("patient_id", "order_name", "cluster_name", "lab_date")
+        for name in ("patient_id", "order_name", "lab_date")
         if out[name].isna().all()
     ]
     if missing:
@@ -274,7 +384,12 @@ def normalize_lab_records(
 def annotate_expected_pairs(
     labs: pd.DataFrame, reference: pd.DataFrame
 ) -> pd.DataFrame:
-    """Attach exact-pair metadata and retain unexpected combinations."""
+    """Attach exact/explicit-alias metadata while preserving source names."""
+    out = labs.copy()
+    out["order_name_original"] = out["order_name"]
+    out["cluster_name_original"] = out["cluster_name"]
+    out["order_name_canonical"] = out["order_name_original"].replace(ORDER_NAME_ALIASES)
+    out["cluster_name_canonical"] = out["cluster_name_original"]
     metadata = reference[
         [
             "order_name",
@@ -283,13 +398,33 @@ def annotate_expected_pairs(
             "lab_family",
             "analytic_role",
         ]
-    ]
-    out = labs.merge(
-        metadata, how="left", on=["order_name", "cluster_name"], indicator=True
+    ].rename(
+        columns={
+            "order_name": "order_name_canonical",
+            "cluster_name": "cluster_name_canonical",
+        }
     )
-    out["unexpected_cluster_name"] = out.pop("_merge").eq("left_only")
-    out["analytic_role"] = out["analytic_role"].fillna("currently_unused")
-    out["lab_family"] = out["lab_family"].fillna("other")
+    for index, row in metadata.iterrows():
+        override = SEMANTIC_OVERRIDES.get(
+            (row["order_name_canonical"], row["cluster_name_canonical"])
+        ) or CLUSTER_SEMANTICS.get(row["cluster_name_canonical"])
+        if override:
+            metadata.loc[
+                index, ["canonical_analyte", "lab_family", "analytic_role"]
+            ] = override
+    out = out.merge(
+        metadata,
+        how="left",
+        on=["order_name_canonical", "cluster_name_canonical"],
+        indicator=True,
+    )
+    matched = out.pop("_merge").eq("both")
+    alias_used = out["order_name_original"].ne(out["order_name_canonical"])
+    out["mapping_status"] = "unexpected_unmapped"
+    out.loc[matched & ~alias_used, "mapping_status"] = "exact_reference"
+    out.loc[matched & alias_used, "mapping_status"] = "explicit_alias"
+    out["unexpected_cluster_name"] = ~matched
+    out.loc[~matched, ["canonical_analyte", "lab_family", "analytic_role"]] = pd.NA
     return out
 
 
@@ -324,7 +459,11 @@ def attach_clinical_context(
     ].drop_duplicates()
     if baseline.duplicated("patient_id").any():
         raise ValueError("A patient has conflicting authoritative clinical baselines")
-    out = labs.merge(baseline, how="inner", on="patient_id", validate="many_to_one")
+    out = labs.merge(baseline, how="left", on="patient_id", validate="many_to_one")
+    out["has_clinical_baseline"] = (
+        out["clinical_baseline_episode_id"].notna()
+        & out["clinical_baseline_date"].notna()
+    )
     out["days_from_clinical_baseline"] = (
         out["lab_date"] - out["clinical_baseline_date"]
     ).dt.days
@@ -433,8 +572,14 @@ def attach_clinical_context(
 
 def build_cluster_coverage(labs: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
     """Build expected-pair coverage plus observed unexpected-pair rows."""
+    order_column = (
+        "order_name_canonical" if "order_name_canonical" in labs else "order_name"
+    )
+    cluster_column = (
+        "cluster_name_canonical" if "cluster_name_canonical" in labs else "cluster_name"
+    )
     stats = (
-        labs.groupby(["order_name", "cluster_name"], dropna=False)
+        labs.groupby([order_column, cluster_column], dropna=False)
         .agg(
             n_rows=("patient_id", "size"),
             n_patients=("patient_id", "nunique"),
@@ -442,6 +587,7 @@ def build_cluster_coverage(labs: pd.DataFrame, reference: pd.DataFrame) -> pd.Da
             max_date=("lab_date", "max"),
         )
         .reset_index()
+        .rename(columns={order_column: "order_name", cluster_column: "cluster_name"})
     )
     expected = reference.rename(
         columns={
@@ -469,6 +615,130 @@ def build_cluster_coverage(labs: pd.DataFrame, reference: pd.DataFrame) -> pd.Da
     unexpected["found_in_input"] = True
     unexpected["expected_cluster_not_found"] = False
     return pd.concat([expected, unexpected], ignore_index=True, sort=False)
+
+
+def build_alias_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Summarize exact alias decisions with original-name provenance."""
+    columns = [
+        "order_name_original",
+        "order_name_canonical",
+        "cluster_name_original",
+        "cluster_name_canonical",
+        "mapping_status",
+    ]
+    return (
+        labs.groupby(columns, dropna=False)
+        .agg(
+            n_rows=("patient_id", "size"),
+            n_patients=("patient_id", "nunique"),
+            min_date=("lab_date", "min"),
+            max_date=("lab_date", "max"),
+        )
+        .reset_index()
+    )
+
+
+def build_semantic_mapping_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Summarize semantic completeness for each observed canonical pair."""
+    columns = [
+        "order_name_canonical",
+        "cluster_name_canonical",
+        "canonical_analyte",
+        "lab_family",
+        "analytic_role",
+    ]
+    qc = (
+        labs.groupby(columns, dropna=False)
+        .agg(n_rows=("patient_id", "size"), n_patients=("patient_id", "nunique"))
+        .reset_index()
+    )
+    qc["semantic_mapping_complete"] = (
+        qc[["canonical_analyte", "lab_family", "analytic_role"]].notna().all(axis=1)
+    )
+    return qc
+
+
+CORE_ANALYTES = [
+    "anti_ro_ssa",
+    "anti_la_ssb",
+    "ana_status",
+    "ana_hep2_status",
+    "ana_hep2_titer",
+    "ana_hep2_pattern",
+    "rheumatoid_factor",
+    "cryoglobulins",
+    "complement_c4",
+    "wbc",
+]
+
+
+def build_core_mapping_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Report whether every required core analyte is present and complete."""
+    rows = []
+    for analyte in CORE_ANALYTES:
+        found = labs[labs["canonical_analyte"].eq(analyte)]
+        rows.append(
+            {
+                "canonical_analyte": analyte,
+                "found_in_input": not found.empty,
+                "n_rows": len(found),
+                "n_patients": found["patient_id"].nunique(),
+                "min_date": found["lab_date"].min(),
+                "max_date": found["lab_date"].max(),
+                "n_unexpected_alias_rows": int(
+                    found["mapping_status"].eq("unexpected_unmapped").sum()
+                ),
+                "semantic_mapping_complete": bool(
+                    found.empty
+                    or found[["canonical_analyte", "lab_family", "analytic_role"]]
+                    .notna()
+                    .all(axis=None)
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_baseline_context_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Summarize baseline timing without representing absent baselines as zero."""
+    qc = (
+        labs.groupby(
+            [
+                "patient_id",
+                "has_clinical_baseline",
+                "clinical_baseline_episode_id",
+                "clinical_baseline_date",
+            ],
+            dropna=False,
+        )
+        .agg(
+            n_total_lab_records=("patient_id", "size"),
+            n_prebaseline_lab_records=(
+                "days_from_clinical_baseline",
+                lambda x: x.lt(0).sum(),
+            ),
+            n_same_day_lab_records=(
+                "days_from_clinical_baseline",
+                lambda x: x.eq(0).sum(),
+            ),
+            n_postbaseline_lab_records=(
+                "days_from_clinical_baseline",
+                lambda x: x.gt(0).sum(),
+            ),
+            min_days_from_baseline=("days_from_clinical_baseline", "min"),
+            max_days_from_baseline=("days_from_clinical_baseline", "max"),
+        )
+        .reset_index()
+    )
+    timing = [
+        "n_prebaseline_lab_records",
+        "n_same_day_lab_records",
+        "n_postbaseline_lab_records",
+        "min_days_from_baseline",
+        "max_days_from_baseline",
+    ]
+    qc.loc[~qc["has_clinical_baseline"], timing] = pd.NA
+    return qc
 
 
 def _read_lab_files(root: Path) -> pd.DataFrame:
@@ -526,6 +796,9 @@ def main() -> None:
     annotated = annotate_expected_pairs(labs_input, reference)
     labs, ambiguous = attach_clinical_context(annotated, spine)
     coverage = build_cluster_coverage(labs, reference)
+    alias_qc = build_alias_qc(labs)
+    semantic_qc = build_semantic_mapping_qc(labs)
+    core_qc = build_core_mapping_qc(labs)
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.report_dir.mkdir(parents=True, exist_ok=True)
     labs[
@@ -533,14 +806,19 @@ def main() -> None:
         + [column for column in PRESERVED_METADATA if column in labs.columns]
     ].to_parquet(config.output_path, index=False)
     coverage.to_csv(config.report_dir / "20_lab_cluster_coverage.csv", index=False)
+    alias_qc.to_csv(config.report_dir / "20_lab_alias_mapping_qc.csv", index=False)
+    semantic_qc.to_csv(
+        config.report_dir / "20_lab_semantic_mapping_qc.csv", index=False
+    )
+    core_qc.to_csv(config.report_dir / "20_core_lab_mapping_qc.csv", index=False)
     ambiguous.to_csv(config.report_dir / "20_lab_episode_ambiguous.csv", index=False)
     invalid = labs[~labs["result_valid_for_analysis"]]
     invalid[
         [
             "patient_id",
             "lab_date",
-            "order_name",
-            "cluster_name",
+            "order_name_original",
+            "cluster_name_original",
             "result_raw",
             "result_status",
             "invalid_result_reason",
@@ -567,30 +845,7 @@ def main() -> None:
             "percent": counts.values / len(labs) * 100 if len(labs) else 0,
         }
     ).to_csv(config.report_dir / "20_lab_episode_match_summary.csv", index=False)
-    baseline_qc = (
-        labs.groupby(
-            ["patient_id", "clinical_baseline_episode_id", "clinical_baseline_date"],
-            dropna=False,
-        )
-        .agg(
-            n_total_lab_records=("patient_id", "size"),
-            n_prebaseline_lab_records=(
-                "days_from_clinical_baseline",
-                lambda x: x.lt(0).sum(),
-            ),
-            n_same_day_lab_records=(
-                "days_from_clinical_baseline",
-                lambda x: x.eq(0).sum(),
-            ),
-            n_postbaseline_lab_records=(
-                "days_from_clinical_baseline",
-                lambda x: x.gt(0).sum(),
-            ),
-            min_days_from_baseline=("days_from_clinical_baseline", "min"),
-            max_days_from_baseline=("days_from_clinical_baseline", "max"),
-        )
-        .reset_index()
-    )
+    baseline_qc = build_baseline_context_qc(labs)
     baseline_qc.to_csv(
         config.report_dir / "20_lab_baseline_context_qc.csv", index=False
     )
@@ -606,6 +861,12 @@ def main() -> None:
                     ]
                 ).nunique(),
                 "n_patients_with_labs": labs["patient_id"].nunique(),
+                "n_patients_with_clinical_baseline": labs.loc[
+                    labs["has_clinical_baseline"], "patient_id"
+                ].nunique(),
+                "n_patients_without_clinical_baseline": labs.loc[
+                    ~labs["has_clinical_baseline"], "patient_id"
+                ].nunique(),
                 "n_lab_rows_input": len(labs_input),
                 "n_lab_rows_valid": int(labs["result_valid_for_analysis"].sum()),
                 "n_lab_rows_invalid": int((~labs["result_valid_for_analysis"]).sum()),
@@ -616,6 +877,21 @@ def main() -> None:
                     expected_rows["expected_cluster_not_found"].sum()
                 ),
                 "n_unexpected_order_cluster_pairs": len(coverage) - len(reference),
+                "n_rows_exact_reference": int(
+                    labs["mapping_status"].eq("exact_reference").sum()
+                ),
+                "n_rows_explicit_alias": int(
+                    labs["mapping_status"].eq("explicit_alias").sum()
+                ),
+                "n_rows_unexpected_unmapped": int(
+                    labs["mapping_status"].eq("unexpected_unmapped").sum()
+                ),
+                "n_semantic_pairs_complete": int(
+                    semantic_qc["semantic_mapping_complete"].sum()
+                ),
+                "n_semantic_pairs_incomplete": int(
+                    (~semantic_qc["semantic_mapping_complete"]).sum()
+                ),
                 "min_lab_date": labs["lab_date"].min(),
                 "max_lab_date": labs["lab_date"].max(),
             }
