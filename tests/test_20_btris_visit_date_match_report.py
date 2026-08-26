@@ -218,3 +218,111 @@ def test_reference_requires_all_256_exact_pairs(tmp_path: Path) -> None:
     _reference(("only", "one")).to_csv(path, index=False)
     with pytest.raises(ValueError, match="Expected 256 exact pairs"):
         btris.load_reference(path)
+
+
+def test_patient_without_baseline_is_retained() -> None:
+    spine = _spine().copy()
+    spine[["clinical_baseline_episode_id", "clinical_baseline_date"]] = pd.NA
+    output, _ = btris.attach_clinical_context(
+        btris.normalize_lab_records(_raw(["2020-01-01"])), spine
+    )
+    assert len(output) == 1
+    assert not bool(output.loc[0, "has_clinical_baseline"])
+    assert pd.isna(output.loc[0, "days_from_clinical_baseline"])
+
+
+@pytest.mark.parametrize(
+    "original,canonical,cluster,analyte",
+    [
+        (
+            "RHEUMATOID FACTOR",
+            "Rheumatoid Factor",
+            "Rheumatoid Factor (Blood)",
+            "rheumatoid_factor",
+        ),
+        ("CRYOGLOBULINS", "Cryoglobulins", "Cryoglobulins (Blood)", "cryoglobulins"),
+    ],
+)
+def test_explicit_historical_aliases_preserve_original(
+    original: str, canonical: str, cluster: str, analyte: str
+) -> None:
+    output = btris.annotate_expected_pairs(
+        btris.normalize_lab_records(_raw(["2020-01-01"], original, cluster)),
+        _reference((canonical, cluster)),
+    )
+    assert output.loc[0, "order_name_original"] == original
+    assert output.loc[0, "order_name_canonical"] == canonical
+    assert output.loc[0, "mapping_status"] == "explicit_alias"
+    assert output.loc[0, "canonical_analyte"] == analyte
+
+
+def test_similar_unapproved_order_is_not_aliased() -> None:
+    output = btris.annotate_expected_pairs(
+        btris.normalize_lab_records(
+            _raw(["2020-01-01"], "RHEUMATOID FACTOR TEST", "Rheumatoid Factor (Blood)")
+        ),
+        _reference(("Rheumatoid Factor", "Rheumatoid Factor (Blood)")),
+    )
+    assert output.loc[0, "order_name_canonical"] == "RHEUMATOID FACTOR TEST"
+    assert output.loc[0, "mapping_status"] == "unexpected_unmapped"
+    assert pd.isna(output.loc[0, "canonical_analyte"])
+
+
+def test_missing_cluster_is_unexpected_and_not_inferred() -> None:
+    raw = _raw(["2020-01-01"], "C3/C4", "placeholder")
+    raw.loc[0, "Cluster Name"] = pd.NA
+    output = btris.annotate_expected_pairs(
+        btris.normalize_lab_records(raw),
+        _reference(("C3/C4", "Complement C4 (Blood)")),
+    )
+    assert output.loc[0, "mapping_status"] == "unexpected_unmapped"
+    assert bool(output.loc[0, "unexpected_cluster_name"])
+    assert pd.isna(output.loc[0, "canonical_analyte"])
+
+
+def test_required_semantic_components_remain_distinct() -> None:
+    pairs = [
+        ("Anti-Nuclear Antibody", "Antinuclear Antibody (ANA) (Blood)"),
+        (
+            "ANA Hep-2 Substrate, IgG",
+            "Antinuclear Antibody (ANA) HEp-2 Substrate (Blood)",
+        ),
+        (
+            "ANA Hep-2 Substrate, IgG",
+            "Antinuclear Antibody (ANA) HEp-2 Substrate Titer (Blood)",
+        ),
+        (
+            "ANA Hep-2 Substrate, IgG",
+            "Antinuclear Antibody (ANA) HEp-2 Substrate Pattern (Blood)",
+        ),
+        (
+            "ANA Hep-2 Substrate, IgG",
+            "Antinuclear Antibody (ANA) HEp-2 Cytoplasmic Pattern (Blood)",
+        ),
+        ("C3/C4", "Complement C3 (Blood)"),
+        ("C3/C4", "Complement C4 (Blood)"),
+        ("CBC + Diff", "WBC (Blood)"),
+        ("CBC + Diff", "Neutrophil Abs (Blood)"),
+        ("CBC + Diff", "Lymphocytes Abs (Blood)"),
+        ("CBC + Diff", "Hemoglobin (Blood)"),
+        ("CBC + Diff", "Platelet Count (Blood)"),
+    ]
+    rows = pd.concat([_raw(["2020-01-01"], *pair) for pair in pairs])
+    output = btris.annotate_expected_pairs(
+        btris.normalize_lab_records(rows), _reference(*pairs)
+    )
+    assert output["canonical_analyte"].tolist() == [
+        "ana_status",
+        "ana_hep2_status",
+        "ana_hep2_titer",
+        "ana_hep2_pattern",
+        "ana_hep2_cytoplasmic_pattern",
+        "complement_c3",
+        "complement_c4",
+        "wbc",
+        "anc",
+        "lymphocyte_count",
+        "hemoglobin",
+        "platelet_count",
+    ]
+    assert output["canonical_analyte"].is_unique
