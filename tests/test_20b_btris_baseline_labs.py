@@ -64,6 +64,66 @@ def record(
 
 
 @pytest.mark.parametrize(
+    ("updates", "expected"),
+    [
+        ({"reference_operator": "<", "reference_bound": 1.0}, True),
+        ({"reference_low": 3.98, "reference_high": 10.04}, True),
+        ({}, False),
+    ],
+)
+def test_reference_evidence_includes_one_sided_ranges(
+    updates: dict[str, object], expected: bool
+) -> None:
+    """Structured reference evidence does not require bilateral bounds."""
+    row = record("anti_ro_ssa", -1, "", **updates)
+    evidence = MODULE.reference_evidence_mask(pd.DataFrame([row]))
+    assert bool(evidence.iloc[0]) is expected
+
+
+def test_ana_traditional_hep2_discordance_is_not_duplicate_conflict() -> None:
+    """Different ANA status assays remain distinct in the audit."""
+    rows = pd.DataFrame(
+        [
+            record("ana_status", -1, "positive"),
+            record("ana_hep2_status", -1, "negative"),
+        ]
+    )
+    flags = MODULE.classify_ana_conflict_group(rows)
+    assert flags["contains_both_traditional_and_hep2"] is True
+    assert flags["different_assay"] is True
+    assert flags["positive_negative_pair"] is True
+    assert flags["duplicate_conflict"] is False
+
+
+def test_ana_same_assay_same_order_is_duplicate_conflict_candidate() -> None:
+    """Incompatible HEp-2 statuses on one order have strong specimen identity."""
+    rows = pd.DataFrame(
+        [
+            record("ana_hep2_status", -1, "positive", order_identifier="O1"),
+            record("ana_hep2_status", -1, "negative", order_identifier="O1"),
+        ]
+    )
+    flags = MODULE.classify_ana_conflict_group(rows)
+    assert flags["same_assay"] is True
+    assert flags["same_order_identifier"] is True
+    assert flags["positive_negative_pair"] is True
+    assert flags["duplicate_conflict"] is True
+
+
+def test_ana_supporting_titer_is_not_a_status_conflict() -> None:
+    """A titer supports an ANA result and is never compared as binary status."""
+    rows = pd.DataFrame(
+        [
+            record("ana_status", -1, "positive"),
+            record("ana_hep2_titer", -1, "1:320"),
+        ]
+    )
+    reports = MODULE.build_ana_conflict_qc(rows)
+    characteristics = reports["20b_ana_conflict_characteristics_qc.csv"]
+    assert characteristics["n_conflict_groups"].sum() == 0
+
+
+@pytest.mark.parametrize(
     ("token", "expected"),
     [
         ("positive", True),

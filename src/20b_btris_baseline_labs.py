@@ -14,6 +14,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from itertools import combinations
 from typing import Any, Mapping
 
 import pandas as pd
@@ -967,6 +968,38 @@ def _nonmissing(series: pd.Series) -> pd.Series:
     return series.notna() & series.astype("string").str.strip().ne("").fillna(False)
 
 
+def reference_evidence_mask(records: pd.DataFrame) -> pd.Series:
+    """Identify bilateral, one-sided, or qualitative reference evidence."""
+    index = records.index
+
+    def populated(column: str) -> pd.Series:
+        if column not in records:
+            return pd.Series(False, index=index)
+        return _nonmissing(records[column])
+
+    parse_status = records.get(
+        "reference_range_parse_status", pd.Series(pd.NA, index=index)
+    ).astype("string")
+    return (
+        populated("reference_low")
+        | populated("reference_high")
+        | (populated("reference_operator") & populated("reference_bound"))
+        | parse_status.eq("qualitative_reference").fillna(False)
+    )
+
+
+def _explicit_qualitative_mask(records: pd.DataFrame) -> pd.Series:
+    """Identify explicitly interpretable result text without using ranges."""
+    result = pd.Series(False, index=records.index)
+    for column in ["result_text", "result_raw"]:
+        if column not in records:
+            continue
+        normalized = records[column].map(_norm)
+        result |= normalized.isin(POSITIVE | NEGATIVE | LOW | NORMAL_HIGH)
+        result |= normalized.str.contains(r"\b(?:positive|negative)\b", regex=True)
+    return result
+
+
 def build_core_input_evidence_qc(labs: pd.DataFrame) -> pd.DataFrame:
     """Summarize evidence available to interpret core laboratory analytes.
 
@@ -990,6 +1023,8 @@ def build_core_input_evidence_qc(labs: pd.DataFrame) -> pd.DataFrame:
         "reported_interpretation",
         "reference_low",
         "reference_high",
+        "reference_operator",
+        "reference_bound",
         "unit",
     ]
     for analyte, mode in CORE_INPUT_EVIDENCE_MODES.items():
@@ -997,24 +1032,30 @@ def build_core_input_evidence_qc(labs: pd.DataFrame) -> pd.DataFrame:
         n_rows = len(group)
         populated = {column: _nonmissing(group[column]) for column in evidence_columns}
         counts = {column: int(mask.sum()) for column, mask in populated.items()}
+        structured_reference = reference_evidence_mask(group)
+        explicit_qualitative = _explicit_qualitative_mask(group)
         any_interpretation = (
             populated["reported_interpretation"]
-            | populated["result_text"]
-            | populated["reference_low"]
-            | populated["reference_high"]
+            | explicit_qualitative
+            | structured_reference
+        )
+        parse_status = group["reference_range_parse_status"].astype("string")
+        reference_parseable = parse_status.isin(
+            ["parsed_low_high", "parsed_one_sided", "qualitative_reference"]
         )
         if mode == "positive":
             numeric_without_evidence = (
                 populated["result_numeric"]
-                & ~populated["reference_high"]
+                & ~structured_reference
                 & ~populated["reported_interpretation"]
-                & ~populated["result_text"]
+                & ~explicit_qualitative
             )
         else:
             numeric_without_evidence = (
                 populated["result_numeric"]
-                & ~populated["reference_low"]
+                & ~structured_reference
                 & ~populated["reported_interpretation"]
+                & ~explicit_qualitative
             )
         row: dict[str, Any] = {
             "canonical_analyte": analyte,
@@ -1038,14 +1079,227 @@ def build_core_input_evidence_qc(labs: pd.DataFrame) -> pd.DataFrame:
                 "n_rows_numeric_but_no_reference_or_interpretation": int(
                     numeric_without_evidence.sum()
                 ),
+                "n_reference_range_parseable": int(reference_parseable.sum()),
+                "pct_reference_range_parseable": (
+                    reference_parseable.mean() * 100 if n_rows else 0.0
+                ),
+                "n_rows_with_structured_reference_evidence": int(
+                    structured_reference.sum()
+                ),
+                "pct_rows_with_structured_reference_evidence": (
+                    structured_reference.mean() * 100 if n_rows else 0.0
+                ),
+                "core_reference_evidence_missing": bool(
+                    n_rows > 0 and not any_interpretation.any()
+                ),
             }
         )
         rows.append(row)
     return pd.DataFrame(rows)
 
 
+ANA_STATUS_SOURCES = {"ana_status", "ana_hep2_status"}
+
+
+def _ana_status(row: pd.Series) -> str:
+    """Return the three-level status used only by the ANA conflict audit."""
+    interpreted = interpret_result(row, "positive").interpreted_status
+    if pd.isna(interpreted):
+        return "uninterpretable"
+    return "positive" if bool(interpreted) else "negative"
+
+
+def classify_ana_conflict_group(records: pd.DataFrame) -> dict[str, bool]:
+    """Classify one same-patient/day ANA status group without resolving it."""
+    status = records[records["canonical_analyte"].isin(ANA_STATUS_SOURCES)].copy()
+    sources = set(status["canonical_analyte"])
+    values = set(status.apply(_ana_status, axis=1))
+    order_ids = status.get("order_identifier", pd.Series(pd.NA, index=status.index))
+    order_ids = order_ids[_nonmissing(order_ids)]
+    specimens = status.get("specimen_datetime", pd.Series(pd.NaT, index=status.index))
+    specimens = specimens[specimens.notna()]
+    same_assay = len(sources) == 1 and len(status) > 1
+    same_order = len(order_ids) == len(status) and order_ids.nunique() == 1
+    same_specimen = len(specimens) == len(status) and specimens.nunique() == 1
+    strong_specimen = same_order or (same_specimen and same_assay)
+    return {
+        "contains_traditional_ana": "ana_status" in sources,
+        "contains_hep2_status": "ana_hep2_status" in sources,
+        "contains_both_traditional_and_hep2": sources == ANA_STATUS_SOURCES,
+        "same_order_identifier": same_order,
+        "different_order_identifier": len(order_ids) > 1 and order_ids.nunique() > 1,
+        "same_specimen_datetime": same_specimen,
+        "different_specimen_datetime_same_day": (
+            len(specimens) > 1 and specimens.nunique() > 1
+        ),
+        "all_same_canonical_analyte": len(sources) == 1,
+        "mixed_canonical_analytes": len(sources) > 1,
+        "contains_positive": "positive" in values,
+        "contains_negative": "negative" in values,
+        "contains_uninterpretable": "uninterpretable" in values,
+        "positive_negative_pair": {"positive", "negative"}.issubset(values),
+        "positive_uninterpretable_pair": {"positive", "uninterpretable"}.issubset(
+            values
+        ),
+        "negative_uninterpretable_pair": {"negative", "uninterpretable"}.issubset(
+            values
+        ),
+        "same_assay": same_assay,
+        "different_assay": len(sources) > 1,
+        "duplicate_conflict": same_assay and strong_specimen and len(values) > 1,
+        "assay_discordance": len(sources) > 1 and len(values) > 1,
+        "same_canonical_analyte_same_order_id": same_assay and same_order,
+        "same_canonical_analyte_different_order_id": (
+            same_assay and len(order_ids) > 1 and order_ids.nunique() > 1
+        ),
+        "multiple_interpretable_same_status": (
+            len(status) > 1 and len(values) == 1 and "uninterpretable" not in values
+        ),
+    }
+
+
+def build_ana_conflict_qc(labs: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Build aggregate ANA same-day conflict characterization reports."""
+    status = labs[labs["canonical_analyte"].isin(ANA_STATUS_SOURCES)].copy()
+    status["lab_calendar_date"] = pd.to_datetime(status["lab_date"]).dt.normalize()
+    groups: list[tuple[tuple[Any, Any], pd.DataFrame, dict[str, bool]]] = []
+    for key, group in status.groupby(["patient_id", "lab_calendar_date"], dropna=False):
+        if len(group) < 2 or not resolve_day(group, "positive", ana=True)["conflict"]:
+            continue
+        groups.append((key, group, classify_ana_conflict_group(group)))
+    total = len(groups)
+    characteristics = []
+    characteristic_names = (
+        list(groups[0][2])
+        if groups
+        else [
+            "contains_traditional_ana",
+            "contains_hep2_status",
+            "contains_both_traditional_and_hep2",
+            "same_order_identifier",
+            "different_order_identifier",
+            "same_specimen_datetime",
+            "different_specimen_datetime_same_day",
+            "all_same_canonical_analyte",
+            "mixed_canonical_analytes",
+            "contains_positive",
+            "contains_negative",
+            "contains_uninterpretable",
+            "positive_negative_pair",
+            "positive_uninterpretable_pair",
+            "negative_uninterpretable_pair",
+            "same_assay",
+            "different_assay",
+            "duplicate_conflict",
+            "assay_discordance",
+            "same_canonical_analyte_same_order_id",
+            "same_canonical_analyte_different_order_id",
+            "multiple_interpretable_same_status",
+        ]
+    )
+    for name in characteristic_names:
+        matched = [(key, flags) for key, _, flags in groups if flags[name]]
+        characteristics.append(
+            {
+                "characteristic": name,
+                "n_conflict_groups": len(matched),
+                "n_patients": len({key[0] for key, _ in matched}),
+                "pct": len(matched) / total * 100 if total else 0.0,
+            }
+        )
+    summary_map = {
+        "traditional_ana_vs_hep2": "contains_both_traditional_and_hep2",
+        "same_canonical_analyte_same_order_id": "same_canonical_analyte_same_order_id",
+        "same_canonical_analyte_different_order_id": "same_canonical_analyte_different_order_id",
+        "same_specimen_datetime": "same_specimen_datetime",
+        "different_specimen_datetime_same_day": "different_specimen_datetime_same_day",
+        "positive_vs_negative": "positive_negative_pair",
+        "positive_vs_uninterpretable": "positive_uninterpretable_pair",
+        "negative_vs_uninterpretable": "negative_uninterpretable_pair",
+        "multiple_interpretable_same_status": "multiple_interpretable_same_status",
+    }
+    summary = []
+    for conflict_type, flag in summary_map.items():
+        matched = [(key, flags) for key, _, flags in groups if flags[flag]]
+        summary.append(
+            {
+                "conflict_type": conflict_type,
+                "n_conflict_groups": len(matched),
+                "n_patients": len({key[0] for key, _ in matched}),
+                "pct_of_all_ana_conflict_groups": (
+                    len(matched) / total * 100 if total else 0.0
+                ),
+            }
+        )
+    classified_flags = set(summary_map.values())
+    unclassified = [
+        (key, flags)
+        for key, _, flags in groups
+        if not any(flags[name] for name in classified_flags)
+    ]
+    summary.append(
+        {
+            "conflict_type": "unclassified",
+            "n_conflict_groups": len(unclassified),
+            "n_patients": len({key[0] for key, _ in unclassified}),
+            "pct_of_all_ana_conflict_groups": (
+                len(unclassified) / total * 100 if total else 0.0
+            ),
+        }
+    )
+    source_counts: dict[tuple[str, str], list[Any]] = {}
+    pair_counts: dict[tuple[str, str], list[Any]] = {}
+    for key, group, flags in groups:
+        sources = sorted(set(group["canonical_analyte"]))
+        source_pairs = (
+            combinations(sources, 2) if len(sources) > 1 else [(sources[0], sources[0])]
+        )
+        for pair in source_pairs:
+            source_counts.setdefault(pair, []).append(key[0])
+        status_order = {"positive": 0, "negative": 1, "uninterpretable": 2}
+        values = sorted(set(group.apply(_ana_status, axis=1)), key=status_order.get)
+        status_pair = (
+            "_".join(values) if len(values) > 1 else f"{values[0]}_{values[0]}"
+        )
+        assay_class = "same_assay" if flags["same_assay"] else "different_assay"
+        pair_counts.setdefault((status_pair, assay_class), []).append(key[0])
+    source_pair = [
+        {
+            "source_a": a,
+            "source_b": b,
+            "n_conflict_groups": len(patients),
+            "n_patients": len(set(patients)),
+        }
+        for (a, b), patients in source_counts.items()
+    ]
+    status_pair = [
+        {
+            "status_pair": pair,
+            "assay_relationship": assay,
+            "n_groups": len(patients),
+            "n_patients": len(set(patients)),
+        }
+        for (pair, assay), patients in pair_counts.items()
+    ]
+    return {
+        "20b_ana_conflict_summary_qc.csv": pd.DataFrame(summary),
+        "20b_ana_conflict_characteristics_qc.csv": pd.DataFrame(characteristics),
+        "20b_ana_conflict_source_pair_qc.csv": pd.DataFrame(
+            source_pair,
+            columns=["source_a", "source_b", "n_conflict_groups", "n_patients"],
+        ),
+        "20b_ana_status_pair_qc.csv": pd.DataFrame(
+            status_pair,
+            columns=["status_pair", "assay_relationship", "n_groups", "n_patients"],
+        ),
+    }
+
+
 def _build_hard_qc(
-    long: pd.DataFrame, wide: pd.DataFrame, mismatches: int
+    long: pd.DataFrame,
+    wide: pd.DataFrame,
+    mismatches: int,
+    labs: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build invariant checks for derived baseline laboratory statuses."""
     long = long.copy()
@@ -1058,6 +1312,13 @@ def _build_hard_qc(
             long[column] = pd.NA
     dynamic = long[long["baseline_feature"].isin(DYNAMIC_SOURCES)]
     stable = long[long["baseline_feature"].isin(STABLE_SOURCES)]
+    one_sided_missed = 0
+    if labs is not None:
+        operator_and_bound = _nonmissing(labs["reference_operator"]) & _nonmissing(
+            labs["reference_bound"]
+        )
+        missing_reference_evidence = ~reference_evidence_mask(labs)
+        one_sided_missed = int((operator_and_bound & missing_reference_evidence).sum())
     hard = {
         "more_than_one_primary_per_patient_feature": int(
             long.duplicated(["patient_id", "baseline_feature"]).sum()
@@ -1207,6 +1468,7 @@ def _build_hard_qc(
                 & long["interpretation_source"].eq("reference_range_ambiguous")
             ).sum()
         ),
+        "one_sided_reference_not_counted_as_evidence": one_sided_missed,
         "duplicate_patient_rows_wide": int(wide["patient_id"].duplicated().sum()),
     }
     return pd.DataFrame(
@@ -1371,8 +1633,9 @@ def build_qc(
                 "n_uninterpretable": int(closest.isna().sum()),
             }
         )
-    hard_qc = _build_hard_qc(long, wide, mismatches)
+    hard_qc = _build_hard_qc(long, wide, mismatches, labs)
     core_input_evidence_qc = build_core_input_evidence_qc(labs)
+    ana_conflict_reports = build_ana_conflict_qc(labs)
     interpretation = (
         long.groupby(["baseline_feature", "interpretation_source"], dropna=False)
         .size()
@@ -1397,7 +1660,7 @@ def build_qc(
     audit["n_core_features_missing"] = (
         len(FEATURES) - audit["n_core_features_available"]
     )
-    return {
+    reports = {
         "20b_baseline_lab_selection_summary.csv": pd.DataFrame(summaries),
         "20b_baseline_lab_temporal_distribution.csv": pd.DataFrame(temporal),
         "20b_baseline_lab_conflicts.csv": long[long["same_day_conflict"]],
@@ -1430,7 +1693,9 @@ def build_qc(
         "20b_baseline_lab_sensitivity_summary.csv": pd.DataFrame(sensitivity),
         "20b_baseline_lab_hard_qc.csv": hard_qc,
         "20b_core_input_evidence_qc.csv": core_input_evidence_qc,
-    }, hard_qc
+    }
+    reports.update(ana_conflict_reports)
+    return reports, hard_qc
 
 
 def run(
@@ -1455,6 +1720,9 @@ def run(
     wide.to_parquet(wide_path, index=False)
     for filename, report in reports.items():
         report.to_csv(qc_dir / filename, index=False)
+    reports["20b_core_input_evidence_qc.csv"].to_csv(
+        qc_dir.parent / "20_core_interpretation_evidence_qc.csv", index=False
+    )
     summary = reports["20b_baseline_lab_selection_summary.csv"]
     logger.info(
         "Patients spine=%d eligible=%d any_BTRIS=%d",
