@@ -44,6 +44,12 @@ def record(
         "unit": pd.NA,
         "reference_low": pd.NA,
         "reference_high": pd.NA,
+        "reference_operator": pd.NA,
+        "reference_bound": pd.NA,
+        "reference_range_raw": pd.NA,
+        "reference_range_parse_status": "missing",
+        "result_operator": pd.NA,
+        "result_numeric_bound": pd.NA,
         "reported_interpretation": pd.NA,
         "result_status": "final",
         "result_valid_for_analysis": True,
@@ -52,6 +58,8 @@ def record(
         "observation_identifier": f"{analyte}-{days}-{result}",
     }
     row.update(updates)
+    if pd.notna(row["reference_low"]) and pd.notna(row["reference_high"]):
+        row["reference_range_parse_status"] = "parsed_low_high"
     return row
 
 
@@ -198,8 +206,26 @@ def test_dynamic_directionality_and_rescue() -> None:
     [
         ({"reported_interpretation": "low"}, True, "reported_interpretation"),
         ({"reported_interpretation": "normal"}, False, "reported_interpretation"),
-        ({"result_numeric": 3, "reference_low": 4}, True, "reference_range"),
-        ({"result_numeric": 4, "reference_low": 4}, False, "reference_range"),
+        (
+            {
+                "result_numeric": 3,
+                "reference_low": 4,
+                "reference_high": 10,
+                "reference_range_parse_status": "parsed_low_high",
+            },
+            True,
+            "reference_range_exact_numeric",
+        ),
+        (
+            {
+                "result_numeric": 4,
+                "reference_low": 4,
+                "reference_high": 10,
+                "reference_range_parse_status": "parsed_low_high",
+            },
+            False,
+            "reference_range_exact_numeric",
+        ),
         ({"result_numeric": 3}, pd.NA, "uninterpretable"),
     ],
 )
@@ -216,18 +242,84 @@ def test_low_interpretation_never_invents_cutoff(
 
 
 @pytest.mark.parametrize(
-    ("numeric", "reference_high", "expected"),
-    [(11, 10, True), (10, 10, False), (9, 10, False)],
+    ("numeric", "low", "high", "expected"),
+    [
+        (10, 15, 57, True),
+        (20, 15, 57, False),
+        (60, 15, 57, False),
+        (3.2, 3.98, 10.04, True),
+        (5.0, 3.98, 10.04, False),
+    ],
 )
-def test_numeric_serology_uses_contemporaneous_reference_high(
-    numeric: float, reference_high: float, expected: bool
+def test_c4_and_wbc_use_row_specific_lower_bound(
+    numeric: float, low: float, high: float, expected: bool
+) -> None:
+    """Low status is relative to the same row's bilateral normal range."""
+    result = MODULE.interpret_against_reference(
+        {
+            "result_numeric": numeric,
+            "reference_low": low,
+            "reference_high": high,
+            "reference_range_parse_status": "parsed_low_high",
+        },
+        "low",
+    )
+    assert result is not None
+    assert result.interpreted_status is expected
+
+
+@pytest.mark.parametrize(("numeric", "expected"), [(2, True), (0.5, False)])
+def test_numeric_serology_uses_contemporaneous_one_sided_range(
+    numeric: float, expected: bool
 ) -> None:
     """Quantitative serology is interpreted only against available assay range."""
     result = MODULE.interpret_result(
-        {"result_numeric": numeric, "reference_high": reference_high}, "positive"
+        {
+            "result_numeric": numeric,
+            "reference_operator": "<",
+            "reference_bound": 1.0,
+            "reference_range_parse_status": "parsed_one_sided",
+        },
+        "positive",
     )
     assert result.interpreted_status is expected
-    assert result.interpretation_source == "reference_range"
+    assert result.interpretation_source == "reference_range_exact_numeric"
+
+
+@pytest.mark.parametrize(
+    ("result_operator", "result_bound", "reference_bound", "expected"),
+    [
+        (">", 8.0, 1.0, True),
+        ("<", 0.2, 1.0, False),
+        ("<", 10, 13, False),
+        (">", 3000, 15, True),
+        ("<", 15, 13, pd.NA),
+        ("<", 20, 20, False),
+    ],
+)
+def test_censored_serology_uses_interval_reasoning(
+    result_operator: str,
+    result_bound: float,
+    reference_bound: float,
+    expected: object,
+) -> None:
+    """Only wholly negative or positive censored intervals are classified."""
+    result = MODULE.interpret_result(
+        {
+            "result_operator": result_operator,
+            "result_numeric_bound": result_bound,
+            "reference_operator": "<",
+            "reference_bound": reference_bound,
+            "reference_range_parse_status": "parsed_one_sided",
+        },
+        "positive",
+    )
+    if pd.isna(expected):
+        assert pd.isna(result.interpreted_status)
+        assert result.interpretation_source == "reference_range_ambiguous"
+    else:
+        assert result.interpreted_status is expected
+        assert result.interpretation_source == "reference_range_censored"
 
 
 def test_numeric_serology_without_range_or_cutoff_is_missing() -> None:

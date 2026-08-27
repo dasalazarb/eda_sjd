@@ -45,6 +45,8 @@ OUTPUT_COLUMNS = [
     "reference_range_raw",
     "reference_low",
     "reference_high",
+    "reference_operator",
+    "reference_bound",
     "reference_range_parse_status",
     "observation_comment",
     "observation_note",
@@ -632,7 +634,22 @@ class ParsedNumericResult:
 _NUMBER_PATTERN = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 _CENSORED_RESULT_PATTERN = re.compile(rf"^\s*(<=|>=|<|>|=)\s*({_NUMBER_PATTERN})\s*$")
 _EXACT_RESULT_PATTERN = re.compile(rf"^\s*({_NUMBER_PATTERN})\s*$")
-_ONE_SIDED_RANGE_PATTERN = re.compile(rf"^\s*(?:<=|>=|<|>)\s*{_NUMBER_PATTERN}\s*$")
+_LOW_HIGH_RANGE_PATTERN = re.compile(
+    rf"^\s*({_NUMBER_PATTERN})\s*-\s*({_NUMBER_PATTERN})\s*$"
+)
+_ONE_SIDED_RANGE_PATTERN = re.compile(
+    rf"^\s*(<=|>=|<|>)\s*({_NUMBER_PATTERN})(?:\s+\([^)]*\))?\s*$",
+    re.IGNORECASE,
+)
+_TITER_REFERENCE_PATTERN = re.compile(r"^\s*(?:<=|>=|<|>)?\s*\d+\s*:\s*\d+")
+_QUALITATIVE_REFERENCE_TOKENS = {
+    "negative",
+    "positive",
+    "nonreactive",
+    "reactive",
+    "not detected",
+    "not detectable",
+}
 
 
 def parse_numeric_result(value: object) -> ParsedNumericResult:
@@ -660,16 +677,51 @@ def parse_numeric_result(value: object) -> ParsedNumericResult:
     return ParsedNumericResult(None, None, None)
 
 
-def classify_reference_range(value: object) -> str:
-    """Classify raw range syntax without deriving clinical reference limits."""
+@dataclass(frozen=True)
+class ParsedReferenceRange:
+    """Structural fields parsed from one contemporaneous reference range."""
+
+    low: float | None
+    high: float | None
+    operator: str | None
+    bound: float | None
+    status: str
+
+
+def parse_reference_range(value: object) -> ParsedReferenceRange:
+    """Parse reference-range structure without making a clinical interpretation."""
+    empty = (None, None, None, None)
     if pd.isna(value) or not str(value).strip():
-        return "missing"
+        return ParsedReferenceRange(*empty, "missing")
     text = str(value).strip()
-    if _ONE_SIDED_RANGE_PATTERN.fullmatch(text):
-        return "one_sided"
+    normalized = re.sub(r"\s+", " ", text).casefold()
+    if _TITER_REFERENCE_PATTERN.match(text):
+        return ParsedReferenceRange(*empty, "titer_reference")
+    bilateral = _LOW_HIGH_RANGE_PATTERN.fullmatch(text)
+    if bilateral:
+        low, high = float(bilateral.group(1)), float(bilateral.group(2))
+        if low <= high:
+            return ParsedReferenceRange(low, high, None, None, "parsed_low_high")
+        return ParsedReferenceRange(*empty, "ambiguous")
+    one_sided = _ONE_SIDED_RANGE_PATTERN.fullmatch(text)
+    if one_sided:
+        return ParsedReferenceRange(
+            None,
+            None,
+            one_sided.group(1),
+            float(one_sided.group(2)),
+            "parsed_one_sided",
+        )
+    if normalized in _QUALITATIVE_REFERENCE_TOKENS:
+        return ParsedReferenceRange(*empty, "qualitative_reference")
     if not re.search(r"\d", text):
-        return "non_numeric_text"
-    return "ambiguous"
+        return ParsedReferenceRange(*empty, "non_numeric_text")
+    return ParsedReferenceRange(*empty, "ambiguous")
+
+
+def classify_reference_range(value: object) -> str:
+    """Return the closed-vocabulary structural parse status for a raw range."""
+    return parse_reference_range(value).status
 
 
 def build_source_schema_qc(raw: pd.DataFrame, source_file: str) -> pd.DataFrame:
@@ -832,9 +884,22 @@ def normalize_lab_records(
     # Compatibility contract: censored bounds are never exact measurements.
     out["result_numeric"] = out["result_numeric_exact"]
     out["result_text"] = out["result_raw"].where(out["result_numeric_exact"].isna())
-    out["reference_range_parse_status"] = out["reference_range_raw"].map(
-        classify_reference_range
+    parsed_ranges = out["reference_range_raw"].map(parse_reference_range)
+    out["reference_low"] = pd.to_numeric(
+        parsed_ranges.map(lambda parsed: parsed.low), errors="coerce"
     )
+    out["reference_high"] = pd.to_numeric(
+        parsed_ranges.map(lambda parsed: parsed.high), errors="coerce"
+    )
+    out["reference_operator"] = parsed_ranges.map(
+        lambda parsed: parsed.operator
+    ).astype("string")
+    out["reference_bound"] = pd.to_numeric(
+        parsed_ranges.map(lambda parsed: parsed.bound), errors="coerce"
+    )
+    out["reference_range_parse_status"] = parsed_ranges.map(
+        lambda parsed: parsed.status
+    ).astype("string")
     invalid_text = (
         out["result_raw"]
         .fillna("")
@@ -1416,6 +1481,68 @@ def build_core_normal_range_token_qc(labs: pd.DataFrame) -> pd.DataFrame:
     return counts[columns]
 
 
+def build_core_reference_range_parse_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Count closed-vocabulary reference parse outcomes for core analytes."""
+    selected = labs[
+        labs["canonical_analyte"].isin(INTERPRETATION_EVIDENCE_ANALYTES[:8])
+    ]
+    counts = (
+        selected.groupby(
+            ["canonical_analyte", "reference_range_parse_status"], dropna=False
+        )
+        .size()
+        .rename("n_rows")
+        .reset_index()
+    )
+    counts["pct_within_analyte"] = (
+        counts["n_rows"]
+        / counts.groupby("canonical_analyte")["n_rows"].transform("sum")
+        * 100
+    )
+    return counts
+
+
+def build_core_result_range_relation_qc(labs: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate result and range forms without exposing patient identifiers."""
+    selected = labs[
+        labs["canonical_analyte"].isin(INTERPRETATION_EVIDENCE_ANALYTES[:8])
+    ].copy()
+    operator_forms = {"<": "lt", "<=": "lte", ">": "gt", ">=": "gte"}
+
+    def result_form(row: pd.Series) -> str:
+        operator = row.get("result_operator")
+        if pd.notna(operator) and operator in operator_forms:
+            return f"censored_{operator_forms[operator]}"
+        if pd.notna(row.get("result_numeric")):
+            return "exact_numeric"
+        if pd.notna(row.get("result_text")) and str(row["result_text"]).strip():
+            return "qualitative"
+        return "missing"
+
+    def range_form(row: pd.Series) -> str:
+        status = row.get("reference_range_parse_status")
+        if status == "parsed_low_high":
+            return "low_high"
+        if status == "parsed_one_sided":
+            suffix = operator_forms.get(row.get("reference_operator"))
+            return f"one_sided_{suffix}" if suffix else "missing"
+        return {
+            "titer_reference": "titer",
+            "qualitative_reference": "qualitative",
+        }.get(status, "missing")
+
+    selected["result_form"] = selected.apply(result_form, axis=1)
+    selected["range_form"] = selected.apply(range_form, axis=1)
+    return (
+        selected.groupby(
+            ["canonical_analyte", "result_form", "range_form"], dropna=False
+        )
+        .size()
+        .rename("n_rows")
+        .reset_index()
+    )
+
+
 def build_core_mapping_qc(labs: pd.DataFrame) -> pd.DataFrame:
     """Report whether every required core analyte is present and complete."""
     rows = []
@@ -1554,6 +1681,8 @@ def main() -> None:
     interpretation_evidence_qc = build_core_interpretation_evidence_qc(labs)
     qualitative_token_qc = build_core_qualitative_token_qc(labs)
     normal_range_token_qc = build_core_normal_range_token_qc(labs)
+    reference_parse_qc = build_core_reference_range_parse_qc(labs)
+    result_range_qc = build_core_result_range_relation_qc(labs)
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.report_dir.mkdir(parents=True, exist_ok=True)
     labs[
@@ -1573,6 +1702,12 @@ def main() -> None:
     )
     normal_range_token_qc.to_csv(
         config.report_dir / "20_core_normal_range_token_qc.csv", index=False
+    )
+    reference_parse_qc.to_csv(
+        config.report_dir / "20_core_reference_range_parse_qc.csv", index=False
+    )
+    result_range_qc.to_csv(
+        config.report_dir / "20_core_result_range_relation_qc.csv", index=False
     )
     alias_qc.to_csv(config.report_dir / "20_lab_alias_mapping_qc.csv", index=False)
     semantic_qc.to_csv(
