@@ -48,6 +48,10 @@ REQUIRED_LAB_COLUMNS = {
     "unit",
     "reference_low",
     "reference_high",
+    "reference_operator",
+    "reference_bound",
+    "reference_range_raw",
+    "reference_range_parse_status",
     "reported_interpretation",
     "result_status",
     "result_valid_for_analysis",
@@ -61,8 +65,6 @@ OPTIONAL_PROVENANCE = [
     "order_identifier",
     "assay",
     "observation_identifier",
-    "reference_range_raw",
-    "reference_range_parse_status",
     "result_numeric_exact",
     "result_operator",
     "result_numeric_bound",
@@ -176,6 +178,7 @@ def interpret_result(
     """
     reported = _norm(row.get("reported_interpretation"))
     raw_tokens = [_norm(row.get("result_text")), _norm(row.get("result_raw"))]
+    numeric = pd.to_numeric(row.get("result_numeric"), errors="coerce")
     if kind == "positive":
         for token, source in [
             (reported, "reported_interpretation"),
@@ -192,11 +195,12 @@ def interpret_result(
                 return Interpretation(True, source, "interpretable")
             if re.search(r"\bnegative\b", token):
                 return Interpretation(False, source, "interpretable")
-        numeric = pd.to_numeric(row.get("result_numeric"), errors="coerce")
-        reference_high = pd.to_numeric(row.get("reference_high"), errors="coerce")
-        if pd.notna(numeric) and pd.notna(reference_high):
+        reference = interpret_against_reference(row, kind)
+        if reference is not None:
+            return reference
+        if pd.notna(row.get("reference_range_raw")):
             return Interpretation(
-                bool(numeric > reference_high), "reference_range", "interpretable"
+                pd.NA, "uninterpretable", "unparsed_contemporaneous_reference"
             )
         if pd.notna(numeric) and prespecified_cutoff is not None:
             return Interpretation(
@@ -209,12 +213,19 @@ def interpret_result(
             return Interpretation(True, "reported_interpretation", "interpretable")
         if reported in NORMAL_HIGH:
             return Interpretation(False, "reported_interpretation", "interpretable")
-        numeric = pd.to_numeric(row.get("result_numeric"), errors="coerce")
-        reference_low = pd.to_numeric(row.get("reference_low"), errors="coerce")
-        if pd.notna(numeric) and pd.notna(reference_low):
+        for token in raw_tokens:
+            if token in LOW:
+                return Interpretation(True, "raw_qualitative_result", "interpretable")
+            if token in NORMAL_HIGH:
+                return Interpretation(False, "raw_qualitative_result", "interpretable")
+        reference = interpret_against_reference(row, kind)
+        if reference is not None:
+            return reference
+        if pd.notna(row.get("reference_range_raw")):
             return Interpretation(
-                bool(numeric < reference_low), "reference_range", "interpretable"
+                pd.NA, "uninterpretable", "unparsed_contemporaneous_reference"
             )
+        numeric = pd.to_numeric(row.get("result_numeric"), errors="coerce")
         if pd.notna(numeric) and prespecified_cutoff is not None:
             return Interpretation(
                 bool(numeric < prespecified_cutoff),
@@ -224,6 +235,114 @@ def interpret_result(
     else:
         raise ValueError(f"Unknown interpretation kind: {kind}")
     return Interpretation(pd.NA, "uninterpretable", "insufficient_explicit_evidence")
+
+
+def interpret_against_reference(
+    row: Mapping[str, Any], kind: str
+) -> Interpretation | None:
+    """Interpret one row only when its result/reference relation is decisive.
+
+    Censored results are treated as intervals. ``None`` means that the row has
+    no structurally parsed range; an ambiguous parsed relation is returned as
+    nullable evidence so callers cannot fall through to an unsafe cutoff.
+    """
+    status = row.get("reference_range_parse_status")
+    numeric = pd.to_numeric(row.get("result_numeric"), errors="coerce")
+    result_operator = row.get("result_operator")
+    result_bound = pd.to_numeric(row.get("result_numeric_bound"), errors="coerce")
+    if kind == "low" and status == "parsed_low_high":
+        low = pd.to_numeric(row.get("reference_low"), errors="coerce")
+        high = pd.to_numeric(row.get("reference_high"), errors="coerce")
+        if pd.notna(numeric) and pd.notna(low) and pd.notna(high):
+            return Interpretation(
+                bool(numeric < low),
+                "reference_range_exact_numeric",
+                "interpretable",
+            )
+        if pd.notna(result_bound) and pd.notna(low):
+            if result_operator in {"<", "<="} and (
+                result_bound < low or (result_bound == low and result_operator == "<")
+            ):
+                return Interpretation(True, "reference_range_censored", "interpretable")
+            if result_operator in {">", ">="} and result_bound >= low:
+                return Interpretation(
+                    False, "reference_range_censored", "interpretable"
+                )
+            return Interpretation(
+                pd.NA, "reference_range_ambiguous", "interval_crosses_threshold"
+            )
+        return None
+    if kind != "positive" or status != "parsed_one_sided":
+        return None
+    reference_operator = row.get("reference_operator")
+    threshold = pd.to_numeric(row.get("reference_bound"), errors="coerce")
+    if reference_operator not in {"<", "<=", ">", ">="} or pd.isna(threshold):
+        return None
+
+    def is_negative(value: float) -> bool:
+        return {
+            "<": value < threshold,
+            "<=": value <= threshold,
+            ">": value > threshold,
+            ">=": value >= threshold,
+        }[reference_operator]
+
+    if pd.notna(numeric):
+        return Interpretation(
+            not is_negative(float(numeric)),
+            "reference_range_exact_numeric",
+            "interpretable",
+        )
+    if pd.isna(result_bound) or result_operator not in {"<", "<=", ">", ">="}:
+        return None
+    bound = float(result_bound)
+    decisive_negative = False
+    decisive_positive = False
+    if reference_operator in {"<", "<="}:
+        decisive_negative = result_operator in {"<", "<="} and (
+            bound < threshold
+            or (bound == threshold and result_operator == "<")
+            or (
+                bound == threshold
+                and result_operator == "<="
+                and reference_operator == "<="
+            )
+        )
+        decisive_positive = result_operator in {">", ">="} and (
+            bound > threshold
+            or (bound == threshold and result_operator == ">")
+            or (
+                bound == threshold
+                and result_operator == ">="
+                and reference_operator == "<"
+            )
+        )
+    else:
+        decisive_negative = result_operator in {">", ">="} and (
+            bound > threshold
+            or (bound == threshold and result_operator == ">")
+            or (
+                bound == threshold
+                and result_operator == ">="
+                and reference_operator == ">="
+            )
+        )
+        decisive_positive = result_operator in {"<", "<="} and (
+            bound < threshold
+            or (bound == threshold and result_operator == "<")
+            or (
+                bound == threshold
+                and result_operator == "<="
+                and reference_operator == ">"
+            )
+        )
+    if decisive_negative or decisive_positive:
+        return Interpretation(
+            decisive_positive, "reference_range_censored", "interpretable"
+        )
+    return Interpretation(
+        pd.NA, "reference_range_ambiguous", "interval_crosses_threshold"
+    )
 
 
 def temporal_window(days: Any, stable: bool = False) -> str:
@@ -403,6 +522,14 @@ def _blank(patient: pd.Series, feature: str, has_labs: bool) -> dict[str, Any]:
         "interpretation_qc": "not_tested_or_not_available",
         "reference_low": pd.NA,
         "reference_high": pd.NA,
+        "selected_reference_range_raw": pd.NA,
+        "selected_reference_low": pd.NA,
+        "selected_reference_high": pd.NA,
+        "selected_reference_operator": pd.NA,
+        "selected_reference_bound": pd.NA,
+        "selected_reference_range_parse_status": pd.NA,
+        "selected_result_operator": pd.NA,
+        "selected_result_numeric_bound": pd.NA,
         "n_prebaseline_measurements": 0,
         "n_eligible_prebaseline_measurements": 0,
         "n_interpretable_prebaseline_measurements": 0,
@@ -460,6 +587,16 @@ def _populate_selected(
             "interpretation_qc": interpreted.interpretation_qc,
             "reference_low": row["reference_low"],
             "reference_high": row["reference_high"],
+            "selected_reference_range_raw": row.get("reference_range_raw", pd.NA),
+            "selected_reference_low": row.get("reference_low", pd.NA),
+            "selected_reference_high": row.get("reference_high", pd.NA),
+            "selected_reference_operator": row.get("reference_operator", pd.NA),
+            "selected_reference_bound": row.get("reference_bound", pd.NA),
+            "selected_reference_range_parse_status": row.get(
+                "reference_range_parse_status", pd.NA
+            ),
+            "selected_result_operator": row.get("result_operator", pd.NA),
+            "selected_result_numeric_bound": row.get("result_numeric_bound", pd.NA),
             "qc_status": (
                 "selected_interpretable"
                 if pd.notna(interpreted.interpreted_status)
@@ -911,6 +1048,14 @@ def _build_hard_qc(
     long: pd.DataFrame, wide: pd.DataFrame, mismatches: int
 ) -> pd.DataFrame:
     """Build invariant checks for derived baseline laboratory statuses."""
+    long = long.copy()
+    for column in [
+        "selected_reference_range_parse_status",
+        "selected_result_operator",
+        "selected_reference_low",
+    ]:
+        if column not in long:
+            long[column] = pd.NA
     dynamic = long[long["baseline_feature"].isin(DYNAMIC_SOURCES)]
     stable = long[long["baseline_feature"].isin(STABLE_SOURCES)]
     hard = {
@@ -1000,7 +1145,8 @@ def _build_hard_qc(
                 & ~long["interpretation_source"].isin(
                     [
                         "reported_interpretation",
-                        "reference_range",
+                        "reference_range_exact_numeric",
+                        "reference_range_censored",
                         "prespecified_cutoff",
                     ]
                 )
@@ -1013,7 +1159,8 @@ def _build_hard_qc(
                 & ~long["interpretation_source"].isin(
                     [
                         "reported_interpretation",
-                        "reference_range",
+                        "reference_range_exact_numeric",
+                        "reference_range_censored",
                         "prespecified_cutoff",
                     ]
                 )
@@ -1024,6 +1171,40 @@ def _build_hard_qc(
                 long["baseline_feature"].isin(DYNAMIC_SOURCES)
                 & long["interpretation_source"].eq("uninterpretable")
                 & long["primary_baseline_status"].eq(False)
+            ).sum()
+        ),
+        "reference_range_interpretation_without_parsed_range": int(
+            (
+                long["interpretation_source"].isin(
+                    ["reference_range_exact_numeric", "reference_range_censored"]
+                )
+                & ~long["selected_reference_range_parse_status"].isin(
+                    ["parsed_low_high", "parsed_one_sided"]
+                )
+            ).sum()
+        ),
+        "censored_result_forced_through_ambiguous_threshold": int(
+            (
+                long["selected_result_operator"].notna()
+                & long["interpretation_source"].eq("reference_range_ambiguous")
+                & long["primary_baseline_status"].notna()
+            ).sum()
+        ),
+        "low_status_without_reference_low_or_explicit_interpretation": int(
+            (
+                long["baseline_feature"].isin(["low_c4", "leukopenia"])
+                & long["primary_baseline_status"].notna()
+                & long["selected_reference_low"].isna()
+                & ~long["interpretation_source"].isin(
+                    ["reported_interpretation", "raw_qualitative_result"]
+                )
+            ).sum()
+        ),
+        "positive_status_from_one_sided_range_without_decisive_relation": int(
+            (
+                long["primary_baseline_status"].eq(True)
+                & long["selected_reference_range_parse_status"].eq("parsed_one_sided")
+                & long["interpretation_source"].eq("reference_range_ambiguous")
             ).sum()
         ),
         "duplicate_patient_rows_wide": int(wide["patient_id"].duplicated().sum()),
@@ -1068,6 +1249,15 @@ def build_qc(
                 ),
                 "n_with_primary_status": int(selected.sum()),
                 "coverage_pct": selected.mean() * 100,
+                "coverage_eligible_pct": (
+                    selected[group["lab_baseline_eligible"]].mean() * 100
+                    if group["lab_baseline_eligible"].any()
+                    else 0.0
+                ),
+                "n_missing_eligible": int(
+                    group["lab_baseline_eligible"].sum()
+                    - selected[group["lab_baseline_eligible"]].sum()
+                ),
                 **{
                     f"n_{cat}": int((group["temporal_window_category"] == cat).sum())
                     for cat in [
@@ -1234,6 +1424,7 @@ def build_qc(
             ]
         ],
         "20b_baseline_lab_interpretation_qc.csv": interpretation,
+        "20b_reference_range_interpretation_qc.csv": interpretation.copy(),
         "20b_baseline_lab_patient_audit.csv": audit,
         "20b_baseline_lab_missingness.csv": pd.DataFrame(missingness),
         "20b_baseline_lab_sensitivity_summary.csv": pd.DataFrame(sensitivity),

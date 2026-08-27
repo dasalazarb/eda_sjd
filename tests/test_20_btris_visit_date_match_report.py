@@ -289,9 +289,9 @@ def test_btris_evidence_aliases_and_normal_range_qc() -> None:
 
     assert normalized.loc[0, "unit"] == " mg/dL "
     assert normalized.loc[0, "reference_range_raw"] == " 4.0   -  10.0 "
-    assert normalized.loc[0, "reference_range_parse_status"] == "ambiguous"
-    assert pd.isna(normalized.loc[0, "reference_low"])
-    assert pd.isna(normalized.loc[0, "reference_high"])
+    assert normalized.loc[0, "reference_range_parse_status"] == "parsed_low_high"
+    assert normalized.loc[0, "reference_low"] == 4.0
+    assert normalized.loc[0, "reference_high"] == 10.0
     assert normalized.loc[0, "observation_comment"] == "assay documentation"
     assert normalized.loc[0, "observation_note"] == "source note"
     assert normalized.loc[0, "result_status"] == "Final"
@@ -300,6 +300,34 @@ def test_btris_evidence_aliases_and_normal_range_qc() -> None:
     assert qc.loc[0, "normalized_normal_range"] == "4.0 - 10.0"
     assert qc.loc[0, "n_rows"] == 1
     assert qc.loc[0, "pct_within_analyte"] == 100.0
+
+
+@pytest.mark.parametrize(
+    ("raw", "low", "high", "operator", "bound", "status"),
+    [
+        ("15-57", 15.0, 57.0, None, None, "parsed_low_high"),
+        ("3.98-10.04", 3.98, 10.04, None, None, "parsed_low_high"),
+        ("<15", None, None, "<", 15.0, "parsed_one_sided"),
+        ("<1.0 (negative)", None, None, "<", 1.0, "parsed_one_sided"),
+        ("<1:80 (negative)", None, None, None, None, "titer_reference"),
+        ("negative", None, None, None, None, "qualitative_reference"),
+    ],
+)
+def test_parse_reference_range_structurally(
+    raw: str,
+    low: float | None,
+    high: float | None,
+    operator: str | None,
+    bound: float | None,
+    status: str,
+) -> None:
+    """Confirmed core formats retain exact structure without interpretation."""
+    parsed = btris.parse_reference_range(raw)
+    assert parsed.low == low
+    assert parsed.high == high
+    assert parsed.operator == operator
+    assert parsed.bound == bound
+    assert parsed.status == status
 
 
 def test_ro52_ro60_and_ssa_remain_distinct() -> None:
