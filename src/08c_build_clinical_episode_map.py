@@ -33,6 +33,10 @@ EXTENDED_VISIT_REVIEW_FILENAME = "08c_extended_visit_exception_review.csv"
 INTERVAL_EXTENDED_RECONCILIATION_FILENAME = (
     "08c_interval_extended_reconciliation.csv"
 )
+INTERVAL_CLUSTER_RECONCILIATION_FILENAME = (
+    "08c_interval_cluster_reconciliation.csv"
+)
+INTERVAL_CLUSTER_SUMMARY_FILENAME = "08c_interval_cluster_summary.csv"
 PREVIOUS_EPISODES_PATH = REPORTS_DIR / "visit_episode_audit" / "02_episode_summary.csv"
 PREVIOUS_CANDIDATES_PATH = (
     REPORTS_DIR / "visit_episode_audit" / "08b_composite_episode_candidates.csv"
@@ -830,6 +834,354 @@ def backward_reconciliation(
     return result, summary, log, extended_review
 
 
+def _append_pipe_value(existing: object, value: str) -> str:
+    """Append a pipe-delimited value without discarding existing provenance."""
+    parts = [] if pd.isna(existing) else str(existing).split("|")
+    return "|".join(dict.fromkeys([part for part in parts if part] + [value]))
+
+
+def _interval_cluster_keys(episodes: list[pd.DataFrame]) -> list[list[int]]:
+    """Return connected components of interval-compatible episodes."""
+    parents = list(range(len(episodes)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for left in range(len(episodes)):
+        for right in range(left + 1, len(episodes)):
+            if _interval_compatibility(episodes[left], episodes[right]) in {
+                "exact_same_interval",
+                "natural_visit_family",
+            }:
+                union(left, right)
+    components: dict[int, list[int]] = {}
+    for index in range(len(episodes)):
+        components.setdefault(find(index), []).append(index)
+    return list(components.values())
+
+
+def interval_cluster_reconciliation(
+    assigned_units: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Reconcile non-adjacent, interval-compatible episode fragments.
+
+    PASS 4 considers every compatible episode for a patient together, rather
+    than only consecutive pairs. It merges only complementary clinical
+    evidence and never automatically combines two complete clinical visits.
+
+    Parameters
+    ----------
+    assigned_units : pd.DataFrame
+        Daily units carrying the episode IDs produced by PASS 1--3.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        Reassigned units, cluster-level reconciliation audit, and one-row
+        summary.
+    """
+    audit_columns = [
+        "patient_id",
+        "cluster_id",
+        "intervals_involved",
+        "episode_ids_before",
+        "episode_start_dates_before",
+        "episode_end_dates_before",
+        "n_episodes_before",
+        "n_clinical_candidate_before",
+        "n_ambiguous_before",
+        "cluster_start_date",
+        "cluster_end_date",
+        "cluster_span_days",
+        "combined_has_essdai",
+        "combined_has_esspri",
+        "clinical_components_added",
+        "merge_performed",
+        "merge_reason",
+        "manual_review_required",
+        "manual_review_reason",
+        "new_clinical_episode_id",
+    ]
+    clinical_flags = list(
+        dict.fromkeys((*CORE_FLAGS, *OBJECTIVE_FLAGS, "has_esspri_form"))
+    )
+    records: list[dict[str, object]] = []
+    patient_groups: list[tuple[object, list[dict[str, object]]]] = []
+    episodes_before = assigned_units["clinical_episode_id"].nunique()
+    episodes_absorbed = 0
+
+    for patient_id, patient_units in assigned_units.groupby(
+        "patient_id", sort=False, dropna=False
+    ):
+        ordered = patient_units.sort_values(
+            ["collection_date", "_source_order"], na_position="last"
+        )
+        groups = [
+            {"rows": rows.copy(), "original_ids": [str(episode_id)]}
+            for episode_id, rows in ordered.groupby(
+                "clinical_episode_id", sort=False, dropna=False
+            )
+        ]
+        episodes = [group["rows"] for group in groups]
+        clusters = list(enumerate(_interval_cluster_keys(episodes), start=1))
+        # Mutating higher-position components first keeps the original indices
+        # valid for every disjoint component.
+        clusters.sort(key=lambda item: max(item[1]), reverse=True)
+        for cluster_number, indices in clusters:
+            if len(indices) < 2:
+                continue
+            cluster_groups = [groups[index] for index in indices]
+            cluster_rows = [group["rows"] for group in cluster_groups]
+            visit_types = [_episode_visit_type(rows) for rows in cluster_rows]
+            n_candidates = visit_types.count("clinical_candidate")
+            n_ambiguous = visit_types.count("ambiguous")
+            combined_rows = pd.concat(cluster_rows)
+            combined = _aggregate_rows(combined_rows)
+            dates = combined_rows["collection_date"].dropna()
+            start = dates.min() if not dates.empty else pd.NaT
+            end = dates.max() if not dates.empty else pd.NaT
+            span = int((end - start).days) if not dates.empty else pd.NA
+            selected: list[int] = []
+            added_flags: list[str] = []
+            reason = "no_clinical_complementarity"
+
+            if n_candidates >= 2:
+                reason = "multiple_complete_clinical_episodes_same_interval"
+            elif n_candidates == 1:
+                anchor = indices[visit_types.index("clinical_candidate")]
+                selected = [anchor]
+                current = _aggregate_rows(groups[anchor]["rows"])
+                # Evaluate every episode in the cluster; adjacency is irrelevant.
+                for index, visit_type in zip(indices, visit_types):
+                    if index == anchor or visit_type != "ambiguous":
+                        continue
+                    fragment = _aggregate_rows(groups[index]["rows"])
+                    additions = [
+                        flag
+                        for flag in clinical_flags
+                        if bool(fragment[flag]) and not bool(current[flag])
+                    ]
+                    if additions:
+                        selected.append(index)
+                        added_flags.extend(additions)
+                        current = _aggregate_rows(
+                            pd.concat([groups[item]["rows"] for item in selected])
+                        )
+                if len(selected) > 1:
+                    selected_evidence = [
+                        _aggregate_rows(groups[index]["rows"])
+                        for index in selected
+                    ]
+                    reunited = bool(
+                        current.has_essdai_form
+                        and current.has_esspri_form
+                        and not any(
+                            item.has_essdai_form and item.has_esspri_form
+                            for item in selected_evidence
+                        )
+                    )
+                    reason = (
+                        "interval_cluster_reunites_essdai_esspri"
+                        if reunited
+                        else "interval_cluster_adds_clinical_component"
+                    )
+            elif bool(combined.clinical_candidate):
+                useful = [
+                    index
+                    for index, visit_type in zip(indices, visit_types)
+                    if visit_type == "ambiguous"
+                    and bool(
+                        _aggregate_rows(groups[index]["rows"])[clinical_flags].any()
+                    )
+                ]
+                if len(useful) >= 2 and bool(
+                    _aggregate_rows(
+                        pd.concat([groups[index]["rows"] for index in useful])
+                    ).clinical_candidate
+                ):
+                    selected = useful
+                    reason = "interval_cluster_adds_clinical_component"
+
+            merge_performed = len(selected) > 1
+            if merge_performed and n_candidates >= 2:
+                raise RuntimeError(
+                    "PASS 4 attempted to merge multiple complete clinical episodes"
+                )
+            if merge_performed and any(
+                visit_types[indices.index(index)]
+                == "research_or_procedure_only_candidate"
+                for index in selected
+            ):
+                raise RuntimeError(
+                    "PASS 4 attempted to absorb a research-only episode"
+                )
+            if merge_performed and n_candidates == 1 and not added_flags:
+                raise RuntimeError(
+                    "PASS 4 merged an ambiguous fragment without complementarity"
+                )
+            merge_target_before: str | None = None
+            if merge_performed:
+                target = selected[0]
+                merge_target_before = groups[target]["original_ids"][0]
+                episodes_absorbed += len(selected) - 1
+                merged_rows = pd.concat([groups[index]["rows"] for index in selected])
+                merged_rows = merged_rows.copy()
+                merged_rows["assignment_rule"] = merged_rows["assignment_rule"].map(
+                    lambda value: _append_pipe_value(value, reason)
+                )
+                if pd.notna(span) and span > 90:
+                    merged_rows["pass4_manual_review_reason"] = merged_rows.get(
+                        "pass4_manual_review_reason", pd.Series(index=merged_rows.index)
+                    ).map(
+                        lambda value: _append_pipe_value(
+                            value, "interval_cluster_span_gt90_days"
+                        )
+                    )
+                groups[target] = {
+                    "rows": merged_rows,
+                    "original_ids": sum(
+                        (groups[index]["original_ids"] for index in selected), []
+                    ),
+                }
+                for index in sorted(selected[1:], reverse=True):
+                    del groups[index]
+
+            records.append(
+                {
+                    "patient_id": patient_id,
+                    "cluster_id": f"{patient_id}__IC{cluster_number:04d}",
+                    "intervals_involved": " | ".join(
+                        sorted(_episode_interval_values(combined_rows))
+                    ),
+                    "episode_ids_before": " | ".join(
+                        group["original_ids"][0] for group in cluster_groups
+                    ),
+                    "episode_start_dates_before": " | ".join(
+                        str(rows["collection_date"].min().date())
+                        if rows["collection_date"].notna().any()
+                        else ""
+                        for rows in cluster_rows
+                    ),
+                    "episode_end_dates_before": " | ".join(
+                        str(rows["collection_date"].max().date())
+                        if rows["collection_date"].notna().any()
+                        else ""
+                        for rows in cluster_rows
+                    ),
+                    "n_episodes_before": len(indices),
+                    "n_clinical_candidate_before": n_candidates,
+                    "n_ambiguous_before": n_ambiguous,
+                    "cluster_start_date": start,
+                    "cluster_end_date": end,
+                    "cluster_span_days": span,
+                    "combined_has_essdai": bool(combined.has_essdai_form),
+                    "combined_has_esspri": bool(combined.has_esspri_form),
+                    "clinical_components_added": "|".join(
+                        dict.fromkeys(added_flags)
+                    ),
+                    "merge_performed": merge_performed,
+                    "merge_reason": reason,
+                    "manual_review_required": bool(pd.notna(span) and span > 90),
+                    "manual_review_reason": (
+                        "interval_cluster_span_gt90_days"
+                        if pd.notna(span) and span > 90
+                        else ""
+                    ),
+                    "new_clinical_episode_id": None,
+                    "_merge_target_before": merge_target_before,
+                }
+            )
+        patient_groups.append((patient_id, groups))
+
+    reconciled: list[pd.DataFrame] = []
+    original_to_final: dict[tuple[object, str], str] = {}
+    for patient_id, groups in patient_groups:
+        groups.sort(
+            key=lambda group: (
+                group["rows"]["collection_date"].min(),
+                group["rows"]["_source_order"].min(),
+            )
+        )
+        for sequence, group in enumerate(groups, start=1):
+            episode_id = f"{patient_id}__CE{sequence:04d}"
+            rows = group["rows"].copy()
+            rows["clinical_episode_id"] = episode_id
+            reconciled.append(rows)
+            for original_id in group["original_ids"]:
+                original_to_final[(patient_id, original_id)] = episode_id
+    audit_work = pd.DataFrame(records)
+    if not audit_work.empty:
+        for index, record in audit_work.loc[
+            audit_work["merge_performed"].eq(True)
+        ].iterrows():
+            audit_work.at[index, "new_clinical_episode_id"] = original_to_final[
+                (record["patient_id"], str(record["_merge_target_before"]))
+            ]
+    audit = audit_work.reindex(columns=audit_columns)
+    result = (
+        pd.concat(reconciled).sort_values("_source_order")
+        if reconciled
+        else assigned_units.copy()
+    )
+    merged = audit.loc[audit["merge_performed"].eq(True)]
+    summary = pd.DataFrame(
+        [
+            {
+                "n_clusters_evaluated": len(audit),
+                "n_clusters_merged": len(merged),
+                "n_episodes_absorbed": episodes_absorbed,
+                "n_patients_affected": merged["patient_id"].nunique(),
+                "n_reunited_essdai_esspri": merged["merge_reason"]
+                .eq("interval_cluster_reunites_essdai_esspri")
+                .sum(),
+                "n_rejected_multiple_clinical_candidates": audit["merge_reason"]
+                .eq("multiple_complete_clinical_episodes_same_interval")
+                .sum(),
+                "n_rejected_no_complementarity": audit["merge_reason"]
+                .eq("no_clinical_complementarity")
+                .sum(),
+                "n_manual_review_gt90_days": audit["manual_review_required"].sum(),
+                "episodes_before_pass4": episodes_before,
+                "episodes_after_pass4": result["clinical_episode_id"].nunique(),
+            }
+        ]
+    )
+    if len(result) != len(assigned_units):
+        raise RuntimeError("PASS 4 changed the number of daily activity units")
+    before_raw_rows = assigned_units["row_ids_involved"].explode()
+    after_raw_rows = result["row_ids_involved"].explode()
+    if after_raw_rows.duplicated().any():
+        raise RuntimeError("PASS 4 assigned a raw row more than once")
+    if sorted(map(str, before_raw_rows)) != sorted(map(str, after_raw_rows)):
+        raise RuntimeError("PASS 4 changed raw-row membership")
+    immutable_columns = [
+        "daily_activity_unit_id",
+        "collection_date",
+        "interval_names_involved",
+        *BLOCK_PREFIXES,
+        *RESEARCH_PREFIXES,
+    ]
+    before_values = assigned_units[immutable_columns].sort_values(
+        "daily_activity_unit_id"
+    )
+    after_values = result[immutable_columns].sort_values("daily_activity_unit_id")
+    if not before_values.reset_index(drop=True).equals(
+        after_values.reset_index(drop=True)
+    ):
+        raise RuntimeError("PASS 4 changed dates, intervals, or clinical values")
+    if summary.at[0, "episodes_after_pass4"] > episodes_before:
+        raise RuntimeError("PASS 4 unexpectedly increased the episode count")
+    return result, audit, summary
+
+
 def propagate_episode_assignments(
     flagged_rows: pd.DataFrame, assigned_units: pd.DataFrame
 ) -> pd.DataFrame:
@@ -981,6 +1333,10 @@ def build_manifest(
             reasons.append("overlapping_source_interval_ranges")
         if rows["collection_date"].isna().any():
             reasons.append("missing_collection_date")
+        if "pass4_manual_review_reason" in rows:
+            for value in rows["pass4_manual_review_reason"].dropna():
+                reasons.extend(part for part in str(value).split("|") if part)
+        reasons = list(dict.fromkeys(reasons))
         intervals = sorted({str(value) for value in rows["interval_name"].dropna()})
         record: dict[str, object] = {
             "patient_id": patient_id,
@@ -1441,6 +1797,10 @@ def main() -> None:
         backward_log,
         extended_visit_review,
     ) = backward_reconciliation(assigned_units)
+    episodes_before_pass4 = assigned_units["clinical_episode_id"].nunique()
+    assigned_units, interval_cluster_audit, interval_cluster_summary = (
+        interval_cluster_reconciliation(assigned_units)
+    )
     assigned_rows = propagate_episode_assignments(flagged_rows, assigned_units)
     manifest = build_manifest(assigned_rows, source_intervals)
     missed_backward_merges = build_missed_backward_merge_qc(manifest)
@@ -1463,6 +1823,8 @@ def main() -> None:
     if assignment_failures.astype(int).any():
         raise RuntimeError("Episode assignment failed one-to-one QC")
     validate_final_assignments(flagged_rows, assigned_rows, manifest)
+    if assigned_units["clinical_episode_id"].nunique() > episodes_before_pass4:
+        raise RuntimeError("PASS 4 increased the number of clinical episodes")
     row_columns = [
         "patient_id",
         "row_id_raw",
@@ -1491,6 +1853,12 @@ def main() -> None:
     )
     extended_visit_review.to_csv(
         args.qc_dir / INTERVAL_EXTENDED_RECONCILIATION_FILENAME, index=False
+    )
+    interval_cluster_audit.to_csv(
+        args.qc_dir / INTERVAL_CLUSTER_RECONCILIATION_FILENAME, index=False
+    )
+    interval_cluster_summary.to_csv(
+        args.qc_dir / INTERVAL_CLUSTER_SUMMARY_FILENAME, index=False
     )
     missed_backward_merges.to_csv(
         args.qc_dir / MISSED_BACKWARD_MERGES_FILENAME, index=False
