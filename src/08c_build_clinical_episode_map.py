@@ -874,8 +874,10 @@ def interval_cluster_reconciliation(
     """Reconcile non-adjacent, interval-compatible episode fragments.
 
     PASS 4 considers every compatible episode for a patient together, rather
-    than only consecutive pairs. It merges only complementary clinical
-    evidence and never automatically combines two complete clinical visits.
+    than only consecutive pairs. For an exact non-Natural-History interval, a
+    single clinical candidate absorbs every other fragment without requiring
+    complementarity. Natural History families retain complementarity rules,
+    and multiple clinical candidates are never automatically combined.
 
     Parameters
     ----------
@@ -949,32 +951,54 @@ def interval_cluster_reconciliation(
             start = dates.min() if not dates.empty else pd.NaT
             end = dates.max() if not dates.empty else pd.NaT
             span = int((end - start).days) if not dates.empty else pd.NA
+            normalized_intervals = [
+                {
+                    _normalized_interval_name(interval)
+                    for interval in _episode_interval_values(rows)
+                }
+                for rows in cluster_rows
+            ]
+            shared_exact_intervals = set.intersection(*normalized_intervals)
+            aggressive_exact_interval = any(
+                _canonical_interval_name(interval)
+                not in {"natural_history", "natural_history_optional"}
+                for interval in shared_exact_intervals
+            )
             selected: list[int] = []
             added_flags: list[str] = []
             reason = "no_clinical_complementarity"
 
             if n_candidates >= 2:
-                reason = "multiple_complete_clinical_episodes_same_interval"
+                reason = (
+                    "multiple_clinical_candidates_same_interval"
+                    if aggressive_exact_interval
+                    else "multiple_complete_clinical_episodes_same_interval"
+                )
             elif n_candidates == 1:
                 anchor = indices[visit_types.index("clinical_candidate")]
-                selected = [anchor]
-                current = _aggregate_rows(groups[anchor]["rows"])
-                # Evaluate every episode in the cluster; adjacency is irrelevant.
-                for index, visit_type in zip(indices, visit_types):
-                    if index == anchor or visit_type != "ambiguous":
-                        continue
-                    fragment = _aggregate_rows(groups[index]["rows"])
-                    additions = [
-                        flag
-                        for flag in clinical_flags
-                        if bool(fragment[flag]) and not bool(current[flag])
-                    ]
-                    if additions:
-                        selected.append(index)
-                        added_flags.extend(additions)
-                        current = _aggregate_rows(
-                            pd.concat([groups[item]["rows"] for item in selected])
-                        )
+                if aggressive_exact_interval:
+                    selected = sorted(indices)
+                    current = _aggregate_rows(combined_rows)
+                    reason = "interval_cluster_absorb_all_same_interval_fragments"
+                else:
+                    selected = [anchor]
+                    current = _aggregate_rows(groups[anchor]["rows"])
+                    # Evaluate every episode in the cluster; adjacency is irrelevant.
+                    for index, visit_type in zip(indices, visit_types):
+                        if index == anchor or visit_type != "ambiguous":
+                            continue
+                        fragment = _aggregate_rows(groups[index]["rows"])
+                        additions = [
+                            flag
+                            for flag in clinical_flags
+                            if bool(fragment[flag]) and not bool(current[flag])
+                        ]
+                        if additions:
+                            selected.append(index)
+                            added_flags.extend(additions)
+                            current = _aggregate_rows(
+                                pd.concat([groups[item]["rows"] for item in selected])
+                            )
                 if len(selected) > 1:
                     selected_evidence = [
                         _aggregate_rows(groups[index]["rows"])
@@ -988,11 +1012,12 @@ def interval_cluster_reconciliation(
                             for item in selected_evidence
                         )
                     )
-                    reason = (
-                        "interval_cluster_reunites_essdai_esspri"
-                        if reunited
-                        else "interval_cluster_adds_clinical_component"
-                    )
+                    if not aggressive_exact_interval:
+                        reason = (
+                            "interval_cluster_reunites_essdai_esspri"
+                            if reunited
+                            else "interval_cluster_adds_clinical_component"
+                        )
             elif bool(combined.clinical_candidate):
                 useful = [
                     index
@@ -1015,7 +1040,7 @@ def interval_cluster_reconciliation(
                 raise RuntimeError(
                     "PASS 4 attempted to merge multiple complete clinical episodes"
                 )
-            if merge_performed and any(
+            if merge_performed and not aggressive_exact_interval and any(
                 visit_types[indices.index(index)]
                 == "research_or_procedure_only_candidate"
                 for index in selected
@@ -1023,7 +1048,12 @@ def interval_cluster_reconciliation(
                 raise RuntimeError(
                     "PASS 4 attempted to absorb a research-only episode"
                 )
-            if merge_performed and n_candidates == 1 and not added_flags:
+            if (
+                merge_performed
+                and n_candidates == 1
+                and not aggressive_exact_interval
+                and not added_flags
+            ):
                 raise RuntimeError(
                     "PASS 4 merged an ambiguous fragment without complementarity"
                 )
@@ -1089,11 +1119,23 @@ def interval_cluster_reconciliation(
                     ),
                     "merge_performed": merge_performed,
                     "merge_reason": reason,
-                    "manual_review_required": bool(pd.notna(span) and span > 90),
-                    "manual_review_reason": (
-                        "interval_cluster_span_gt90_days"
-                        if pd.notna(span) and span > 90
-                        else ""
+                    "manual_review_required": bool(
+                        (aggressive_exact_interval and n_candidates >= 2)
+                        or (pd.notna(span) and span > 90)
+                    ),
+                    "manual_review_reason": "|".join(
+                        reason
+                        for reason, applies in (
+                            (
+                                "multiple_clinical_candidates_same_interval",
+                                aggressive_exact_interval and n_candidates >= 2,
+                            ),
+                            (
+                                "interval_cluster_span_gt90_days",
+                                pd.notna(span) and span > 90,
+                            ),
+                        )
+                        if applies
                     ),
                     "new_clinical_episode_id": None,
                     "_merge_target_before": merge_target_before,
@@ -1143,7 +1185,12 @@ def interval_cluster_reconciliation(
                 .eq("interval_cluster_reunites_essdai_esspri")
                 .sum(),
                 "n_rejected_multiple_clinical_candidates": audit["merge_reason"]
-                .eq("multiple_complete_clinical_episodes_same_interval")
+                .isin(
+                    {
+                        "multiple_clinical_candidates_same_interval",
+                        "multiple_complete_clinical_episodes_same_interval",
+                    }
+                )
                 .sum(),
                 "n_rejected_no_complementarity": audit["merge_reason"]
                 .eq("no_clinical_complementarity")
