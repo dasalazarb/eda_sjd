@@ -2,7 +2,7 @@
 
 This step is operational QC only: it does not alter interval labels or define the
 official baseline.  Rows are joined only when their populated content is
-complementary and their dates meet the documented seven- or fourteen-day rule.
+complementary and meet the documented temporal or interval-aware rules.
 """
 
 from __future__ import annotations
@@ -30,6 +30,9 @@ MISSED_BACKWARD_MERGES_FILENAME = "08c_possible_missed_backward_merges.csv"
 BACKWARD_SUMMARY_FILENAME = "08c_backward_reconciliation_summary.csv"
 BACKWARD_LOG_FILENAME = "08c_backward_reconciliation_log.csv"
 EXTENDED_VISIT_REVIEW_FILENAME = "08c_extended_visit_exception_review.csv"
+INTERVAL_EXTENDED_RECONCILIATION_FILENAME = (
+    "08c_interval_extended_reconciliation.csv"
+)
 PREVIOUS_EPISODES_PATH = REPORTS_DIR / "visit_episode_audit" / "02_episode_summary.csv"
 PREVIOUS_CANDIDATES_PATH = (
     REPORTS_DIR / "visit_episode_audit" / "08b_composite_episode_candidates.csv"
@@ -402,7 +405,7 @@ def _interval_compatibility(left: pd.DataFrame, right: pd.DataFrame) -> str:
 def _backward_merge_decision(
     left: pd.DataFrame, right: pd.DataFrame
 ) -> tuple[str | None, dict[str, object]]:
-    """Evaluate a consecutive episode pair under the conservative second-pass rule."""
+    """Evaluate consecutive episodes under temporal and interval-aware rules."""
     left_evidence = _aggregate_rows(left)
     right_evidence = _aggregate_rows(right)
     combined = _aggregate_rows(pd.concat([left, right]))
@@ -421,6 +424,9 @@ def _backward_merge_decision(
         "combined_has_esspri": bool(combined.has_esspri_form),
         "special_extended_visit_exception": False,
         "interval_compatibility_type": "none",
+        "clinical_components_added": "",
+        "reunited_essdai_esspri": False,
+        "eligible_pair": False,
     }
     if left_dates.empty or right_dates.empty:
         return None, details
@@ -436,18 +442,39 @@ def _backward_merge_decision(
         combined_start_date=combined_start,
         combined_end_date=combined_end,
     )
-    if gap_days < 0 or gap_days > 14:
+    if gap_days < 0:
         return None, details
     # A pair is eligible only when an established clinical episode is being
     # complemented by a clinically incomplete episode. Research-only content
     # can travel with such an episode, but is deliberately absent from evidence.
     left_candidate = bool(left_evidence.clinical_candidate)
     right_candidate = bool(right_evidence.clinical_candidate)
-    if not (left_candidate or right_candidate) or (left_candidate and right_candidate):
-        return None, details
     clinical_flags = list(
         dict.fromkeys((*CORE_FLAGS, *OBJECTIVE_FLAGS, "has_esspri_form"))
     )
+    if gap_days > 14:
+        compatibility = _interval_compatibility(left, right)
+        details["interval_compatibility_type"] = compatibility
+        details["eligible_pair"] = True
+        if compatibility not in {"exact_same_interval", "natural_visit_family"}:
+            has_interval_information = bool(
+                _episode_interval_values(left) and _episode_interval_values(right)
+            )
+            details["rejection"] = (
+                "interval_incompatible_gt14"
+                if has_interval_information
+                else "missing_interval_information"
+            )
+            return None, details
+        if left_candidate and right_candidate:
+            details["rejection"] = "both_complete_clinical_episodes"
+            return None, details
+        if not (left_candidate or right_candidate):
+            details["rejection"] = "no_clinical_complementarity_gt14"
+            return None, details
+
+    if not (left_candidate or right_candidate) or (left_candidate and right_candidate):
+        return None, details
     candidate = left_evidence if left_candidate else right_evidence
     incomplete = right_evidence if left_candidate else left_evidence
     added_flags = [
@@ -462,8 +489,18 @@ def _backward_merge_decision(
         and not (right_evidence.has_essdai_form and right_evidence.has_esspri_form)
     )
     details["reunited_essdai_esspri"] = reunited
-    details["clinical_components_added"] = len(added_flags)
+    details["clinical_components_added"] = "|".join(added_flags)
     details["eligible_pair"] = True
+    if gap_days > 14:
+        compatibility = str(details["interval_compatibility_type"])
+        if not (reunited or added_flags):
+            details["rejection"] = "no_clinical_complementarity_gt14"
+            return None, details
+        details["special_extended_visit_exception"] = True
+        complement = (
+            "reunites_essdai_esspri" if reunited else "adds_clinical_component"
+        )
+        return f"extended_{compatibility}_{complement}", details
     if combined_span > 14:
         compatibility = _interval_compatibility(left, right)
         details["interval_compatibility_type"] = compatibility
@@ -545,18 +582,26 @@ def backward_reconciliation(
         "patient_id",
         "episode_a_original",
         "episode_b_original",
+        "episode_a_start",
+        "episode_a_end",
+        "episode_b_start",
+        "episode_b_end",
         "intervals_a",
         "intervals_b",
         "gap_days",
         "combined_span_days",
         "interval_compatibility_type",
+        "a_visit_type",
+        "b_visit_type",
         "a_has_essdai",
         "a_has_esspri",
         "b_has_essdai",
         "b_has_esspri",
+        "clinical_components_added",
         "reunited_essdai_esspri",
         "merge_performed",
         "merge_reason",
+        "new_clinical_episode_id",
     ]
     log_records: list[dict[str, object]] = []
     extended_review_records: list[dict[str, object]] = []
@@ -580,9 +625,9 @@ def backward_reconciliation(
             left = groups[index - 1]
             right = groups[index]
             reason, details = _backward_merge_decision(left["rows"], right["rows"])
-            if details.get("combined_span_days", 0) > 14 and details.get(
-                "eligible_pair", False
-            ):
+            if details.get("gap_days", 0) > 14:
+                left_rows = left["rows"]
+                right_rows = right["rows"]
                 extended_review_records.append(
                     {
                         "patient_id": patient_id,
@@ -592,6 +637,10 @@ def backward_reconciliation(
                         "episode_b_original": " | ".join(
                             map(str, right["original_ids"])
                         ),
+                        "episode_a_start": left_rows["collection_date"].min(),
+                        "episode_a_end": left_rows["collection_date"].max(),
+                        "episode_b_start": right_rows["collection_date"].min(),
+                        "episode_b_end": right_rows["collection_date"].max(),
                         "intervals_a": " | ".join(
                             sorted(_episode_interval_values(left["rows"]))
                         ),
@@ -603,13 +652,19 @@ def backward_reconciliation(
                         "interval_compatibility_type": details[
                             "interval_compatibility_type"
                         ],
+                        "a_visit_type": details["a_visit_type"],
+                        "b_visit_type": details["b_visit_type"],
                         "a_has_essdai": details["a_has_essdai"],
                         "a_has_esspri": details["a_has_esspri"],
                         "b_has_essdai": details["b_has_essdai"],
                         "b_has_esspri": details["b_has_esspri"],
+                        "clinical_components_added": details[
+                            "clinical_components_added"
+                        ],
                         "reunited_essdai_esspri": details["reunited_essdai_esspri"],
                         "merge_performed": reason is not None,
                         "merge_reason": reason or details.get("rejection", "rejected"),
+                        "new_clinical_episode_id": None,
                     }
                 )
             if reason is None:
@@ -680,6 +735,11 @@ def backward_reconciliation(
         record["new_clinical_episode_id"] = original_to_final[
             (record["patient_id"], original)
         ]
+    for record in extended_review_records:
+        original = str(record["episode_a_original"]).split(" | ")[0]
+        record["new_clinical_episode_id"] = original_to_final[
+            (record["patient_id"], original)
+        ]
     result = (
         pd.concat(reconciled).sort_values("_source_order")
         if reconciled
@@ -691,6 +751,8 @@ def backward_reconciliation(
     )
     gaps = log["gap_days"] if not log.empty else pd.Series(dtype="int64")
     extended_merges = log.loc[log["special_extended_visit_exception"].eq(True)]
+    reviewed_gt14 = extended_review
+    merged_gt14 = reviewed_gt14.loc[reviewed_gt14["merge_performed"].eq(True)]
     summary = pd.DataFrame(
         [
             {
@@ -733,6 +795,35 @@ def backward_reconciliation(
                     for _, groups in final_groups
                     for group in groups
                 ),
+                "n_pairs_gt14_reviewed": len(reviewed_gt14),
+                "n_pairs_gt14_merged": len(merged_gt14),
+                "n_merged_exact_same_interval": int(
+                    merged_gt14["interval_compatibility_type"]
+                    .eq("exact_same_interval")
+                    .sum()
+                ),
+                "n_merged_natural_visit_family": int(
+                    merged_gt14["interval_compatibility_type"]
+                    .eq("natural_visit_family")
+                    .sum()
+                ),
+                "n_rejected_both_complete_clinical": int(
+                    reviewed_gt14["merge_reason"]
+                    .eq("both_complete_clinical_episodes")
+                    .sum()
+                ),
+                "n_rejected_interval_incompatible": int(
+                    reviewed_gt14["merge_reason"]
+                    .eq("interval_incompatible_gt14")
+                    .sum()
+                ),
+                "n_rejected_no_complementarity": int(
+                    reviewed_gt14["merge_reason"]
+                    .eq("no_clinical_complementarity_gt14")
+                    .sum()
+                ),
+                "median_gap_days_gt14_merged": merged_gt14["gap_days"].median(),
+                "max_gap_days_gt14_merged": merged_gt14["gap_days"].max(),
             }
         ]
     )
@@ -1397,6 +1488,9 @@ def main() -> None:
     backward_log.to_csv(args.qc_dir / BACKWARD_LOG_FILENAME, index=False)
     extended_visit_review.to_csv(
         args.qc_dir / EXTENDED_VISIT_REVIEW_FILENAME, index=False
+    )
+    extended_visit_review.to_csv(
+        args.qc_dir / INTERVAL_EXTENDED_RECONCILIATION_FILENAME, index=False
     )
     missed_backward_merges.to_csv(
         args.qc_dir / MISSED_BACKWARD_MERGES_FILENAME, index=False
