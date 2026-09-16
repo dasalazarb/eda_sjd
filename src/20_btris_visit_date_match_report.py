@@ -64,6 +64,14 @@ OUTPUT_COLUMNS = [
     "source_file",
 ]
 
+UNMAPPED_AUDIT_PRIORITIES = [
+    "HIGH_PRIORITY_MAP",
+    "POSSIBLE_MAP",
+    "AMBIGUOUS_REVIEW",
+    "LOW_COVERAGE",
+    "ADMINISTRATIVE_OR_TEXT",
+]
+
 ORDER_NAME_ALIASES = {
     "AMYLASE": "Amylase",
     "ANA HEp-2 Substrate, IgG": "ANA Hep-2 Substrate, IgG",
@@ -1290,6 +1298,235 @@ def build_semantic_unresolved_qc(labs: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _suggest_unmapped_semantic(
+    order_name: object, cluster_name: object
+) -> tuple[object, object, object, str]:
+    """Return an informational semantic suggestion without changing lab mappings."""
+    pair = (order_name, cluster_name)
+    if pair in SEMANTIC_OVERRIDES:
+        return (*SEMANTIC_OVERRIDES[pair], "semantic_override")
+    if pair in PAIR_SEMANTICS:
+        return (*PAIR_SEMANTICS[pair], "pair_semantic")
+    if cluster_name in CLUSTER_SEMANTICS:
+        return (*CLUSTER_SEMANTICS[cluster_name], "cluster_semantic_fallback")
+    return (pd.NA, pd.NA, pd.NA, "unresolved")
+
+
+def _is_likely_qualitative_serology(order_name: object, cluster_name: object) -> bool:
+    """Identify likely serologies so text-only results are not labeled administrative."""
+    label = f"{order_name} {cluster_name}"
+    return bool(
+        re.search(
+            r"antibod|antigen|serolog|immunoglob|\b(?:ab|igg|igm|iga|ana|hiv|"
+            r"htlv|hcv|hbs|hbc)\b",
+            label,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def build_unmapped_lab_audit(
+    labs: pd.DataFrame, reference: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build pair-level candidate and priority-level unmapped laboratory audits.
+
+    Parameters
+    ----------
+    labs : pd.DataFrame
+        Patient laboratory records after semantic annotation and clinical-context
+        attachment.
+    reference : pd.DataFrame
+        Authoritative exact order/cluster pair inventory.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame]
+        Candidate pairs and a priority summary. Suggestions are informational only
+        and are never written back to the longitudinal laboratory records.
+    """
+    required = {
+        "patient_id",
+        "order_name_original",
+        "cluster_name_original",
+        "lab_date",
+        "result_valid_for_analysis",
+        "result_numeric",
+        "result_operator",
+        "result_text",
+        "unit",
+        "mapping_status",
+        "semantic_mapping_status",
+        "canonical_analyte",
+    }
+    missing = required - set(labs.columns)
+    if missing:
+        raise KeyError(f"Laboratory audit input missing: {sorted(missing)}")
+    reference_required = {"order_name", "cluster_name"}
+    reference_missing = reference_required - set(reference.columns)
+    if reference_missing:
+        raise KeyError(f"Laboratory reference missing: {sorted(reference_missing)}")
+
+    unmapped = labs.loc[
+        labs["canonical_analyte"].isna()
+        | labs["semantic_mapping_status"].eq("unexpected_unmapped")
+    ].copy()
+    pair_columns = ["order_name_original", "cluster_name_original"]
+    patient_pair_counts = unmapped.groupby(pair_columns + ["patient_id"], dropna=False)[
+        "patient_id"
+    ].transform("size")
+    unmapped["patient_pair_count"] = patient_pair_counts
+    unmapped["is_text_result"] = (
+        unmapped["result_text"].notna() & unmapped["result_operator"].isna()
+    )
+    candidates = (
+        unmapped.groupby(pair_columns, dropna=False)
+        .agg(
+            n_rows=("patient_id", "size"),
+            n_patients=("patient_id", "nunique"),
+            min_date=("lab_date", "min"),
+            max_date=("lab_date", "max"),
+            n_valid_results=("result_valid_for_analysis", "sum"),
+            n_numeric_exact=("result_numeric", lambda values: values.notna().sum()),
+            n_text_results=("is_text_result", "sum"),
+            n_unique_units=("unit", lambda values: values.dropna().nunique()),
+            units=(
+                "unit",
+                lambda values: " | ".join(
+                    sorted({str(value) for value in values.dropna()})
+                ),
+            ),
+            mapping_status=(
+                "mapping_status",
+                lambda values: " | ".join(sorted(set(values.dropna()))),
+            ),
+            semantic_mapping_status=(
+                "semantic_mapping_status",
+                lambda values: " | ".join(sorted(set(values.dropna()))),
+            ),
+        )
+        .reset_index()
+    )
+    repetition = (
+        unmapped[pair_columns + ["patient_id", "patient_pair_count"]]
+        .drop_duplicates(pair_columns + ["patient_id"])
+        .groupby(pair_columns, dropna=False)["patient_pair_count"]
+        .agg(
+            n_patients_ge2=lambda values: values.ge(2).sum(),
+            n_patients_ge3=lambda values: values.ge(3).sum(),
+        )
+        .reset_index()
+    )
+    candidates = candidates.merge(
+        repetition, on=pair_columns, how="left", validate="one_to_one"
+    )
+    denominator = candidates["n_rows"].where(candidates["n_rows"].ne(0))
+    candidates["pct_valid_results"] = candidates["n_valid_results"] / denominator * 100
+    candidates["pct_numeric_exact"] = candidates["n_numeric_exact"] / denominator * 100
+    candidates["pct_text_results"] = candidates["n_text_results"] / denominator * 100
+
+    reference_pairs = set(
+        reference[["order_name", "cluster_name"]].itertuples(index=False, name=None)
+    )
+    candidates["present_in_reference"] = [
+        pair in reference_pairs
+        for pair in candidates[pair_columns].itertuples(index=False, name=None)
+    ]
+    suggestion_columns = [
+        "suggested_canonical_analyte",
+        "suggested_lab_family",
+        "suggested_analytic_role",
+        "suggested_mapping_source",
+    ]
+    suggestions = pd.DataFrame(
+        [
+            _suggest_unmapped_semantic(order_name, cluster_name)
+            for order_name, cluster_name in candidates[pair_columns].itertuples(
+                index=False, name=None
+            )
+        ],
+        columns=suggestion_columns,
+        index=candidates.index,
+    )
+    candidates = pd.concat([candidates, suggestions], axis=1)
+    candidates["known_cluster_semantic"] = candidates["cluster_name_original"].isin(
+        CLUSTER_SEMANTICS
+    )
+    has_suggestion = candidates["suggested_canonical_analyte"].notna()
+    candidates["audit_priority"] = "LOW_COVERAGE"
+    candidates.loc[candidates["n_patients"].ge(5), "audit_priority"] = (
+        "AMBIGUOUS_REVIEW"
+    )
+    candidates.loc[
+        candidates["n_patients"].ge(5) & has_suggestion, "audit_priority"
+    ] = "POSSIBLE_MAP"
+    candidates.loc[
+        candidates["n_patients"].ge(10) & has_suggestion, "audit_priority"
+    ] = "HIGH_PRIORITY_MAP"
+    administrative_or_text = (
+        candidates["pct_numeric_exact"].eq(0)
+        & candidates["pct_text_results"].ge(90)
+        & ~has_suggestion
+        & ~candidates.apply(
+            lambda row: _is_likely_qualitative_serology(
+                row["order_name_original"], row["cluster_name_original"]
+            ),
+            axis=1,
+        )
+    )
+    candidates.loc[administrative_or_text, "audit_priority"] = "ADMINISTRATIVE_OR_TEXT"
+
+    priority_order = pd.CategoricalDtype(UNMAPPED_AUDIT_PRIORITIES, ordered=True)
+    candidates["audit_priority"] = candidates["audit_priority"].astype(priority_order)
+    candidates = candidates.sort_values(
+        ["audit_priority", "n_patients", "n_rows"],
+        ascending=[True, False, False],
+    ).reset_index(drop=True)
+    candidate_columns = [
+        *pair_columns,
+        "n_rows",
+        "n_patients",
+        "n_patients_ge2",
+        "n_patients_ge3",
+        "min_date",
+        "max_date",
+        "n_valid_results",
+        "pct_valid_results",
+        "n_numeric_exact",
+        "pct_numeric_exact",
+        "n_text_results",
+        "pct_text_results",
+        "n_unique_units",
+        "units",
+        "mapping_status",
+        "semantic_mapping_status",
+        "present_in_reference",
+        "known_cluster_semantic",
+        *suggestion_columns,
+        "audit_priority",
+    ]
+    candidates = candidates[candidate_columns]
+
+    priority_by_pair = candidates[pair_columns + ["audit_priority"]]
+    summarized_rows = unmapped.merge(
+        priority_by_pair, on=pair_columns, how="left", validate="many_to_one"
+    )
+    summary = (
+        summarized_rows.groupby("audit_priority", observed=False)
+        .agg(
+            n_rows=("patient_id", "size"),
+            n_patients_unique=("patient_id", "nunique"),
+        )
+        .join(
+            candidates.groupby("audit_priority", observed=False)
+            .size()
+            .rename("n_pairs")
+        )
+        .reindex(UNMAPPED_AUDIT_PRIORITIES, fill_value=0)
+        .reset_index()[["audit_priority", "n_pairs", "n_rows", "n_patients_unique"]]
+    )
+    return candidates, summary
+
+
 CORE_ANALYTES = [
     "anti_ro_ssa",
     "anti_la_ssb",
@@ -1677,6 +1914,7 @@ def main() -> None:
     semantic_qc = build_semantic_mapping_qc(labs)
     semantic_status_summary = build_semantic_status_summary(labs)
     semantic_unresolved = build_semantic_unresolved_qc(labs)
+    unmapped_candidates, unmapped_summary = build_unmapped_lab_audit(labs, reference)
     core_qc = build_core_mapping_qc(labs)
     interpretation_evidence_qc = build_core_interpretation_evidence_qc(labs)
     qualitative_token_qc = build_core_qualitative_token_qc(labs)
@@ -1718,6 +1956,12 @@ def main() -> None:
     )
     semantic_unresolved.to_csv(
         config.report_dir / "20_lab_semantic_unresolved_qc.csv", index=False
+    )
+    unmapped_candidates.to_csv(
+        config.report_dir / "20_btris_unmapped_lab_candidates.csv", index=False
+    )
+    unmapped_summary.to_csv(
+        config.report_dir / "20_btris_unmapped_lab_summary.csv", index=False
     )
     core_qc.to_csv(config.report_dir / "20_core_lab_mapping_qc.csv", index=False)
     ambiguous.to_csv(config.report_dir / "20_lab_episode_ambiguous.csv", index=False)
@@ -1809,6 +2053,40 @@ def main() -> None:
     summary.to_csv(config.report_dir / "20_lab_record_summary.csv", index=False)
     logger.info(
         "Saved %d preserved laboratory records to %s", len(labs), config.output_path
+    )
+    pair_columns = ["order_name_original", "cluster_name_original"]
+    n_observed_pairs = len(labs[pair_columns].drop_duplicates())
+    n_unmapped_pairs = len(unmapped_candidates)
+    unmapped_mask = labs["canonical_analyte"].isna() | labs[
+        "semantic_mapping_status"
+    ].eq("unexpected_unmapped")
+    priority_counts = unmapped_candidates["audit_priority"].value_counts()
+    logger.info(
+        "\nBTRIS UNMAPPED LAB AUDIT\n"
+        "------------------------\n"
+        "Total observed lab pairs: %d\n"
+        "Mapped pairs: %d\n"
+        "Unmapped pairs: %d\n\n"
+        "Unmapped rows: %d\n"
+        "Patients with >=1 unmapped lab: %d\n\n"
+        "HIGH_PRIORITY_MAP: %d\n"
+        "POSSIBLE_MAP: %d\n"
+        "AMBIGUOUS_REVIEW: %d\n"
+        "LOW_COVERAGE: %d\n"
+        "ADMINISTRATIVE_OR_TEXT: %d\n\n"
+        "Outputs:\n"
+        "- 20_btris_unmapped_lab_candidates.csv\n"
+        "- 20_btris_unmapped_lab_summary.csv",
+        n_observed_pairs,
+        n_observed_pairs - n_unmapped_pairs,
+        n_unmapped_pairs,
+        int(unmapped_mask.sum()),
+        labs.loc[unmapped_mask, "patient_id"].nunique(),
+        int(priority_counts.get("HIGH_PRIORITY_MAP", 0)),
+        int(priority_counts.get("POSSIBLE_MAP", 0)),
+        int(priority_counts.get("AMBIGUOUS_REVIEW", 0)),
+        int(priority_counts.get("LOW_COVERAGE", 0)),
+        int(priority_counts.get("ADMINISTRATIVE_OR_TEXT", 0)),
     )
 
 
