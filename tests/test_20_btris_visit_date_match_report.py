@@ -330,6 +330,72 @@ def test_parse_reference_range_structurally(
     assert parsed.status == status
 
 
+def test_unmapped_lab_audit_counts_repetition_and_suggests_known_cluster() -> None:
+    raw = pd.DataFrame(
+        {
+            "MRN": ["1", "1", "1", "2", "2", "3", "4", "5", "6", "7"],
+            "Order Name": ["Novel order"] * 10,
+            "Cluster Name": ["Creatinine (Blood)"] * 10,
+            "Collected Date Time": pd.date_range("2020-01-01", periods=10),
+            "Observation Value": ["1.0", "<1.1", "text"] + ["2.0"] * 7,
+            "Unit": ["mg/dL"] * 9 + ["g/L"],
+            "Result Status": ["Final"] * 10,
+        }
+    )
+    reference = _reference(("Expected", "Expected cluster"))
+    labs = btris.annotate_expected_pairs(btris.normalize_lab_records(raw), reference)
+
+    candidates, summary = btris.build_unmapped_lab_audit(labs, reference)
+
+    candidate = candidates.iloc[0]
+    assert candidate["n_rows"] == 10
+    assert candidate["n_patients"] == 7
+    assert candidate["n_patients_ge2"] == 2
+    assert candidate["n_patients_ge3"] == 1
+    assert candidate["n_numeric_exact"] == 8
+    assert candidate["pct_numeric_exact"] == 80.0
+    assert candidate["units"] == "g/L | mg/dL"
+    assert not bool(candidate["present_in_reference"])
+    assert bool(candidate["known_cluster_semantic"])
+    assert candidate["suggested_canonical_analyte"] == "creatinine"
+    assert candidate["suggested_mapping_source"] == "cluster_semantic_fallback"
+    assert candidate["audit_priority"] == "POSSIBLE_MAP"
+    possible = summary.set_index("audit_priority").loc["POSSIBLE_MAP"]
+    assert possible[["n_pairs", "n_rows", "n_patients_unique"]].tolist() == [
+        1,
+        10,
+        7,
+    ]
+
+
+def test_unmapped_qualitative_serology_is_not_labeled_administrative() -> None:
+    labs = btris.annotate_expected_pairs(
+        btris.normalize_lab_records(
+            _raw(
+                ["2020-01-01"],
+                order="Novel Antibody",
+                cluster="Novel Antibody (Blood)",
+                values=["Positive"],
+            )
+        ),
+        _reference(("Expected", "Expected cluster")),
+    )
+
+    candidates, _ = btris.build_unmapped_lab_audit(
+        labs, _reference(("Expected", "Expected cluster"))
+    )
+
+    assert candidates.loc[0, "audit_priority"] == "LOW_COVERAGE"
+
+
+def test_unmapped_lab_audit_rejects_missing_required_columns() -> None:
+    with pytest.raises(KeyError, match="Laboratory audit input missing"):
+        btris.build_unmapped_lab_audit(
+            pd.DataFrame({"patient_id": ["1"]}),
+            _reference(("Expected", "Expected cluster")),
+        )
+
+
 def test_ro52_ro60_and_ssa_remain_distinct() -> None:
     pairs = [
         ("ENA Evaluation", "SS-A/Ro Ab, IgG (Blood)"),
