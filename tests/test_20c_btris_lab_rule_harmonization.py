@@ -194,6 +194,23 @@ def test_run_updates_each_protocol_file_in_place(
         assert result.loc[0, "Observation Value"] == "POSITIVE"
 
 
+def test_run_requires_filtered_protocol_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing step-19 output explains the required pipeline order."""
+    monkeypatch.setattr(
+        MODULE,
+        "load_rule_map",
+        lambda path: pytest.fail("rules loaded before input validation"),
+    )
+
+    with pytest.raises(
+        FileNotFoundError,
+        match=r"Run 19_filter_btris_patients\.py before 20c_btris_lab_rule_harmonization\.py",
+    ):
+        MODULE.run(tmp_path, tmp_path / "rules.xlsx", tmp_path / "qc")
+
+
 def test_rerun_preserves_the_raw_observation_value() -> None:
     """A second execution derives output from the first execution's raw trace."""
     labs, rules = row("CATEGORICAL_BINARY", result_raw="reactive")
