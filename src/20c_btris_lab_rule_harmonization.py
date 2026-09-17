@@ -195,13 +195,16 @@ def run(lab_path: Path, rule_path: Path, output_path: Path, qc_dir: Path) -> Non
     harmonized = harmonize_labs(labs, rules)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     harmonized.to_parquet(output_path, index=False)
+    csv_output_path = output_path.with_suffix(".csv")
+    harmonized.to_csv(csv_output_path, index=False)
     qc_dir.mkdir(parents=True, exist_ok=True)
     for filename, table in build_qc(harmonized).items():
         table.to_csv(qc_dir / filename, index=False)
     counts = harmonized["harmonization_status"].value_counts()
     logger.info(
-        "Wrote %s rows=%d; SPECIAL skipped=%d EXCLUDE=%d NO_RULE=%d",
+        "Wrote %s and %s rows=%d; SPECIAL skipped=%d EXCLUDE=%d NO_RULE=%d",
         output_path,
+        csv_output_path,
         len(harmonized),
         int(counts.get("SKIPPED_SPECIAL", 0)),
         int(counts.get("EXCLUDED", 0)),
