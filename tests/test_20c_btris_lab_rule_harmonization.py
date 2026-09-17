@@ -159,3 +159,33 @@ def test_loader_rejects_duplicate_exact_pairs(tmp_path: Path) -> None:
     duplicate.to_excel(path, sheet_name="Lab rule map", index=False)
     with pytest.raises(ValueError, match="duplicate join keys"):
         MODULE.load_rule_map(path)
+
+
+def test_run_writes_parquet_and_csv_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The analytical result is saved in both machine and human-readable formats."""
+    labs, rules = row("CONTINUOUS_ONLY", result_numeric=85)
+    output_path = tmp_path / "20c_harmonized.parquet"
+    parquet_writes: list[tuple[Path, bool]] = []
+
+    monkeypatch.setattr(pd, "read_parquet", lambda path: labs)
+    monkeypatch.setattr(MODULE, "load_rule_map", lambda path: rules)
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "to_parquet",
+        lambda self, path, index: parquet_writes.append((path, index)),
+    )
+
+    MODULE.run(
+        tmp_path / "labs.parquet",
+        tmp_path / "rules.xlsx",
+        output_path,
+        tmp_path / "qc",
+    )
+
+    assert parquet_writes == [(output_path, False)]
+    csv_result = pd.read_csv(output_path.with_suffix(".csv"))
+    assert len(csv_result) == 1
+    assert csv_result.loc[0, "result_numeric"] == 85
+    assert csv_result.loc[0, "harmonization_status"] == "HARMONIZED"
