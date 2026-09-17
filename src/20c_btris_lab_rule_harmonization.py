@@ -243,32 +243,82 @@ def build_qc(harmonized: pd.DataFrame) -> dict[str, pd.DataFrame]:
     }
 
 
+def _read_lab_file(path: Path) -> pd.DataFrame:
+    """Read a protocol-specific laboratory CSV or Parquet file."""
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(
+            path,
+            low_memory=False,
+            dtype={"Observation Value": "object"},
+        )
+    if suffix == ".parquet":
+        frame = pd.read_parquet(path)
+        if "Observation Value" in frame.columns:
+            frame["Observation Value"] = frame["Observation Value"].astype("object")
+        return frame
+    raise ValueError(f"Unsupported lab file format: {path}")
+
+
 def _write_in_place(frame: pd.DataFrame, path: Path) -> None:
-    """Atomically replace a CSV only after all in-memory validations succeed."""
-    temporary = path.with_name(f".{path.name}.20c.tmp")
-    frame.to_csv(temporary, index=False)
+    """Atomically replace a CSV or Parquet file without changing its path."""
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        temporary = path.with_name(f".{path.stem}.20c.tmp.csv")
+        frame.to_csv(temporary, index=False)
+    elif suffix == ".parquet":
+        temporary = path.with_name(f".{path.stem}.20c.tmp.parquet")
+        frame.to_parquet(temporary, index=False)
+    else:
+        raise ValueError(f"Unsupported lab file format: {path}")
     temporary.replace(path)
 
 
 def run(btris_root: Path, rule_path: Path, qc_dir: Path) -> None:
-    """Harmonize each existing protocol-specific ``Lab*.csv`` file in place."""
+    """Harmonize each protocol-specific laboratory CSV or Parquet file in place."""
     logger = setup_logger("20c_btris_lab_rule_harmonization")
     rules = load_rule_map(rule_path)
     qc_dir.mkdir(parents=True, exist_ok=True)
     for protocol in PROTOCOLS:
         protocol_dir = btris_root / protocol
-        paths = sorted(protocol_dir.glob("Lab*.csv"))
+        paths = []
+        paths.extend(sorted(protocol_dir.glob("Lab*.csv")))
+        paths.extend(sorted(protocol_dir.glob("Lab*.parquet")))
+        paths.extend(sorted(protocol_dir.glob("lab*.csv")))
+        paths.extend(sorted(protocol_dir.glob("lab*.parquet")))
         if not paths:
-            raise FileNotFoundError(f"No Lab*.csv files found in {protocol_dir}")
+            raise FileNotFoundError(
+                f"No Lab*.csv or Lab*.parquet files found in {protocol_dir}"
+            )
+        logger.info(
+            "%s files found:\n%s",
+            protocol,
+            "\n".join(f"- {path}" for path in paths),
+        )
         protocol_frames = []
         for path in paths:
-            labs = pd.read_csv(
-                path, low_memory=False, dtype={"Observation Value": "object"}
-            )
+            labs = _read_lab_file(path)
             rows_before = len(labs)
+            original_columns = set(labs.columns)
             harmonized = harmonize_labs(labs, rules)
             if len(harmonized) != rows_before:
                 raise RuntimeError(f"Row-count validation failed for {path}")
+            required_output_columns = {
+                "Observation Value",
+                "Observation Value Original",
+            }
+            missing_output = required_output_columns.difference(harmonized.columns)
+            if missing_output:
+                raise RuntimeError(
+                    f"Harmonized output missing required columns for {path}: "
+                    f"{sorted(missing_output)}"
+                )
+            lost_columns = original_columns.difference(harmonized.columns)
+            if lost_columns:
+                raise RuntimeError(
+                    f"Harmonization lost input columns for {path}: "
+                    f"{sorted(lost_columns)}"
+                )
             _write_in_place(harmonized, path)
             protocol_frames.append(harmonized)
         combined = pd.concat(protocol_frames, ignore_index=True)
