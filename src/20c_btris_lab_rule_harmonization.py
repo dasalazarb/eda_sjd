@@ -16,11 +16,14 @@ from btris_lab_harmonization import (
     interpret_threshold_binary,
     normalize_qualitative,
 )
-from common import ANALYTIC_DIR, REPORTS_DIR, ROOT, setup_logger
+from common import setup_logger
 
-BTRIS_ROOT = ANALYTIC_DIR / "BTRIS"
-RULE_INPUT = ROOT / "btris_lab_rule_families.xlsx"
-QC_DIR = REPORTS_DIR / "btris_labs" / "20c"
+# Do not resolve symlinks here. On Biowulf, ``/data/...`` may resolve to a
+# ``/vf/users/...`` target that is not the project path exposed to the job.
+PROJECT_ROOT = Path(__file__).absolute().parents[1]
+BTRIS_ROOT = PROJECT_ROOT / "data_analytic" / "BTRIS"
+RULE_INPUT = PROJECT_ROOT / "btris_lab_rule_families.xlsx"
+QC_DIR = PROJECT_ROOT / "reports" / "btris_labs" / "20c"
 PROTOCOLS = ("11D", "15D")
 RULE_SHEET = "Lab rule map"
 RULE_COLUMNS = ["Order Name", "Cluster Name", "Suggested Rule Family"]
