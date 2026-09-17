@@ -22,6 +22,9 @@ SPEC.loader.exec_module(MODULE)
 def row(family: str, **updates: object) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build one synthetic step-20 row and its exact-pair rule."""
     record = {
+        "Order Name": "Order A",
+        "Cluster Name": "Cluster A",
+        "Observation Value": pd.NA,
         "order_name_original": "Order A",
         "cluster_name_original": "Cluster A",
         "result_valid_for_analysis": True,
@@ -38,6 +41,8 @@ def row(family: str, **updates: object) -> tuple[pd.DataFrame, pd.DataFrame]:
         "reported_interpretation": pd.NA,
     }
     record.update(updates)
+    if pd.isna(record["Observation Value"]):
+        record["Observation Value"] = record["result_raw"]
     rules = pd.DataFrame(
         {
             "Order Name": ["Order A"],
@@ -55,12 +60,14 @@ def test_continuous_range_exact(value: float, expected: str) -> None:
     """Exact values use the contemporaneous bilateral reference."""
     labs, rules = row(
         "CONTINUOUS_RANGE",
+        **{"Observation Value": str(value)},
         result_numeric_exact=value,
         reference_low=10,
         reference_high=40,
     )
     result = MODULE.harmonize_labs(labs, rules).iloc[0]
     assert result["result_category"] == expected
+    assert result["Observation Value"] == result["Observation Value Original"]
     assert result["harmonization_status"] == "HARMONIZED"
 
 
@@ -76,6 +83,8 @@ def test_threshold_binary_censored_positive() -> None:
     )
     result = MODULE.harmonize_labs(labs, rules).iloc[0]
     assert result["result_category"] == "POSITIVE"
+    assert result["Observation Value"] == "POSITIVE"
+    assert result["Observation Value Original"] == ">8.0"
     assert result["harmonization_source"] == "reference_range_censored"
 
 
@@ -97,7 +106,8 @@ def test_multiclass_normalizes_only_case_and_spaces() -> None:
     """Multiclass values retain their meaning in a controlled representation."""
     labs, rules = row("CATEGORICAL_MULTICLASS", result_raw="  Few   ")
     result = MODULE.harmonize_labs(labs, rules).iloc[0]
-    assert result["result_category"] == "FEW"
+    assert result["result_category"] == "Few"
+    assert result["Observation Value"] == "Few"
     assert result["result_raw"] == "  Few   "
 
 
@@ -118,7 +128,7 @@ def test_continuous_only_preserves_numeric_without_category() -> None:
     result = MODULE.harmonize_labs(labs, rules).iloc[0]
     assert result["result_numeric"] == 85
     assert pd.isna(result["result_category"])
-    assert result["harmonization_status"] == "HARMONIZED"
+    assert result["harmonization_status"] == "PRESERVED_CONTINUOUS"
 
 
 def test_unmatched_exact_pair_is_no_rule_and_appears_in_qc() -> None:
@@ -127,7 +137,7 @@ def test_unmatched_exact_pair_is_no_rule_and_appears_in_qc() -> None:
     rules.loc[0, "Cluster Name"] = "Different cluster"
     harmonized = MODULE.harmonize_labs(labs, rules)
     assert harmonized.iloc[0]["harmonization_status"] == "NO_RULE"
-    unmatched = MODULE.build_qc(harmonized)["unmatched_rule_pairs.csv"]
+    unmatched = MODULE.build_qc(harmonized)["20c_unmatched_rule_pairs.csv"]
     assert unmatched.iloc[0].to_dict() == {
         "Order Name": "Order A",
         "Cluster Name": "Cluster A",
@@ -161,31 +171,33 @@ def test_loader_rejects_duplicate_exact_pairs(tmp_path: Path) -> None:
         MODULE.load_rule_map(path)
 
 
-def test_run_writes_parquet_and_csv_outputs(
+def test_run_updates_each_protocol_file_in_place(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The analytical result is saved in both machine and human-readable formats."""
-    labs, rules = row("CONTINUOUS_ONLY", result_numeric=85)
-    output_path = tmp_path / "20c_harmonized.parquet"
-    parquet_writes: list[tuple[Path, bool]] = []
-
-    monkeypatch.setattr(pd, "read_parquet", lambda path: labs)
+    """Protocol files keep their paths and downstream-facing column names."""
+    labs, rules = row("CATEGORICAL_BINARY", result_raw="reactive")
+    for protocol in MODULE.PROTOCOLS:
+        directory = tmp_path / protocol
+        directory.mkdir()
+        labs.to_csv(directory / "Lab Results.csv", index=False)
     monkeypatch.setattr(MODULE, "load_rule_map", lambda path: rules)
-    monkeypatch.setattr(
-        pd.DataFrame,
-        "to_parquet",
-        lambda self, path, index: parquet_writes.append((path, index)),
-    )
 
     MODULE.run(
-        tmp_path / "labs.parquet",
+        tmp_path,
         tmp_path / "rules.xlsx",
-        output_path,
         tmp_path / "qc",
     )
 
-    assert parquet_writes == [(output_path, False)]
-    csv_result = pd.read_csv(output_path.with_suffix(".csv"))
-    assert len(csv_result) == 1
-    assert csv_result.loc[0, "result_numeric"] == 85
-    assert csv_result.loc[0, "harmonization_status"] == "HARMONIZED"
+    for protocol in MODULE.PROTOCOLS:
+        result = pd.read_csv(tmp_path / protocol / "Lab Results.csv")
+        assert result.loc[0, "Observation Value Original"] == "reactive"
+        assert result.loc[0, "Observation Value"] == "POSITIVE"
+
+
+def test_rerun_preserves_the_raw_observation_value() -> None:
+    """A second execution derives output from the first execution's raw trace."""
+    labs, rules = row("CATEGORICAL_BINARY", result_raw="reactive")
+    first = MODULE.harmonize_labs(labs, rules)
+    second = MODULE.harmonize_labs(first, rules)
+    assert second.loc[0, "Observation Value Original"] == "reactive"
+    assert second.loc[0, "Observation Value"] == "POSITIVE"
