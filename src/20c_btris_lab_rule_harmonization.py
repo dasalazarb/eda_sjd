@@ -1,4 +1,10 @@
-"""Harmonize BTRIS lab files in place without changing their downstream interface."""
+"""Harmonize filtered BTRIS lab files in place before step 20.
+
+This step consumes the patient-filtered laboratory files produced by
+``19_filter_btris_patients.py`` under ``data_intermediate/BTRIS/{11D,15D}/``,
+preserves the original observation value, and writes harmonized values back in
+place so downstream step 20 reads the harmonized laboratory results.
+"""
 
 from __future__ import annotations
 
@@ -16,12 +22,12 @@ from btris_lab_harmonization import (
     interpret_threshold_binary,
     normalize_qualitative,
 )
-from common import setup_logger
+from common import INTERMEDIATE_DIR, setup_logger
 
 # Do not resolve symlinks here. On Biowulf, ``/data/...`` may resolve to a
 # ``/vf/users/...`` target that is not the project path exposed to the job.
 PROJECT_ROOT = Path(__file__).absolute().parents[1]
-BTRIS_ROOT = PROJECT_ROOT / "data_analytic" / "BTRIS"
+BTRIS_ROOT = INTERMEDIATE_DIR / "BTRIS"
 RULE_INPUT = PROJECT_ROOT / "btris_lab_rule_families.xlsx"
 QC_DIR = PROJECT_ROOT / "reports" / "btris_labs" / "20c"
 PROTOCOLS = ("11D", "15D")
@@ -277,6 +283,15 @@ def _write_in_place(frame: pd.DataFrame, path: Path) -> None:
 def run(btris_root: Path, rule_path: Path, qc_dir: Path) -> None:
     """Harmonize each protocol-specific laboratory CSV or Parquet file in place."""
     logger = setup_logger("20c_btris_lab_rule_harmonization")
+    for protocol in PROTOCOLS:
+        protocol_dir = btris_root / protocol
+        if not protocol_dir.exists():
+            raise FileNotFoundError(
+                f"Missing filtered BTRIS directory: {protocol_dir}. "
+                "Run 19_filter_btris_patients.py before "
+                "20c_btris_lab_rule_harmonization.py."
+            )
+
     rules = load_rule_map(rule_path)
     qc_dir.mkdir(parents=True, exist_ok=True)
     for protocol in PROTOCOLS:
