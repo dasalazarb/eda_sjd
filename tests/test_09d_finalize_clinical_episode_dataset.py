@@ -108,3 +108,61 @@ def test_preexisting_source_pipe_is_missing_and_unresolved():
 @pytest.mark.parametrize("column", sorted(module.PROVENANCE_PIPE_COLUMNS))
 def test_provenance_pipe_columns_are_exempt_from_analytical_qc(column):
     module.validate_analytical_pipes(pd.DataFrame({column: ["left | right"]}))
+
+
+def final_analytic_frame() -> pd.DataFrame:
+    """Create finalized synthetic episode data with processing metadata."""
+    return pd.DataFrame(
+        {
+            "patient_id": ["p1", "p2"],
+            "clinical_episode_id": ["p1__CE0001", "p2__CE0001"],
+            "clinical_anchor_date": pd.to_datetime(["2024-01-01", "2024-02-01"]),
+            "source_protocol": ["11-D-0172", "15-D-0051"],
+            "essdai__essdai_total_score": [3, 7],
+            "esspri_questionnaire__esspri_total": [2.5, 6.0],
+            "clinical_measure": ["stable", "improved"],
+            "time_24_hour": ["08:00", "09:00"],
+            "source_file": ["source_a.csv", "source_b.csv"],
+            "row_id_raw": [1, 2],
+            "dup_rank": [1, 1],
+            "duplicate_group_id": ["d1", "d2"],
+            "visit_datetime_adjustment_seconds": [0, 1],
+            "comparison_type": ["exact", "exact"],
+            "comparison_detail": ["same", "same"],
+        }
+    )
+
+
+def test_strip_processing_metadata_removes_only_technical_columns():
+    before = final_analytic_frame()
+
+    result = module.strip_processing_metadata(before)
+
+    assert module.FINAL_ANALYTIC_DROP_COLUMNS.isdisjoint(result.columns)
+    assert "source_protocol" in result.columns
+
+
+def test_strip_processing_metadata_preserves_rows_and_clinical_values():
+    before = final_analytic_frame()
+    clinical_columns = [
+        "patient_id",
+        "clinical_episode_id",
+        "clinical_anchor_date",
+        "source_protocol",
+        "essdai__essdai_total_score",
+        "esspri_questionnaire__esspri_total",
+        "clinical_measure",
+    ]
+
+    result = module.strip_processing_metadata(before)
+
+    assert len(result) == len(before)
+    pd.testing.assert_frame_equal(result[clinical_columns], before[clinical_columns])
+
+
+def test_strip_processing_metadata_is_idempotent():
+    clean_once = module.strip_processing_metadata(final_analytic_frame())
+
+    clean_twice = module.strip_processing_metadata(clean_once)
+
+    pd.testing.assert_frame_equal(clean_once, clean_twice)
