@@ -31,6 +31,17 @@ OUTPUT_BASE = (
 )
 QC_DIR = REPORTS_DIR / "clinical_episode_finalize"
 
+FINAL_ANALYTIC_DROP_COLUMNS = {
+    "time_24_hour",
+    "source_file",
+    "row_id_raw",
+    "dup_rank",
+    "duplicate_group_id",
+    "visit_datetime_adjustment_seconds",
+    "comparison_type",
+    "comparison_detail",
+}
+
 KEYS = ["patient_id", "clinical_episode_id"]
 IMMUTABLE = [
     "patient_id",
@@ -767,6 +778,26 @@ def parquet_compatible(frame: pd.DataFrame) -> pd.DataFrame:
     return output
 
 
+def strip_processing_metadata(frame: pd.DataFrame) -> pd.DataFrame:
+    """Remove pipeline-only metadata from the published analytical dataset.
+
+    Parameters
+    ----------
+    frame : pd.DataFrame
+        Finalized episode data, including metadata retained for internal QC.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy without processing-only columns. Clinical fields, including
+        ``source_protocol``, and all rows retain their original values.
+    """
+    drop_columns = [
+        column for column in FINAL_ANALYTIC_DROP_COLUMNS if column in frame.columns
+    ]
+    return frame.drop(columns=drop_columns)
+
+
 def validate_analytical_pipes(frame: pd.DataFrame) -> None:
     """Reject residual conflict pipes in scalar analytical columns."""
     exempt = PROVENANCE_PIPE_COLUMNS | set(IMMUTABLE)
@@ -1167,9 +1198,26 @@ def main() -> None:
     hard = hard_qc(before, after)
     validate_analytical_pipes(after)
     qc, essdai_qc = summary_tables(before, after, conflicts, log, essdai_log, hard)
+    removed_columns = sorted(FINAL_ANALYTIC_DROP_COLUMNS.intersection(after.columns))
+    analytic_output = strip_processing_metadata(after)
+    cleanup_qc = pd.DataFrame(
+        {
+            "metric": [
+                "final_analytic_columns_removed",
+                "final_analytic_n_columns_before_cleanup",
+                "final_analytic_n_columns_after_cleanup",
+            ],
+            "value": [
+                "|".join(removed_columns),
+                len(after.columns),
+                len(analytic_output.columns),
+            ],
+        }
+    )
+    qc = pd.concat([qc, cleanup_qc], ignore_index=True)
     args.output_base.parent.mkdir(parents=True, exist_ok=True)
     args.qc_dir.mkdir(parents=True, exist_ok=True)
-    serialized = parquet_compatible(after)
+    serialized = parquet_compatible(analytic_output)
     serialized.to_parquet(args.output_base.with_suffix(".parquet"), index=False)
     serialized.to_csv(args.output_base.with_suffix(".csv"), index=False)
     log.to_csv(args.qc_dir / "09d_conflict_resolution_log.csv", index=False)
