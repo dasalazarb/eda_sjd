@@ -1,4 +1,4 @@
-"""Synthetic-data tests for clinical episode construction."""
+"""Synthetic tests for interval-first clinical episode reconstruction."""
 
 from __future__ import annotations
 
@@ -14,154 +14,233 @@ assert SPEC is not None and SPEC.loader is not None
 EPISODES = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(EPISODES)
 
-
-def _visits() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "patient_id": [1, 1, 1, 2],
-            "row_id_raw": [10, 11, 12, 20],
-            "interval_name": ["V1", "V1-extra", "V2", "V1"],
-            "visit_date": ["2024-01-01", "2024-01-10", "2024-03-01", "2024-02-01"],
-            "essdai__domain": [0, pd.NA, pd.NA, pd.NA],
-            "esspri_questionnaire__pain": [pd.NA, "No", pd.NA, pd.NA],
-            "eye_examination__eye_exam_done": [pd.NA, pd.NA, "No", pd.NA],
-            "salivary_flow_form__tot_sim_sal_flow": [pd.NA, pd.NA, 0, pd.NA],
-            "ccgo__participate_ccgo": [pd.NA, pd.NA, pd.NA, "No"],
-        }
-    )
+FULL = "Phase 1: Second Full Evaluation"
+NH = "Natural History Protocol 478 Interval"
 
 
-def test_flags_and_temporal_assignment_keep_valid_zero_and_no() -> None:
-    prepared, _ = EPISODES.prepare_visits(_visits())
+def _row(
+    row_id: int, interval: str, date: str, component: str, **extra: object
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "patient_id": 1,
+        "row_id_raw": row_id,
+        "interval_name": interval,
+        "visit_date": date,
+        "essdai__domain": pd.NA,
+        "essdai__essdai_total_score": pd.NA,
+        "esspri_questionnaire__pain": pd.NA,
+        "systems_review_for_physician__done": pd.NA,
+        "physical_examination__done": pd.NA,
+        "visit_summary_form__done": pd.NA,
+        "eye_examination__done": pd.NA,
+        "salivary_flow_form__value": pd.NA,
+        "oral_exam_form__done": pd.NA,
+    }
+    columns = {
+        "essdai": "essdai__domain",
+        "essdai_total": "essdai__essdai_total_score",
+        "esspri": "esspri_questionnaire__pain",
+        "systems": "systems_review_for_physician__done",
+        "physical": "physical_examination__done",
+        "summary": "visit_summary_form__done",
+        "eye": "eye_examination__done",
+        "salivary": "salivary_flow_form__value",
+        "oral": "oral_exam_form__done",
+    }
+    for item in component.split("+"):
+        row[columns[item]] = 1
+    row.update(extra)
+    return row
+
+
+def _run(
+    rows: list[dict[str, object]],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    source = pd.DataFrame(rows)
+    prepared, provenance = EPISODES.prepare_visits(source)
     flagged = EPISODES.add_presence_flags(prepared)
-    units = EPISODES.build_daily_activity_units(flagged)
+    units = EPISODES.build_atomic_activity_units(flagged, provenance)
     assigned_units = EPISODES.assign_episodes(units)
     assigned = EPISODES.propagate_episode_assignments(flagged, assigned_units)
     manifest = EPISODES.build_manifest(assigned)
+    return assigned, manifest, assigned_units.attrs["merge_decision_audit"]
 
-    first = manifest.loc[manifest["has_essdai_form"]].iloc[0]
-    assert first["has_esspri_core"]
-    assert first["episode_span_days"] == 9
-    assert first["clinical_anchor_date"] == pd.Timestamp("2024-01-01")
-    assert assigned.loc[assigned["row_id_raw"].eq(10), "clinical_episode_id"].iloc[0] == (
-        assigned.loc[assigned["row_id_raw"].eq(11), "clinical_episode_id"].iloc[0]
+
+def test_same_date_different_complete_assessments_stay_separate() -> None:
+    assigned, _, _ = _run(
+        [
+            _row(1, FULL, "2024-04-05", "essdai+systems+physical"),
+            _row(2, NH, "2024-04-05", "essdai+systems+physical"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 2
+
+
+def test_exact_interval_complementary_rows_merge_without_30_day_limit() -> None:
+    assigned, manifest, _ = _run(
+        [
+            _row(1, FULL, "2023-01-01", "essdai+systems"),
+            _row(2, FULL, "2023-05-01", "esspri+eye+salivary"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 1
+    assert manifest.loc[0, "episode_span_days"] == 120
+    assert manifest.loc[0, "exceptional_merge"]
+
+
+def test_exact_interval_two_complete_assessments_stay_separate() -> None:
+    assigned, _, audit = _run(
+        [
+            _row(1, FULL, "2023-01-01", "essdai+systems+physical"),
+            _row(2, FULL, "2023-10-01", "essdai+systems+physical"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 2
+    assert audit["duplicate_complete_assessment"].any()
+
+
+def test_natural_history_and_15d_optional_are_family_aliases() -> None:
+    assigned, _, audit = _run(
+        [
+            _row(1, NH, "2023-05-01", "essdai+systems"),
+            _row(2, "15D Optional Evaluation 2", "2023-05-12", "esspri+eye"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 1
+    merged = audit.loc[audit["merge_performed"]].iloc[0]
+    assert merged["interval_compatibility_type"] == "natural_history_family_alias"
+
+
+def test_optional_can_complement_any_full_without_ordinal_mapping() -> None:
+    assigned, _, audit = _run(
+        [
+            _row(1, FULL, "2023-05-01", "essdai+systems"),
+            _row(2, "Optional Evaluation 3", "2023-05-12", "esspri+eye"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 1
+    assert (
+        audit.loc[audit["merge_performed"], "merge_reason"]
+        .eq("optional_full_family_merge")
+        .any()
     )
 
 
-def test_objective_pair_is_clinical_and_research_only_is_not() -> None:
-    prepared, _ = EPISODES.prepare_visits(_visits())
-    flagged = EPISODES.add_presence_flags(prepared)
-    units = EPISODES.assign_episodes(EPISODES.build_daily_activity_units(flagged))
-    assigned = EPISODES.propagate_episode_assignments(flagged, units)
-    manifest = EPISODES.build_manifest(assigned)
+def test_cross_year_incomplete_fragment_merges_with_strict_qc() -> None:
+    assigned, manifest, _ = _run(
+        [
+            _row(1, FULL, "2023-05-01", "essdai+systems+physical"),
+            _row(2, FULL, "2025-05-02", "eye"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 1
+    assert manifest.loc[
+        0,
+        [
+            "cross_year_merge",
+            "suspected_date_error",
+            "exceptional_merge",
+            "manual_review_required",
+        ],
+    ].all()
+    assert manifest.loc[0, "clinical_anchor_date"] == pd.Timestamp("2023-05-01")
 
-    objective = manifest.loc[manifest["intervals_involved"].eq("V2")].iloc[0]
-    research = manifest.loc[
-        manifest["visit_type"].eq("research_or_procedure_only_candidate")
-    ].iloc[0]
-    assert objective["clinical_visit"]
-    assert research["patient_id"] == 2
-    assert pd.isna(research["clinical_anchor_date"])
+
+def test_cross_year_complete_assessments_do_not_merge() -> None:
+    assigned, _, _ = _run(
+        [
+            _row(1, FULL, "2023-05-01", "essdai+systems+physical"),
+            _row(2, FULL, "2025-05-02", "essdai+systems+physical"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 2
 
 
-def test_prepare_visits_rejects_duplicate_raw_row_ids() -> None:
-    visits = _visits()
-    visits.loc[1, "row_id_raw"] = 10
+def test_temporal_rescue_different_intervals_within_30_days() -> None:
+    assigned, _, audit = _run(
+        [
+            _row(1, "Unscheduled A", "2023-05-01", "essdai+systems"),
+            _row(2, "Unscheduled B", "2023-05-21", "esspri+eye"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 1
+    merged = audit.loc[audit["merge_performed"]].iloc[0]
+    assert merged["merge_stage"] == "temporal_rescue"
+    assert merged["cross_interval_merge"]
+
+
+def test_temporal_rescue_does_not_cross_30_days() -> None:
+    assigned, _, _ = _run(
+        [
+            _row(1, "Unscheduled A", "2023-05-01", "essdai+systems"),
+            _row(2, "Unscheduled B", "2023-06-02", "esspri+eye"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 2
+
+
+def test_same_calendar_month_is_recorded() -> None:
+    _, _, audit = _run(
+        [
+            _row(1, "Unscheduled A", "2023-08-01", "essdai+systems"),
+            _row(2, "Unscheduled B", "2023-08-30", "esspri+eye"),
+        ]
+    )
+    merged = audit.loc[audit["merge_performed"]].iloc[0]
+    assert merged["same_calendar_month"]
+
+
+def test_nearby_complete_assessments_do_not_merge() -> None:
+    assigned, _, _ = _run(
+        [
+            _row(1, "Unscheduled A", "2023-08-01", "essdai+systems+physical"),
+            _row(2, "Unscheduled B", "2023-08-06", "essdai+systems+physical"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 2
+
+
+def test_static_conflict_blocks_apparently_complementary_merge() -> None:
+    assigned, _, audit = _run(
+        [
+            _row(1, FULL, "2023-08-01", "essdai+systems", sex="F"),
+            _row(2, FULL, "2023-08-06", "esspri+eye", sex="M"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 2
+    assert audit["hard_conflict"].any()
+
+
+def test_vital_sign_differences_are_not_hard_conflicts() -> None:
+    rows = [
+        _row(1, FULL, "2023-08-01", "essdai+systems", vital_signs__pulse=70),
+        _row(2, FULL, "2023-08-06", "esspri+eye", vital_signs__pulse=100),
+    ]
+    assigned, _, audit = _run(rows)
+    assert assigned["clinical_episode_id"].nunique() == 1
+    assert not audit.loc[audit["merge_performed"], "hard_conflict"].any()
+
+
+def test_provenance_and_conservation_invariants() -> None:
+    rows = [
+        _row(1, FULL, "2023-08-01", "essdai+systems"),
+        _row(2, FULL, "2023-08-06", "esspri+eye"),
+    ]
+    source, _ = EPISODES.prepare_visits(pd.DataFrame(rows))
+    assigned, _, _ = _run(rows)
+    assert EPISODES.validate_final_assignments(source, assigned) == (0, 0)
+    assert assigned["row_id_raw"].is_unique
+    assert (
+        assigned.sort_values("row_id_raw")["collection_date"].tolist()
+        == source.sort_values("row_id_raw")["collection_date"].tolist()
+    )
+    assert (
+        assigned.sort_values("row_id_raw")["interval_name"].tolist()
+        == source.sort_values("row_id_raw")["interval_name"].tolist()
+    )
+
+
+def test_prepare_visits_rejects_duplicate_raw_ids() -> None:
+    rows = [_row(1, FULL, "2023-01-01", "eye"), _row(1, FULL, "2023-01-02", "oral")]
     with pytest.raises(ValueError, match="row_id_raw must be complete and unique"):
-        EPISODES.prepare_visits(visits)
-
-
-def test_write_parquet_and_csv_creates_matching_outputs(tmp_path: Path) -> None:
-    frame = pd.DataFrame({"clinical_episode_id": ["1__CE0001"]})
-
-    parquet_path, csv_path = EPISODES.write_parquet_and_csv(
-        frame, tmp_path / "episode_manifest.parquet"
-    )
-
-    assert parquet_path == tmp_path / "episode_manifest.parquet"
-    assert csv_path == tmp_path / "episode_manifest.csv"
-    assert parquet_path.exists()
-    assert csv_path.exists()
-    assert pd.read_csv(csv_path).to_dict(orient="records") == frame.to_dict(
-        orient="records"
-    )
-
-
-def test_same_patient_date_is_one_indivisible_clinical_unit() -> None:
-    visits = pd.DataFrame(
-        {
-            "patient_id": [7, 7, 7, 7],
-            "row_id_raw": [1, 2, 3, 4],
-            "interval_name": ["V1", "V1", "Screening", "V1"],
-            "visit_date": ["2024-04-05"] * 4,
-            "essdai__domain": [0, pd.NA, pd.NA, pd.NA],
-            "esspri_questionnaire__pain": [pd.NA, "No", pd.NA, pd.NA],
-            "eye_examination__eye_exam_done": [pd.NA, pd.NA, "Yes", pd.NA],
-            "oral_exam_form__performed": [pd.NA, pd.NA, pd.NA, "Yes"],
-        }
-    )
-    prepared, provenance = EPISODES.prepare_visits(visits)
-    flagged = EPISODES.add_presence_flags(prepared)
-    daily_units = EPISODES.build_daily_activity_units(flagged, provenance)
-    assigned_units = EPISODES.assign_episodes(daily_units)
-    assigned_rows = EPISODES.propagate_episode_assignments(flagged, assigned_units)
-    source_intervals = EPISODES.build_source_interval_qc(prepared)
-    manifest = EPISODES.build_manifest(assigned_rows, source_intervals)
-    qc = EPISODES.build_qc(
-        assigned_rows, assigned_units, manifest, source_intervals
-    )
-
-    assert len(daily_units) == 1
-    assert set(daily_units.loc[0, "row_ids_involved"]) == {1, 2, 3, 4}
-    assert set(daily_units.loc[0, "interval_names_involved"]) == {"V1", "Screening"}
-    assert assigned_rows["clinical_episode_id"].nunique() == 1
-    assert manifest.loc[0, "clinical_visit"]
-    assert qc.loc[0, "raw_rows"] == 4
-    assert qc.loc[0, "unique_patient_collection_dates"] == 1
-    assert qc.loc[0, "daily_activity_units"] == 1
-    assert qc.loc[0, "raw_rows_unassigned"] == 0
-    assert qc.loc[0, "raw_rows_multiply_assigned"] == 0
-    assert qc.loc[0, "patient_date_units_assigned_to_multiple_episodes"] == 0
-
-
-def test_source_interval_qc_drives_explicit_manual_review_reasons() -> None:
-    visits = pd.DataFrame(
-        {
-            "patient_id": [9, 9, 9, 9],
-            "row_id_raw": [1, 2, 3, 4],
-            "interval_name": ["A", "A", "B", "C"],
-            "visit_date": ["2024-01-01", "2024-03-15", "2024-01-01", pd.NA],
-            "essdai__domain": [0, 0, pd.NA, pd.NA],
-            "esspri_questionnaire__pain": [pd.NA, pd.NA, "No", "No"],
-        }
-    )
-    prepared, _ = EPISODES.prepare_visits(visits)
-    source_intervals = EPISODES.build_source_interval_qc(prepared)
-    flagged = EPISODES.add_presence_flags(prepared)
-    units = EPISODES.assign_episodes(EPISODES.build_daily_activity_units(flagged))
-    assigned = EPISODES.propagate_episode_assignments(flagged, units)
-    manifest = EPISODES.build_manifest(assigned, source_intervals)
-    qc = EPISODES.build_qc(assigned, units, manifest, source_intervals)
-    reasons = EPISODES.manual_review_reason_distribution(manifest)
-
-    interval_a = source_intervals.loc[source_intervals["interval_name"].eq("A")].iloc[0]
-    assert interval_a["source_interval_span_days"] == 74
-    assert interval_a["source_interval_span_gt30"]
-    first_episode = manifest.loc[
-        manifest["episode_start_date"].eq(pd.Timestamp("2024-01-01"))
-    ].iloc[0]
-    assert first_episode["max_source_interval_span_days"] == 74
-    assert set(first_episode["manual_review_reason"].split("|")) == {
-        "source_interval_span_gt30",
-        "overlapping_source_interval_ranges",
-    }
-    assert manifest["manual_review_reason"].str.contains(
-        "missing_collection_date", regex=False
-    ).any()
-    assert qc.loc[0, "source_intervals_span_gt30"] == 1
-    assert qc.loc[0, "patients_with_source_interval_span_gt30"] == 1
-    assert set(reasons["manual_review_reason"]) == {
-        "missing_collection_date",
-        "overlapping_source_interval_ranges",
-        "source_interval_span_gt30",
-    }
+        EPISODES.prepare_visits(pd.DataFrame(rows))
