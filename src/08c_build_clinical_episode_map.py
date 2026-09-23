@@ -34,40 +34,49 @@ MERGE_INCOMPATIBILITIES_FILENAME = "08c_merge_incompatibilities.csv"
 MERGE_SUMMARY_FILENAME = "08c_merge_summary.csv"
 
 NATURAL_HISTORY = "natural history protocol 478 interval"
-PHASE_INTERVALS = {
-    "phase 1: initial full evaluation",
-    "phase 1: second full evaluation",
-    "phase 1: final full (third full) evaluation",
-    "phase 2: 4th full evaluation",
-    "phase 2: 5th full evaluation",
+PHASE_ORDER = {
+    "Phase 1: Initial Full Evaluation": 1,
+    "Phase 1: Second Full Evaluation": 2,
+    "Phase 1: Final Full (Third Full) Evaluation": 3,
+    "Phase 2: 4th Full Evaluation": 4,
+    "Phase 2: 5th Full Evaluation": 5,
 }
+NORMALIZED_PHASE_ORDER = {
+    _name.casefold(): order for _name, order in PHASE_ORDER.items()
+}
+PHASE_INTERVALS = set(NORMALIZED_PHASE_ORDER)
 AUDIT_COLUMNS = [
     "patient_id",
-    "episode_or_row_a",
-    "episode_or_row_b",
+    "episode_a",
+    "episode_b",
+    "interval_a",
+    "interval_b",
     "date_a",
     "date_b",
     "year_a",
     "year_b",
-    "interval_a",
-    "interval_b",
-    "interval_compatible",
     "days_apart",
-    "merge_stage",
+    "same_exact_interval",
     "merge_rule",
+    "primary_interval",
+    "secondary_interval",
     "merged",
+    "reason",
 ]
 CONFLICT_COLUMNS = [
     "patient_id",
     "clinical_episode_id",
     "variable",
-    "values_found",
-    "n_distinct_values",
-    "row_ids",
-    "interval_names",
-    "collection_dates",
-    "merge_stage",
+    "preferred_value",
+    "secondary_value",
+    "chosen_value",
+    "preferred_interval",
+    "secondary_interval",
+    "preferred_date",
+    "secondary_date",
+    "days_apart",
     "merge_rule",
+    "conflict_resolution",
 ]
 INCOMPATIBILITY_COLUMNS = [
     "patient_id",
@@ -101,6 +110,9 @@ METADATA_COLUMNS = {
     "merge_rule",
     "manual_review_required",
     "manual_review_reason",
+    "representative_interval",
+    "representative_date",
+    "episode_precedence",
     "source_file",
 }
 MISSING_UPPER = {str(value).strip().upper() for value in MISSING_TOKENS}
@@ -146,12 +158,49 @@ def _is_optional(value: str) -> bool:
     return value.startswith("optional evaluation") or _is_15d_optional(value)
 
 
+def get_episode_priority(interval_name: object) -> str:
+    """Classify an interval for deterministic clinical episode precedence."""
+    normalized = _normalized_interval(interval_name)
+    if normalized == NATURAL_HISTORY:
+        return "natural"
+    if _is_15d_optional(normalized):
+        return "15d_optional"
+    if normalized in NORMALIZED_PHASE_ORDER:
+        return f"phase_{NORMALIZED_PHASE_ORDER[normalized]}"
+    if _is_optional(normalized):
+        return "optional"
+    return "other"
+
+
+def resolve_preferred_value(
+    preferred_value: object,
+    secondary_value: object,
+    preferred_source: object,
+    secondary_source: object,
+) -> tuple[object, bool]:
+    """Resolve two values in favor of the clinically preferred source.
+
+    Returns the selected value and whether two populated, unequal values conflict.
+    Source arguments make call sites explicit and are intentionally not interpreted.
+    """
+    del preferred_source, secondary_source
+    preferred = _unique_values([preferred_value])
+    secondary = _unique_values([secondary_value])
+    if not preferred:
+        return (secondary[0] if secondary else pd.NA), False
+    if not secondary:
+        return preferred[0], False
+    conflict = str(preferred[0]).strip() != str(secondary[0]).strip()
+    return preferred[0], conflict
+
+
 def intervals_are_compatible(interval_a: object, interval_b: object) -> bool:
     """Return whether two original interval labels are PASS-1 compatible.
 
     Exact labels match. Natural History matches 15D Optional, and Optional
-    Evaluation (including 15D Optional) matches one of the five named Phase
-    full evaluations. Distinct Phase intervals never match one another.
+    Evaluation matches one of the five named Phase full evaluations, and two
+    named Phase intervals are clinically compatible (with order determining
+    precedence during PASS 2).
     """
     left, right = _normalized_interval(interval_a), _normalized_interval(interval_b)
     if not left or not right:
@@ -161,6 +210,8 @@ def intervals_are_compatible(interval_a: object, interval_b: object) -> bool:
     if (left == NATURAL_HISTORY and _is_15d_optional(right)) or (
         right == NATURAL_HISTORY and _is_15d_optional(left)
     ):
+        return True
+    if left in PHASE_INTERVALS and right in PHASE_INTERVALS:
         return True
     return (_is_optional(left) and right in PHASE_INTERVALS) or (
         _is_optional(right) and left in PHASE_INTERVALS
@@ -267,6 +318,10 @@ def build_daily_activity_units(
 
 
 def _episode_date(rows: pd.DataFrame) -> pd.Timestamp:
+    if "representative_date" in rows and rows["representative_date"].notna().any():
+        return rows.loc[
+            rows["representative_date"].notna(), "representative_date"
+        ].iloc[0]
     dates = rows["collection_date"].dropna()
     return dates.min() if not dates.empty else pd.NaT
 
@@ -349,19 +404,30 @@ def find_incompatible_variables(
     return conflicts
 
 
-def _within_30_day_rule(left: pd.DataFrame, right: pd.DataFrame) -> str:
-    """Label an allowed cross-interval merge by interval family."""
-    interval_a = _normalized_interval(left["interval_name"].iloc[0])
-    interval_b = _normalized_interval(right["interval_name"].iloc[0])
-    if (interval_a == NATURAL_HISTORY and _is_15d_optional(interval_b)) or (
-        interval_b == NATURAL_HISTORY and _is_15d_optional(interval_a)
+def _pair_rule(left: pd.DataFrame, right: pd.DataFrame) -> tuple[str, int, int] | None:
+    """Return the clinical merge rule and preferred/secondary side indexes."""
+    left_kind = get_episode_priority(left["representative_interval"].iloc[0])
+    right_kind = get_episode_priority(right["representative_interval"].iloc[0])
+    kinds = {left_kind, right_kind}
+    if kinds == {"natural", "15d_optional"}:
+        return (
+            "natural_15d_within_30_days",
+            (0 if left_kind == "natural" else 1),
+            (1 if left_kind == "natural" else 0),
+        )
+    left_phase, right_phase = left_kind.startswith("phase_"), right_kind.startswith(
+        "phase_"
+    )
+    if left_phase and right_phase:
+        left_order, right_order = int(left_kind[6:]), int(right_kind[6:])
+        primary = 0 if left_order <= right_order else 1
+        return "phase_phase_within_30_days", primary, 1 - primary
+    if (left_phase and right_kind == "optional") or (
+        right_phase and left_kind == "optional"
     ):
-        return "natural_15d_within_30_days"
-    if (_is_optional(interval_a) and interval_b in PHASE_INTERVALS) or (
-        _is_optional(interval_b) and interval_a in PHASE_INTERVALS
-    ):
-        return "optional_phase_within_30_days"
-    return "different_interval_temporal_rescue"
+        primary = 0 if left_phase else 1
+        return "phase_optional_within_30_days", primary, 1 - primary
+    return None
 
 
 def _display(values: Iterable[object]) -> str:
@@ -372,74 +438,92 @@ def _audit_record(
     patient_id: object,
     left: pd.DataFrame,
     right: pd.DataFrame,
-    stage: str,
     rule: str,
     merged: bool,
+    primary: pd.DataFrame | None = None,
+    secondary: pd.DataFrame | None = None,
+    reason: str = "",
 ) -> dict[str, object]:
     date_a, date_b = _episode_date(left), _episode_date(right)
     return {
         "patient_id": patient_id,
-        "episode_or_row_a": _display(left["row_id_raw"]),
-        "episode_or_row_b": _display(right["row_id_raw"]),
+        "episode_a": _display(left["row_id_raw"]),
+        "episode_b": _display(right["row_id_raw"]),
+        "interval_a": _display(left["interval_name"]),
+        "interval_b": _display(right["interval_name"]),
         "date_a": date_a,
         "date_b": date_b,
         "year_a": date_a.year if pd.notna(date_a) else pd.NA,
         "year_b": date_b.year if pd.notna(date_b) else pd.NA,
-        "interval_a": _display(left["interval_name"]),
-        "interval_b": _display(right["interval_name"]),
-        "interval_compatible": _episodes_compatible(left, right),
         "days_apart": (
             abs((date_b - date_a).days)
             if pd.notna(date_a) and pd.notna(date_b)
             else pd.NA
         ),
-        "merge_stage": stage,
+        "same_exact_interval": _episodes_have_same_exact_interval(left, right),
         "merge_rule": rule,
+        "primary_interval": (
+            _display(primary["interval_name"]) if primary is not None else ""
+        ),
+        "secondary_interval": (
+            _display(secondary["interval_name"]) if secondary is not None else ""
+        ),
         "merged": merged,
+        "reason": reason or ("merged" if merged else "not_eligible"),
     }
 
 
 def _merge(
-    left: pd.DataFrame, right: pd.DataFrame, stage: str, rule: str
+    primary: pd.DataFrame, secondary: pd.DataFrame, stage: str, rule: str
 ) -> pd.DataFrame:
-    rows = pd.concat([left, right]).sort_values(["collection_date", "_source_order"])
-    rows = rows.copy()
+    """Merge row membership while retaining explicit episode precedence."""
+    rows = (
+        pd.concat([primary, secondary])
+        .sort_values(["collection_date", "_source_order"])
+        .copy()
+    )
+    representative_interval = primary["representative_interval"].iloc[0]
+    representative_date = primary["representative_date"].iloc[0]
     rows["merge_stage"] = stage
     rows["merge_rule"] = rule
     rows["assignment_rule"] = rule
+    rows["representative_interval"] = representative_interval
+    rows["representative_date"] = representative_date
+    # Existing primary rows remain ahead of every secondary row. This supports
+    # deterministic hierarchical collapse even after multiple merges.
+    primary_ids = set(primary["row_id_raw"])
+    base = int(rows["episode_precedence"].max()) + 1
+    rows.loc[~rows["row_id_raw"].isin(primary_ids), "episode_precedence"] += base
     return rows
 
 
 def _pass_one(
     patient_id: object, year_rows: pd.DataFrame, audit: list[dict[str, object]]
 ) -> list[pd.DataFrame]:
-    episodes = [year_rows.loc[[index]].copy() for index in year_rows.index]
-    changed = True
-    while changed:
-        changed = False
-        for i in range(len(episodes)):
-            for j in range(i + 1, len(episodes)):
-                if not _episodes_have_same_exact_interval(episodes[i], episodes[j]):
-                    continue
-                rule = "same_exact_interval_same_year"
-                audit.append(
-                    _audit_record(
-                        patient_id,
-                        episodes[i],
-                        episodes[j],
-                        "interval_same_year",
-                        rule,
-                        True,
-                    )
+    episodes: list[pd.DataFrame] = []
+    for _, exact_rows in year_rows.groupby("interval_name", sort=False, dropna=False):
+        exact_rows = exact_rows.sort_values(["collection_date", "_source_order"]).copy()
+        primary = exact_rows.iloc[[0]].copy()
+        for position in range(1, len(exact_rows)):
+            secondary = exact_rows.iloc[[position]].copy()
+            audit.append(
+                _audit_record(
+                    patient_id,
+                    primary,
+                    secondary,
+                    "same_exact_interval_same_year",
+                    True,
+                    primary,
+                    secondary,
                 )
-                episodes[i] = _merge(
-                    episodes[i], episodes[j], "interval_same_year", rule
-                )
-                episodes.pop(j)
-                changed = True
-                break
-            if changed:
-                break
+            )
+            primary = _merge(
+                primary,
+                secondary,
+                "interval_same_year",
+                "same_exact_interval_same_year",
+            )
+        episodes.append(primary)
     return episodes
 
 
@@ -463,68 +547,83 @@ def _pass_two(
                 date_j = _episode_date(episodes[j])
                 if pd.isna(date_j):
                     continue
-                days_apart = abs((date_j - date_i).days)
+                days_apart = (date_j - date_i).days
                 if days_apart > 30:
                     audit.append(
                         _audit_record(
                             patient_id,
                             episodes[i],
                             episodes[j],
-                            "temporal_rescue",
                             "different_interval_gt30_days_no_merge",
                             False,
+                            reason="different intervals more than 30 days apart",
                         )
                     )
-                    continue
-                complementary = episodes_are_complementary(episodes[i], episodes[j])
+                    break
+
+                known = _pair_rule(episodes[i], episodes[j])
                 conflicts = find_incompatible_variables(episodes[i], episodes[j])
-                merge = complementary and not conflicts
-                if conflicts:
-                    rule = "different_interval_incompatible_no_merge"
-                elif not complementary:
-                    rule = "different_interval_not_complementary_no_merge"
+                if known:
+                    rule, primary_index, secondary_index = known
+                    pair = [episodes[i], episodes[j]]
+                    primary, secondary = pair[primary_index], pair[secondary_index]
+                    merge = True
+                    reason = "clinical priority merge"
                 else:
-                    rule = _within_30_day_rule(episodes[i], episodes[j])
+                    complementary = episodes_are_complementary(episodes[i], episodes[j])
+                    merge = complementary and not conflicts
+                    rule = (
+                        "other_temporal_rescue"
+                        if merge
+                        else "other_interval_conflict_no_merge"
+                    )
+                    primary, secondary = episodes[i], episodes[j]
+                    reason = (
+                        "complementary without incompatibilities"
+                        if merge
+                        else "not complementary or conflicting values"
+                    )
                 audit.append(
                     _audit_record(
                         patient_id,
                         episodes[i],
                         episodes[j],
-                        "temporal_rescue",
                         rule,
                         merge,
+                        primary,
+                        secondary,
+                        reason,
                     )
                 )
-                for conflict in conflicts:
-                    incompatibilities.append(
-                        {
-                            "patient_id": patient_id,
-                            "episode_a": _display(episodes[i]["row_id_raw"]),
-                            "episode_b": _display(episodes[j]["row_id_raw"]),
-                            "interval_a": _display(episodes[i]["interval_name"]),
-                            "interval_b": _display(episodes[j]["interval_name"]),
-                            "date_a": date_i,
-                            "date_b": date_j,
-                            "days_apart": days_apart,
-                            **conflict,
-                            "decision": "no_merge",
-                            "reason": "different_interval_value_conflict",
-                        }
-                    )
-                if merge:
-                    episodes[i] = _merge(
-                        episodes[i], episodes[j], "temporal_rescue", rule
-                    )
-                    episodes.pop(j)
-                    changed = True
-                    break
+                if not merge:
+                    for conflict in conflicts:
+                        incompatibilities.append(
+                            {
+                                "patient_id": patient_id,
+                                "episode_a": _display(episodes[i]["row_id_raw"]),
+                                "episode_b": _display(episodes[j]["row_id_raw"]),
+                                "interval_a": _display(episodes[i]["interval_name"]),
+                                "interval_b": _display(episodes[j]["interval_name"]),
+                                "date_a": date_i,
+                                "date_b": date_j,
+                                "days_apart": days_apart,
+                                **conflict,
+                                "decision": "no_merge",
+                                "reason": "different_interval_value_conflict",
+                            }
+                        )
+                    continue
+                episodes[i] = _merge(primary, secondary, "temporal_rescue", rule)
+                episodes.pop(j)
+                changed = True
+                break
             if changed:
                 break
     return episodes
 
 
 def assign_episodes(atomic_units: pd.DataFrame) -> pd.DataFrame:
-    """Assign raw rows with compatible-interval and temporal-rescue passes."""
+    """Assign raw rows using exact-interval then clinically prioritized passes."""
     started = perf_counter()
     prepared = atomic_units.copy()
     for column, default in {
@@ -535,6 +634,9 @@ def assign_episodes(atomic_units: pd.DataFrame) -> pd.DataFrame:
         "manual_review_reason": "",
     }.items():
         prepared[column] = default
+    prepared["representative_interval"] = prepared["interval_name"]
+    prepared["representative_date"] = prepared["collection_date"]
+    prepared["episode_precedence"] = 0
     assigned: list[pd.DataFrame] = []
     audit: list[dict[str, object]] = []
     incompatibilities: list[dict[str, object]] = []
@@ -548,46 +650,41 @@ def assign_episodes(atomic_units: pd.DataFrame) -> pd.DataFrame:
         for _, year_rows in patient_rows.groupby(
             "collection_year", sort=True, dropna=False
         ):
-            year_episodes = _pass_one(patient_id, year_rows, audit)
             episodes.extend(
-                _pass_two(patient_id, year_episodes, audit, incompatibilities)
+                _pass_two(
+                    patient_id,
+                    _pass_one(patient_id, year_rows, audit),
+                    audit,
+                    incompatibilities,
+                )
             )
-
-        # Explicitly document compatible intervals rejected by the year boundary.
         for i in range(len(episodes)):
             for j in range(i + 1, len(episodes)):
-                left_year = (
-                    _episode_date(episodes[i]).year
-                    if pd.notna(_episode_date(episodes[i]))
-                    else None
+                left_date, right_date = _episode_date(episodes[i]), _episode_date(
+                    episodes[j]
                 )
-                right_year = (
-                    _episode_date(episodes[j]).year
-                    if pd.notna(_episode_date(episodes[j]))
-                    else None
-                )
-                if left_year != right_year and _episodes_compatible(
-                    episodes[i], episodes[j]
+                if (
+                    pd.notna(left_date)
+                    and pd.notna(right_date)
+                    and left_date.year != right_date.year
                 ):
                     audit.append(
                         _audit_record(
                             patient_id,
                             episodes[i],
                             episodes[j],
-                            "year_boundary",
                             "different_year_no_merge",
                             False,
+                            reason="calendar years differ",
                         )
                     )
-
         episodes.sort(
             key=lambda rows: (_episode_date(rows), int(rows["_source_order"].min()))
         )
         for sequence, episode in enumerate(episodes, 1):
             episode = episode.copy()
-            episode["clinical_episode_id"] = f"{patient_id}__CE{sequence:04d}"
+            episode["clinical_episode_id"] = f"{patient_id}_EP{sequence:03d}"
             assigned.append(episode)
-
     result = pd.concat(assigned).sort_values("_source_order") if assigned else prepared
     decision_audit = pd.DataFrame(audit, columns=AUDIT_COLUMNS)
     result.attrs["merge_decision_audit"] = decision_audit
@@ -616,6 +713,9 @@ def propagate_episode_assignments(
         "merge_rule",
         "manual_review_required",
         "manual_review_reason",
+        "representative_interval",
+        "representative_date",
+        "episode_precedence",
     ]
     result = flagged_rows.merge(
         assigned_units[columns], on="row_id_raw", how="left", validate="one_to_one"
@@ -635,13 +735,16 @@ def build_manifest(
     ):
         dates = rows["collection_date"].dropna()
         start, end = (dates.min(), dates.max()) if not dates.empty else (pd.NaT, pd.NaT)
+        representative_interval = rows["representative_interval"].iloc[0]
+        representative_date = rows["representative_date"].iloc[0]
         records.append(
             {
                 "patient_id": patient_id,
                 "clinical_episode_id": episode_id,
                 "intervals_involved": _display(rows["interval_name"]),
+                "representative_interval": representative_interval,
                 "episode_start_date": start,
-                "clinical_anchor_date": start,
+                "clinical_anchor_date": representative_date,
                 "episode_end_date": end,
                 "episode_span_days": (end - start).days if pd.notna(start) else pd.NA,
                 "visit_type": "clinical_episode",
@@ -661,38 +764,76 @@ def build_manifest(
 
 
 def collapse_episode_rows(rows: pd.DataFrame) -> pd.Series:
-    """Collapse all source variables for one episode with ``collapse_values``."""
-    return pd.Series(
-        {column: collapse_values(rows[column]) for column in _data_columns(rows)}
+    """Collapse an episode, honoring representative-interval precedence."""
+    ordered = rows.sort_values(
+        ["episode_precedence", "collection_date", "_source_order"]
     )
+    representative = ordered["representative_interval"].iloc[0]
+    primary = ordered.loc[ordered["interval_name"].eq(representative)]
+    secondary = ordered.loc[~ordered.index.isin(primary.index)]
+    collapsed: dict[str, object] = {}
+    for column in _data_columns(rows):
+        preferred = collapse_values(primary[column])
+        fallback = collapse_values(secondary[column])
+        collapsed[column], _ = resolve_preferred_value(
+            preferred, fallback, representative, _display(secondary["interval_name"])
+        )
+    return pd.Series(collapsed)
 
 
 def build_value_conflicts(assigned: pd.DataFrame) -> pd.DataFrame:
-    """Return one traceable QC row per conflicting episode variable."""
+    """Return one traceable QC row per same-source or hierarchical conflict."""
     records: list[dict[str, object]] = []
     for (patient_id, episode_id), rows in assigned.groupby(
         ["patient_id", "clinical_episode_id"], sort=False
     ):
         if len(rows) < 2:
             continue
+        representative = rows["representative_interval"].iloc[0]
+        preferred_rows = rows.loc[rows["interval_name"].eq(representative)]
+        secondary_rows = rows.loc[~rows.index.isin(preferred_rows.index)]
         for column in _data_columns(rows):
-            values = _unique_values(rows[column])
-            if len(values) < 2:
+            preferred = collapse_values(preferred_rows[column])
+            secondary = collapse_values(secondary_rows[column])
+            chosen, hierarchical_conflict = resolve_preferred_value(
+                preferred,
+                secondary,
+                representative,
+                _display(secondary_rows["interval_name"]),
+            )
+            same_interval_conflict = len(_unique_values(preferred_rows[column])) > 1
+            if not hierarchical_conflict and not same_interval_conflict:
                 continue
+            secondary_interval = _display(secondary_rows["interval_name"])
+            preferred_date = preferred_rows["collection_date"].min()
+            secondary_date = secondary_rows["collection_date"].min()
             records.append(
                 {
                     "patient_id": patient_id,
                     "clinical_episode_id": episode_id,
                     "variable": column,
-                    "values_found": " | ".join(str(value).strip() for value in values),
-                    "n_distinct_values": len(values),
-                    "row_ids": _display(rows["row_id_raw"]),
-                    "interval_names": _display(rows["interval_name"]),
-                    "collection_dates": _display(
-                        rows["collection_date"].dt.strftime("%Y-%m-%d")
+                    "preferred_value": preferred,
+                    "secondary_value": secondary,
+                    "chosen_value": chosen,
+                    "preferred_interval": representative,
+                    "secondary_interval": secondary_interval or representative,
+                    "preferred_date": preferred_date,
+                    "secondary_date": (
+                        secondary_date
+                        if pd.notna(secondary_date)
+                        else preferred_rows["collection_date"].max()
                     ),
-                    "merge_stage": rows["merge_stage"].iloc[0],
+                    "days_apart": (
+                        abs((secondary_date - preferred_date).days)
+                        if pd.notna(secondary_date) and pd.notna(preferred_date)
+                        else 0
+                    ),
                     "merge_rule": rows["merge_rule"].iloc[0],
+                    "conflict_resolution": (
+                        "preserved_all_same_interval_values"
+                        if same_interval_conflict and not hierarchical_conflict
+                        else "preferred_primary_visit"
+                    ),
                 }
             )
     return pd.DataFrame(records, columns=CONFLICT_COLUMNS)
@@ -732,12 +873,22 @@ def build_merge_summary(
                 "n_candidates_total": len(audit),
                 "n_merges_total": int(merged.sum()),
                 "n_pass1_merges": (
-                    int((merged & audit["merge_stage"].eq("interval_same_year")).sum())
+                    int(
+                        (
+                            merged
+                            & audit["merge_rule"].eq("same_exact_interval_same_year")
+                        ).sum()
+                    )
                     if len(audit)
                     else 0
                 ),
                 "n_pass2_temporal_rescue_merges": (
-                    int((merged & audit["merge_stage"].eq("temporal_rescue")).sum())
+                    int(
+                        (
+                            merged
+                            & ~audit["merge_rule"].eq("same_exact_interval_same_year")
+                        ).sum()
+                    )
                     if len(audit)
                     else 0
                 ),
