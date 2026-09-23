@@ -244,3 +244,82 @@ def test_prepare_visits_rejects_duplicate_raw_ids() -> None:
     rows = [_row(1, FULL, "2023-01-01", "eye"), _row(1, FULL, "2023-01-02", "oral")]
     with pytest.raises(ValueError, match="row_id_raw must be complete and unique"):
         EPISODES.prepare_visits(pd.DataFrame(rows))
+
+
+def test_two_clinical_candidates_do_not_imply_two_complete_assessments() -> None:
+    assigned, _, audit = _run(
+        [
+            _row(1, FULL, "2024-04-05", "essdai"),
+            _row(2, FULL, "2024-04-06", "essdai+essdai_total+summary"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 1
+    assert not audit.loc[
+        audit["merge_performed"], "duplicate_complete_assessment"
+    ].any()
+
+
+def test_temporal_candidate_generation_excludes_distant_pairs() -> None:
+    _, _, audit = _run(
+        [
+            _row(1, "Unscheduled A", "2023-01-01", "essdai+systems"),
+            _row(2, "Unscheduled B", "2023-01-16", "esspri+eye"),
+            _row(3, "Unscheduled C", "2023-10-28", "oral"),
+            _row(4, "Unscheduled D", "2024-08-23", "salivary"),
+        ]
+    )
+    temporal = audit.loc[audit["merge_stage"].eq("temporal_rescue")]
+    assert len(temporal) == 1
+    assert temporal.iloc[0]["candidate_generation_rule"] == "temporal_window_30d"
+    assert temporal.iloc[0]["gap_days"] == 15
+
+
+def test_best_target_selection_is_independent_of_source_order() -> None:
+    rows = [
+        _row(10, FULL, "2024-01-01", "essdai+systems"),
+        _row(20, FULL, "2024-06-01", "essdai+systems"),
+        _row(30, FULL, "2024-06-02", "eye"),
+    ]
+    first, _, _ = _run(rows)
+    second, _, _ = _run([rows[2], rows[0], rows[1]])
+
+    def merged_raw_ids(frame: pd.DataFrame) -> set[int]:
+        fragment_episode = frame.loc[
+            frame["row_id_raw"].eq(30), "clinical_episode_id"
+        ].iloc[0]
+        return set(
+            frame.loc[
+                frame["clinical_episode_id"].eq(fragment_episode), "row_id_raw"
+            ]
+        )
+
+    assert merged_raw_ids(first) == {20, 30}
+    assert merged_raw_ids(second) == {20, 30}
+
+
+def test_audit_excludes_irrelevant_interval_pairs() -> None:
+    _, _, audit = _run(
+        [
+            _row(1, "Unscheduled A", "2020-01-01", "eye"),
+            _row(2, "Unscheduled B", "2021-01-01", "oral"),
+            _row(3, "Unscheduled C", "2022-01-01", "salivary"),
+        ]
+    )
+    assert audit.empty
+
+
+def test_ambiguous_multiple_targets_require_manual_review() -> None:
+    assigned, _, audit = _run(
+        [
+            _row(1, FULL, "2024-05-01", "essdai+systems"),
+            _row(2, FULL, "2024-05-01", "essdai+systems"),
+            _row(3, FULL, "2024-05-01", "eye"),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 3
+    assert assigned.loc[
+        assigned["row_id_raw"].eq(3), "manual_review_required"
+    ].all()
+    assert audit["manual_review_reason"].eq(
+        "ambiguous_multiple_candidate_targets"
+    ).any()
