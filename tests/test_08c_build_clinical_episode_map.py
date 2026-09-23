@@ -323,3 +323,62 @@ def test_ambiguous_multiple_targets_require_manual_review() -> None:
     assert audit["manual_review_reason"].eq(
         "ambiguous_multiple_candidate_targets"
     ).any()
+
+
+def test_bucketed_generation_is_far_below_all_pairs_and_order_invariant() -> None:
+    rows = []
+    components = [
+        "essdai+systems",
+        "eye",
+        "salivary",
+        "oral",
+        "esspri",
+        "summary",
+        "physical",
+        "eye",
+        "salivary",
+        "oral",
+    ]
+    for bucket in range(10):
+        interval = f"Synthetic interval {bucket}"
+        for fragment, component in enumerate(components):
+            rows.append(
+                _row(
+                    bucket * 10 + fragment,
+                    interval,
+                    f"2023-{bucket + 1:02d}-15",
+                    component,
+                )
+            )
+
+    first, _, first_audit = _run(rows)
+    shuffled, _, shuffled_audit = _run(list(reversed(rows)))
+
+    assert len(first_audit) < 495
+    assert len(shuffled_audit) == len(first_audit)
+    first_groups = first.groupby("clinical_episode_id")["row_id_raw"].apply(set)
+    shuffled_groups = shuffled.groupby("clinical_episode_id")["row_id_raw"].apply(set)
+    assert {frozenset(group) for group in first_groups} == {
+        frozenset(group) for group in shuffled_groups
+    }
+
+
+def test_merge_summary_reports_desaturated_candidate_counts() -> None:
+    assigned, manifest, audit = _run(
+        [
+            _row(1, FULL, "2023-05-01", "essdai+systems"),
+            _row(2, FULL, "2023-05-02", "eye"),
+        ]
+    )
+    summary = EPISODES.build_merge_summary(assigned, manifest, audit)
+    expected = {
+        "n_candidate_pairs_pass1_exact",
+        "n_candidate_pairs_pass1_nh_family",
+        "n_candidate_pairs_pass1_optional_full",
+        "n_candidate_pairs_pass1_cross_year",
+        "n_candidate_pairs_pass2_temporal",
+        "n_candidates_total",
+        "n_merges_total",
+    }
+    assert expected.issubset(summary.columns)
+    assert summary.loc[0, "n_candidates_total"] == len(audit)

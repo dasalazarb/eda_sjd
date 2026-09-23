@@ -124,8 +124,11 @@ AUDIT_COLUMNS = [
     "a_visit_type",
     "b_visit_type",
     "clinical_components_added",
+    "components_added",
+    "target_rank",
     "reunited_essdai_esspri",
     "hard_conflict",
+    "independent_complete_conflict",
     "duplicate_complete_assessment",
     "merge_performed",
     "merge_stage",
@@ -358,7 +361,7 @@ def is_independent_complete_assessment(evidence: pd.Series) -> bool:
     ) or multi_instrument_path
 
 
-class Episode:
+class EpisodeSummary:
     """Cached episode rows and evidence, refreshed only after a merge."""
 
     def __init__(
@@ -405,9 +408,9 @@ def _episode_date(rows: pd.DataFrame) -> pd.Timestamp:
     return dates.min() if not dates.empty else pd.NaT
 
 
-def _summarize_episode(episode_id: int, rows: pd.DataFrame) -> Episode:
+def _summarize_episode(episode_id: int, rows: pd.DataFrame) -> EpisodeSummary:
     evidence = _aggregate_rows(rows)
-    return Episode(
+    return EpisodeSummary(
         episode_id=episode_id,
         rows=rows,
         evidence=evidence,
@@ -423,7 +426,7 @@ def _summarize_episode(episode_id: int, rows: pd.DataFrame) -> Episode:
     )
 
 
-def _interval_compatibility_summary(left: Episode, right: Episode) -> str:
+def _interval_compatibility_summary(left: EpisodeSummary, right: EpisodeSummary) -> str:
     if left.scheduled_visits & right.scheduled_visits:
         return "exact_scheduled_interval"
     if left.interval_names & right.interval_names:
@@ -465,7 +468,7 @@ def _static_conflicts(left: pd.DataFrame, right: pd.DataFrame) -> list[str]:
     return conflicts
 
 
-def _compatibility(left: Episode, right: Episode) -> dict[str, object]:
+def _compatibility(left: EpisodeSummary, right: EpisodeSummary) -> dict[str, object]:
     conflicts = _static_conflicts(left.rows, right.rows)
     duplicate_complete = bool(
         left.independent_complete_assessment
@@ -502,7 +505,9 @@ def assess_episode_compatibility(
     return result
 
 
-def _components_added_summary(target: Episode, fragment: Episode) -> list[str]:
+def _components_added_summary(
+    target: EpisodeSummary, fragment: EpisodeSummary
+) -> list[str]:
     return [
         flag
         for flag in EVIDENCE_FLAGS
@@ -510,7 +515,7 @@ def _components_added_summary(target: Episode, fragment: Episode) -> list[str]:
     ]
 
 
-def _clinical_strength(episode: Episode) -> tuple[int, int, int, int]:
+def _clinical_strength(episode: EpisodeSummary) -> tuple[int, int, int, int]:
     """Return an interpretable tuple used to identify main versus fragment."""
     return (
         int(episode.independent_complete_assessment),
@@ -520,14 +525,26 @@ def _clinical_strength(episode: Episode) -> tuple[int, int, int, int]:
     )
 
 
-def _main_and_fragment(left: Episode, right: Episode) -> tuple[Episode, Episode]:
-    left_key = (_clinical_strength(left), -left.episode_id)
-    right_key = (_clinical_strength(right), -right.episode_id)
+def _stable_anchor_key(episode: EpisodeSummary) -> tuple[object, ...]:
+    """Rank anchors clinically, using immutable row ids only as the last tie-break."""
+    return (
+        *_clinical_strength(episode),
+        tuple(sorted(map(str, episode.rows["row_id_raw"]))),
+    )
+
+
+def _main_and_fragment(
+    left: EpisodeSummary, right: EpisodeSummary
+) -> tuple[EpisodeSummary, EpisodeSummary]:
+    # Raw ids are immutable and therefore provide a stable *technical* tie-breaker;
+    # input order / _source_order must never influence clinical assignment.
+    left_key = (_clinical_strength(left), tuple(map(str, left.rows["row_id_raw"])))
+    right_key = (_clinical_strength(right), tuple(map(str, right.rows["row_id_raw"])))
     return (left, right) if left_key >= right_key else (right, left)
 
 
 def _candidate_rule(
-    left: Episode, right: Episode, stage: str
+    left: EpisodeSummary, right: EpisodeSummary, stage: str
 ) -> tuple[str, str] | None:
     compatibility = _interval_compatibility_summary(left, right)
     date_a, date_b = left.anchor_date, right.anchor_date
@@ -565,18 +582,27 @@ def _candidate_rule(
 
 
 def _generate_candidates(
-    episodes: dict[int, Episode], stage: str
+    episodes: dict[int, EpisodeSummary], stage: str
 ) -> list[tuple[int, int, str, str]]:
     """Generate only interval-keyed or time-window candidate pairs."""
     values = list(episodes.values())
     pairs: set[tuple[int, int]] = set()
     if stage.startswith("interval"):
-        buckets: dict[tuple[str, str], list[int]] = {}
+        buckets: dict[tuple[object, ...], list[int]] = {}
         for episode in values:
-            keys = [("name", value) for value in episode.interval_names]
-            keys += [("scheduled", value) for value in episode.scheduled_visits]
+            year = (
+                int(episode.anchor_date.year)
+                if pd.notna(episode.anchor_date)
+                else None
+            )
+            bucket_year = year if stage == "interval_same_year" else None
+            keys = [("name", value, bucket_year) for value in episode.interval_names]
             keys += [
-                ("family", value)
+                ("scheduled", value, bucket_year)
+                for value in episode.scheduled_visits
+            ]
+            keys += [
+                ("family", value, bucket_year)
                 for value in episode.families
                 if value == "natural_history_family"
                 or (value == "full_evaluation_family" and stage == "interval_same_year")
@@ -584,12 +610,37 @@ def _generate_candidates(
             for key in keys:
                 buckets.setdefault(key, []).append(episode.episode_id)
         for identifiers in buckets.values():
-            unique = sorted(set(identifiers))
-            pairs.update(
-                (unique[left], unique[right])
-                for left in range(len(unique))
-                for right in range(left + 1, len(unique))
+            members = [episodes[value] for value in sorted(set(identifiers))]
+            complete = [
+                episode
+                for episode in members
+                if episode.independent_complete_assessment
+            ]
+            # Adjacent complete assessments are QC-relevant, but are direct
+            # KEEP-SEPARATE decisions and never enter static conflict analysis.
+            ordered_complete = sorted(
+                complete,
+                key=lambda episode: (episode.anchor_date, _stable_anchor_key(episode)),
             )
+            pairs.update(
+                tuple(sorted((left.episode_id, right.episode_id)))
+                for left, right in zip(ordered_complete, ordered_complete[1:])
+            )
+            anchors = complete or (
+                [max(members, key=_stable_anchor_key)] if members else []
+            )
+            fragments = [episode for episode in members if episode not in anchors]
+            for fragment in fragments:
+                for anchor in anchors:
+                    # PASS 1B is deliberately anchor + fragment only.
+                    if stage == "interval_outlier" and (
+                        not bool(anchor.evidence.clinical_candidate)
+                        or bool(fragment.evidence.clinical_candidate)
+                    ):
+                        continue
+                    pairs.add(
+                        tuple(sorted((anchor.episode_id, fragment.episode_id)))
+                    )
     else:
         dated = sorted(
             (episode.anchor_date, episode.episode_id)
@@ -626,8 +677,8 @@ def _interval_priority(compatibility: str, stage: str) -> int:
 
 
 def _evaluate_candidate(
-    left: Episode,
-    right: Episode,
+    left: EpisodeSummary,
+    right: EpisodeSummary,
     stage: str,
     generation_rule: str,
     compatibility_type: str,
@@ -637,13 +688,34 @@ def _evaluate_candidate(
     gap = abs(int((date_b - date_a).days))
     same_month = date_a.to_period("M") == date_b.to_period("M")
     same_year = date_a.year == date_b.year
-    compatibility = _compatibility(left, right)
     added = _components_added_summary(main, fragment)
     if not added:
         # Complementarity is symmetric; retain the direction that actually adds data.
         reverse = _components_added_summary(fragment, main)
         if reverse:
             main, fragment, added = fragment, main, reverse
+    # This boolean summary is the cheap gate.  Static columns are inspected only
+    # for candidates that can add clinical evidence.
+    both_complete = bool(
+        left.independent_complete_assessment
+        and right.independent_complete_assessment
+    )
+    if both_complete:
+        compatibility = {
+            "compatible": False,
+            "hard_conflict": False,
+            "duplicate_complete_assessment": True,
+            "conflicting_components": [],
+        }
+    elif added:
+        compatibility = _compatibility(left, right)
+    else:
+        compatibility = {
+            "compatible": False,
+            "hard_conflict": False,
+            "duplicate_complete_assessment": False,
+            "conflicting_components": [],
+        }
     permitted = bool(added) and bool(compatibility["compatible"])
     if stage == "interval_outlier":
         permitted &= bool(main.evidence.clinical_candidate) != bool(
@@ -710,6 +782,7 @@ def _evaluate_candidate(
         "a_visit_type": _episode_visit_type_from_evidence(left.evidence),
         "b_visit_type": _episode_visit_type_from_evidence(right.evidence),
         "clinical_components_added": "|".join(added),
+        "components_added": len(added),
         "reunited_essdai_esspri": bool(
             (left.evidence.has_essdai_form or right.evidence.has_essdai_form)
             and (left.evidence.has_esspri_form or right.evidence.has_esspri_form)
@@ -717,6 +790,9 @@ def _evaluate_candidate(
             and not (right.evidence.has_essdai_form and right.evidence.has_esspri_form)
         ),
         "hard_conflict": compatibility["hard_conflict"],
+        "independent_complete_conflict": compatibility[
+            "duplicate_complete_assessment"
+        ],
         "duplicate_complete_assessment": compatibility["duplicate_complete_assessment"],
         "merge_performed": permitted,
         "merge_stage": stage,
@@ -737,16 +813,18 @@ def _evaluate_candidate(
     }
     rank = (
         _interval_priority(compatibility_type, stage),
+        0 if main.independent_complete_assessment else 1,
         0 if same_year else 1,
         0 if same_month else 1,
         gap,
         -len(added),
         tuple(-value for value in _clinical_strength(main)),
     )
+    record["target_rank"] = repr(rank)
     return rank, record, main.episode_id, fragment.episode_id
 
 
-def _mark_review(episode: Episode, reason: str) -> None:
+def _mark_review(episode: EpisodeSummary, reason: str) -> None:
     episode.rows.loc[:, "manual_review_required"] = True
     episode.rows.loc[:, "manual_review_reason"] = episode.rows[
         "manual_review_reason"
@@ -754,8 +832,11 @@ def _mark_review(episode: Episode, reason: str) -> None:
 
 
 def _merge_episode(
-    target: Episode, fragment: Episode, record: dict[str, object], next_id: int
-) -> Episode:
+    target: EpisodeSummary,
+    fragment: EpisodeSummary,
+    record: dict[str, object],
+    next_id: int,
+) -> EpisodeSummary:
     target_rows = target.rows.copy()
     fragment_rows = fragment.rows.copy()
     if record["suspected_date_error"]:
@@ -786,15 +867,39 @@ def _merge_episode(
         "interval_order_anomaly", "exceptional_merge", "manual_review_required",
     ):
         rows.loc[:, column] = rows[column].astype(bool) | bool(record[column])
-    return _summarize_episode(next_id, rows)
+    flag_names = list(
+        dict.fromkeys(
+            (
+                *BLOCK_PREFIXES,
+                "has_essdai_total",
+                "has_esspri_core",
+                *RESEARCH_PREFIXES,
+            )
+        )
+    )
+    merged_flags = {
+        flag: bool(target.evidence[flag]) or bool(fragment.evidence[flag])
+        for flag in flag_names
+    }
+    evidence = _classify_evidence(pd.DataFrame([merged_flags])).iloc[0]
+    return EpisodeSummary(
+        episode_id=next_id,
+        rows=rows,
+        evidence=evidence,
+        anchor_date=_episode_date(rows),
+        interval_names=target.interval_names | fragment.interval_names,
+        families=target.families | fragment.families,
+        scheduled_visits=target.scheduled_visits | fragment.scheduled_visits,
+        independent_complete_assessment=is_independent_complete_assessment(evidence),
+    )
 
 
 def _run_candidate_stage(
-    episodes: dict[int, Episode],
+    episodes: dict[int, EpisodeSummary],
     stage: str,
     audit: list[dict[str, object]],
     next_id: int,
-) -> tuple[dict[int, Episode], int, int, int]:
+) -> tuple[dict[int, EpisodeSummary], int, int, int]:
     candidates = _generate_candidates(episodes, stage)
     evaluated = []
     for left_id, right_id, rule, compatibility in candidates:
@@ -826,24 +931,45 @@ def _run_candidate_stage(
         for _, _, record in options[1:]:
             record["merge_performed"] = False
             record["merge_reason"] = "not_selected_better_candidate"
-    used: set[int] = set()
+    current_target: dict[int, int] = {}
     merges = 0
     for _, target_id, fragment_id, record in sorted(
         proposals, key=lambda item: item[0]
     ):
-        if target_id in used or fragment_id in used:
+        resolved_target = current_target.get(target_id, target_id)
+        if resolved_target not in episodes or fragment_id not in episodes:
             record["merge_performed"] = False
             record["merge_reason"] = "not_selected_overlapping_merge"
             continue
-        merged = _merge_episode(
-            episodes[target_id], episodes[fragment_id], record, next_id
+        # Earlier attachments update the cached anchor.  Recheck only this selected
+        # edge, rather than regenerating every patient pair.
+        _, refreshed, _, _ = _evaluate_candidate(
+            episodes[resolved_target],
+            episodes[fragment_id],
+            stage,
+            str(record["candidate_generation_rule"]),
+            str(record["interval_compatibility_type"]),
         )
-        del episodes[target_id]
+        for key in (
+            "clinical_components_added",
+            "components_added",
+            "hard_conflict",
+            "duplicate_complete_assessment",
+            "merge_performed",
+            "merge_reason",
+        ):
+            record[key] = refreshed[key]
+        if not record["merge_performed"]:
+            continue
+        merged = _merge_episode(
+            episodes[resolved_target], episodes[fragment_id], record, next_id
+        )
+        del episodes[resolved_target]
         del episodes[fragment_id]
         episodes[next_id] = merged
+        current_target[target_id] = next_id
         next_id += 1
         merges += 1
-        used.update((target_id, fragment_id))
     return episodes, next_id, len(candidates), merges + ambiguous * 0
 
 
@@ -887,15 +1013,9 @@ def assign_episodes(atomic_units: pd.DataFrame) -> pd.DataFrame:
             ("interval_outlier", "n_candidate_pairs_pass1_outlier"),
             ("temporal_rescue", "n_candidate_pairs_pass2"),
         ):
-            stage_candidates = 0
-            stage_merges = 1
-            total_merges = 0
-            while stage_merges:
-                episodes, next_id, candidates, stage_merges = _run_candidate_stage(
-                    episodes, stage, audit, next_id
-                )
-                stage_candidates += candidates
-                total_merges += stage_merges
+            episodes, next_id, stage_candidates, total_merges = _run_candidate_stage(
+                episodes, stage, audit, next_id
+            )
             metrics[metric] += stage_candidates
             patient_counts.append((stage_candidates, total_merges))
         if patient_number % 25 == 0 or patient_number == patient_count:
@@ -929,6 +1049,33 @@ def assign_episodes(atomic_units: pd.DataFrame) -> pd.DataFrame:
         decision_audit["manual_review_reason"]
         .eq("ambiguous_multiple_candidate_targets")
         .sum()
+    )
+    rules = decision_audit["candidate_generation_rule"]
+    metrics.update(
+        {
+            "n_candidate_pairs_pass1_exact": int(
+                rules.isin(
+                    [
+                        "same_scheduled_interval_same_year",
+                        "same_exact_interval_same_year",
+                    ]
+                ).sum()
+            ),
+            "n_candidate_pairs_pass1_nh_family": int(
+                rules.eq("natural_history_family_same_year").sum()
+            ),
+            "n_candidate_pairs_pass1_optional_full": int(
+                rules.eq("optional_full_family_same_year").sum()
+            ),
+            "n_candidate_pairs_pass1_cross_year": int(
+                decision_audit["merge_stage"].eq("interval_outlier").sum()
+            ),
+            "n_candidate_pairs_pass2_temporal": int(
+                decision_audit["merge_stage"].eq("temporal_rescue").sum()
+            ),
+            "n_candidates_total": len(decision_audit),
+            "n_merges_total": int(decision_audit["merge_performed"].sum()),
+        }
     )
     result.attrs["merge_decision_audit"] = decision_audit
     result.attrs["performance_metrics"] = metrics
@@ -1169,6 +1316,24 @@ def build_merge_summary(
                     "n_candidate_pairs_pass2", len(audit.loc[
                         audit["merge_stage"].eq("temporal_rescue")
                     ])
+                ),
+                "n_candidate_pairs_pass1_exact": performance.get(
+                    "n_candidate_pairs_pass1_exact", 0
+                ),
+                "n_candidate_pairs_pass1_nh_family": performance.get(
+                    "n_candidate_pairs_pass1_nh_family", 0
+                ),
+                "n_candidate_pairs_pass1_optional_full": performance.get(
+                    "n_candidate_pairs_pass1_optional_full", 0
+                ),
+                "n_candidate_pairs_pass1_cross_year": performance.get(
+                    "n_candidate_pairs_pass1_cross_year", 0
+                ),
+                "n_candidate_pairs_pass2_temporal": performance.get(
+                    "n_candidate_pairs_pass2_temporal", 0
+                ),
+                "n_candidates_total": performance.get(
+                    "n_candidates_total", len(audit)
                 ),
                 "n_ambiguous_multiple_targets": performance.get(
                     "n_ambiguous_multiple_targets", 0
