@@ -66,6 +66,23 @@ def _run(
     return assigned, manifest, assigned_units.attrs["merge_decision_audit"]
 
 
+def test_write_parquet_and_csv_omits_runtime_dataframe_attrs(tmp_path: Path) -> None:
+    frame = pd.DataFrame({"patient_id": [1], "clinical_episode_id": ["episode-1"]})
+    audit = pd.DataFrame({"merge_performed": [True]})
+    frame.attrs["merge_decision_audit"] = audit
+    parquet_path = tmp_path / "08c_row_map.parquet"
+
+    written_parquet, written_csv = EPISODES.write_parquet_and_csv(frame, parquet_path)
+
+    assert written_parquet == parquet_path
+    assert written_csv == parquet_path.with_suffix(".csv")
+    parquet_frame = pd.read_parquet(written_parquet)
+    pd.testing.assert_frame_equal(parquet_frame, frame)
+    assert parquet_frame.attrs == {}
+    pd.testing.assert_frame_equal(pd.read_csv(written_csv), frame)
+    assert frame.attrs["merge_decision_audit"] is audit
+
+
 def test_same_date_different_complete_assessments_stay_separate() -> None:
     assigned, _, _ = _run(
         [

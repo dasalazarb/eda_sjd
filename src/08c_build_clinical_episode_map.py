@@ -1381,11 +1381,27 @@ def build_qc(
 
 
 def write_parquet_and_csv(frame: pd.DataFrame, parquet_path: Path) -> tuple[Path, Path]:
-    """Write a dataframe in machine-readable and inspectable forms."""
+    """Write a dataframe in machine-readable and inspectable forms.
+
+    Parameters
+    ----------
+    frame : pd.DataFrame
+        Dataframe to write. Runtime-only metadata in ``DataFrame.attrs`` is not
+        included because it may contain objects that Parquet cannot serialize.
+    parquet_path : Path
+        Destination for the Parquet output; the CSV uses the same stem.
+
+    Returns
+    -------
+    tuple[Path, Path]
+        Paths to the Parquet and CSV outputs, respectively.
+    """
     parquet_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path = parquet_path.with_suffix(".csv")
-    frame.to_parquet(parquet_path, index=False)
-    frame.to_csv(csv_path, index=False)
+    serializable_frame = frame.copy(deep=False)
+    serializable_frame.attrs = {}
+    serializable_frame.to_parquet(parquet_path, index=False)
+    serializable_frame.to_csv(csv_path, index=False)
     return parquet_path, csv_path
 
 
