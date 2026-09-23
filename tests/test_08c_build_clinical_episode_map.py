@@ -40,7 +40,7 @@ def _row(
 
 def _run(
     rows: list[dict[str, object]],
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     source, provenance = EPISODES.prepare_visits(pd.DataFrame(rows))
     units = EPISODES.build_atomic_activity_units(source, provenance)
     assigned_units = EPISODES.assign_episodes(units)
@@ -52,11 +52,12 @@ def _run(
         manifest,
         assigned_units.attrs["merge_decision_audit"],
         conflicts,
+        assigned_units.attrs["merge_incompatibilities"],
     )
 
 
 def test_same_interval_same_year_merges_without_day_limit() -> None:
-    assigned, _, audit, _ = _run(
+    assigned, _, audit, _, _ = _run(
         [
             _row(1, "Interval A", "2024-01-01", essdai=4),
             _row(2, "Interval A", "2024-09-01", esspri=6),
@@ -65,12 +66,12 @@ def test_same_interval_same_year_merges_without_day_limit() -> None:
 
     assert assigned["clinical_episode_id"].nunique() == 1
     assert audit.loc[audit["merged"], "merge_rule"].tolist() == [
-        "same_interval_same_year"
+        "same_exact_interval_same_year"
     ]
 
 
 def test_same_interval_different_years_never_merges() -> None:
-    assigned, _, audit, _ = _run(
+    assigned, _, audit, _, _ = _run(
         [
             _row(1, "Interval A", "2024-12-29", essdai=4),
             _row(2, "Interval A", "2025-01-03", esspri=6),
@@ -83,32 +84,56 @@ def test_same_interval_different_years_never_merges() -> None:
     assert not boundary.iloc[0]["merged"]
 
 
-def test_natural_history_and_15d_optional_merge_in_same_year() -> None:
-    assigned, _, audit, _ = _run(
+def test_natural_history_and_15d_optional_merge_within_30_days() -> None:
+    assigned, _, audit, _, _ = _run(
         [
-            _row(1, NATURAL, "2024-02-01"),
-            _row(2, "15D Optional Evaluation 1", "2024-10-01"),
+            _row(1, NATURAL, "2024-03-01", essdai=4),
+            _row(2, "15D Optional Evaluation 1", "2024-03-20", esspri=6),
         ]
     )
 
     assert assigned["clinical_episode_id"].nunique() == 1
-    assert audit.iloc[0]["merge_rule"] == "natural_15d_same_year"
+    assert audit.iloc[0]["merge_rule"] == "natural_15d_within_30_days"
 
 
-def test_optional_and_named_phase_merge_in_same_year() -> None:
-    assigned, _, audit, _ = _run(
+def test_natural_history_and_15d_optional_do_not_merge_beyond_30_days() -> None:
+    assigned, _, audit, _, _ = _run(
         [
-            _row(1, "Optional Evaluation 1", "2024-02-01"),
-            _row(2, INITIAL, "2024-10-01"),
+            _row(1, NATURAL, "2024-02-01", essdai=4),
+            _row(2, "15D Optional Evaluation 1", "2024-09-01", esspri=6),
+        ]
+    )
+
+    assert assigned["clinical_episode_id"].nunique() == 2
+    assert audit.iloc[0]["merge_rule"] == "different_interval_gt30_days_no_merge"
+
+
+def test_optional_and_named_phase_do_not_merge_when_far_apart() -> None:
+    assigned, _, audit, _, _ = _run(
+        [
+            _row(1, "Optional Evaluation 1", "2024-01-01", essdai=4),
+            _row(2, INITIAL, "2024-08-01", esspri=6),
+        ]
+    )
+
+    assert assigned["clinical_episode_id"].nunique() == 2
+    assert audit.iloc[0]["merge_rule"] == "different_interval_gt30_days_no_merge"
+
+
+def test_optional_and_named_phase_merge_when_close_and_complementary() -> None:
+    assigned, _, audit, _, _ = _run(
+        [
+            _row(1, "Optional Evaluation 1", "2024-03-01", essdai=4),
+            _row(2, INITIAL, "2024-03-20", esspri=6),
         ]
     )
 
     assert assigned["clinical_episode_id"].nunique() == 1
-    assert audit.iloc[0]["merge_rule"] == "optional_phase_same_year"
+    assert audit.iloc[0]["merge_rule"] == "optional_phase_within_30_days"
 
 
 def test_distinct_phase_intervals_do_not_merge_by_family() -> None:
-    assigned, _, _, _ = _run(
+    assigned, _, _, _, _ = _run(
         [
             _row(1, INITIAL, "2024-02-01"),
             _row(2, SECOND, "2024-10-01"),
@@ -120,7 +145,7 @@ def test_distinct_phase_intervals_do_not_merge_by_family() -> None:
 
 
 def test_temporal_rescue_merges_complementary_episodes_within_30_days() -> None:
-    assigned, _, audit, _ = _run(
+    assigned, _, audit, _, _ = _run(
         [
             _row(1, "Interval A", "2024-03-01", essdai=4),
             _row(2, "Interval B", "2024-03-20", esspri=6),
@@ -129,12 +154,24 @@ def test_temporal_rescue_merges_complementary_episodes_within_30_days() -> None:
 
     assert assigned["clinical_episode_id"].nunique() == 1
     merged = audit.loc[audit["merged"]].iloc[0]
-    assert merged["merge_rule"] == "temporal_rescue_within_30_days"
+    assert merged["merge_rule"] == "different_interval_temporal_rescue"
     assert merged["days_apart"] == 19
 
 
+def test_temporal_rescue_uses_elapsed_days_not_calendar_month() -> None:
+    assigned, _, audit, _, _ = _run(
+        [
+            _row(1, "Interval A", "2024-01-31", essdai=4),
+            _row(2, "Interval B", "2024-02-10", esspri=6),
+        ]
+    )
+
+    assert assigned["clinical_episode_id"].nunique() == 1
+    assert audit.loc[audit["merged"], "days_apart"].iloc[0] == 10
+
+
 def test_temporal_rescue_does_not_merge_beyond_30_days() -> None:
-    assigned, _, audit, _ = _run(
+    assigned, _, audit, _, _ = _run(
         [
             _row(1, "Interval A", "2024-03-01", essdai=4),
             _row(2, "Interval B", "2024-04-15", esspri=6),
@@ -142,14 +179,14 @@ def test_temporal_rescue_does_not_merge_beyond_30_days() -> None:
     )
 
     assert assigned["clinical_episode_id"].nunique() == 2
-    assert audit.empty
+    assert audit.iloc[0]["merge_rule"] == "different_interval_gt30_days_no_merge"
 
 
-def test_conflicting_values_are_preserved_and_reported() -> None:
-    assigned, _, _, conflicts = _run(
+def test_same_interval_conflicting_values_are_preserved_and_reported() -> None:
+    assigned, _, _, conflicts, _ = _run(
         [
             _row(1, "Interval A", "2024-03-01", variable_x=2, essdai=4),
-            _row(2, "Interval B", "2024-03-20", variable_x=3, esspri=6),
+            _row(2, "Interval A", "2024-08-20", variable_x=3, esspri=6),
         ]
     )
 
@@ -158,12 +195,12 @@ def test_conflicting_values_are_preserved_and_reported() -> None:
     conflict = conflicts.loc[conflicts["variable"].eq("variable_x")].iloc[0]
     assert conflict["values_found"] == "2 | 3"
     assert conflict["n_distinct_values"] == 2
-    assert conflict["merge_stage"] == "temporal_rescue"
-    assert conflict["merge_rule"] == "temporal_rescue_within_30_days"
+    assert conflict["merge_stage"] == "interval_same_year"
+    assert conflict["merge_rule"] == "same_exact_interval_same_year"
 
 
 def test_equal_values_collapse_once_without_conflict() -> None:
-    assigned, _, _, conflicts = _run(
+    assigned, _, _, conflicts, _ = _run(
         [
             _row(1, "Interval A", "2024-03-01", variable_x=2, essdai=4),
             _row(2, "Interval B", "2024-03-20", variable_x=2, esspri=6),
@@ -182,15 +219,15 @@ def test_row_assignment_conservation() -> None:
         _row(3, "Interval A", "2025-01-02", essdai=5),
     ]
     source, _ = EPISODES.prepare_visits(pd.DataFrame(rows))
-    assigned, _, _, _ = _run(rows)
+    assigned, _, _, _, _ = _run(rows)
 
     assert EPISODES.validate_final_assignments(source, assigned) == (0, 0)
     assert len(assigned) == len(source)
     assert assigned["row_id_raw"].is_unique
 
 
-def test_not_complementary_is_audited_without_merging() -> None:
-    assigned, _, audit, _ = _run(
+def test_different_interval_conflict_prevents_merge_and_is_reported() -> None:
+    assigned, _, audit, _, incompatibilities = _run(
         [
             _row(1, "Interval A", "2024-03-01", essdai=4),
             _row(2, "Interval B", "2024-03-20", essdai=5),
@@ -198,8 +235,12 @@ def test_not_complementary_is_audited_without_merging() -> None:
     )
 
     assert assigned["clinical_episode_id"].nunique() == 2
-    assert audit.iloc[0]["merge_rule"] == "not_complementary"
+    assert audit.iloc[0]["merge_rule"] == "different_interval_incompatible_no_merge"
     assert not audit.iloc[0]["merged"]
+    assert incompatibilities.loc[0, "variable"] == "essdai"
+    assert incompatibilities.loc[0, "value_a"] == 4
+    assert incompatibilities.loc[0, "value_b"] == 5
+    assert incompatibilities.loc[0, "reason"] == "different_interval_value_conflict"
 
 
 def test_prepare_visits_rejects_duplicate_raw_ids() -> None:
@@ -211,8 +252,8 @@ def test_prepare_visits_rejects_duplicate_raw_ids() -> None:
         EPISODES.prepare_visits(pd.DataFrame(rows))
 
 
-def test_optional_does_not_bridge_two_distinct_phase_intervals() -> None:
-    assigned, _, _, _ = _run(
+def test_different_interval_families_do_not_bypass_30_day_limit() -> None:
+    assigned, _, _, _, _ = _run(
         [
             _row(1, INITIAL, "2024-01-01"),
             _row(2, "Optional Evaluation 1", "2024-06-01"),
@@ -220,7 +261,7 @@ def test_optional_does_not_bridge_two_distinct_phase_intervals() -> None:
         ]
     )
 
-    assert assigned["clinical_episode_id"].nunique() == 2
+    assert assigned["clinical_episode_id"].nunique() == 3
 
 
 def test_collapse_values_drops_missing_and_deduplicates() -> None:

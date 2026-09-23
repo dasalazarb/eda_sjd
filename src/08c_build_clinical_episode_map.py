@@ -1,8 +1,8 @@
 """Build a clinical-episode row map using two simple, auditable passes.
 
-PASS 1 joins rows from the same patient and calendar year when their source
-intervals are compatible.  PASS 2 joins remaining, complementary episodes no
-more than 30 days apart.  Calendar years are an absolute merge boundary.
+PASS 1 joins rows from the same patient, calendar year, and exact source
+interval. PASS 2 joins remaining, complementary and clinically compatible
+episodes no more than 30 days apart. Calendar years are an absolute boundary.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ MANIFEST_PATH = ANALYTIC_DIR / "clinical_episode_manifest.parquet"
 QC_DIR = REPORTS_DIR / "clinical_episode_map"
 MERGE_AUDIT_FILENAME = "08c_merge_decision_audit.csv"
 VALUE_CONFLICTS_FILENAME = "08c_value_conflicts.csv"
+MERGE_INCOMPATIBILITIES_FILENAME = "08c_merge_incompatibilities.csv"
 MERGE_SUMMARY_FILENAME = "08c_merge_summary.csv"
 
 NATURAL_HISTORY = "natural history protocol 478 interval"
@@ -68,6 +69,21 @@ CONFLICT_COLUMNS = [
     "merge_stage",
     "merge_rule",
 ]
+INCOMPATIBILITY_COLUMNS = [
+    "patient_id",
+    "episode_a",
+    "episode_b",
+    "interval_a",
+    "interval_b",
+    "date_a",
+    "date_b",
+    "days_apart",
+    "variable",
+    "value_a",
+    "value_b",
+    "decision",
+    "reason",
+]
 METADATA_COLUMNS = {
     "patient_id",
     "row_id_raw",
@@ -85,6 +101,7 @@ METADATA_COLUMNS = {
     "merge_rule",
     "manual_review_required",
     "manual_review_reason",
+    "source_file",
 }
 MISSING_UPPER = {str(value).strip().upper() for value in MISSING_TOKENS}
 
@@ -148,17 +165,6 @@ def intervals_are_compatible(interval_a: object, interval_b: object) -> bool:
     return (_is_optional(left) and right in PHASE_INTERVALS) or (
         _is_optional(right) and left in PHASE_INTERVALS
     )
-
-
-def _compatibility_rule(interval_a: object, interval_b: object) -> str:
-    left, right = _normalized_interval(interval_a), _normalized_interval(interval_b)
-    if left == right:
-        return "same_interval_same_year"
-    if (left == NATURAL_HISTORY and _is_15d_optional(right)) or (
-        right == NATURAL_HISTORY and _is_15d_optional(left)
-    ):
-        return "natural_15d_same_year"
-    return "optional_phase_same_year"
 
 
 def has_information(series: pd.Series) -> pd.Series:
@@ -278,12 +284,21 @@ def _episodes_compatible(left: pd.DataFrame, right: pd.DataFrame) -> bool:
     )
 
 
+def _episodes_have_same_exact_interval(left: pd.DataFrame, right: pd.DataFrame) -> bool:
+    """Return whether every row has the same literal original interval."""
+    intervals = {
+        "<MISSING>" if pd.isna(value) else str(value)
+        for value in [*_episode_intervals(left), *_episode_intervals(right)]
+    }
+    return len(intervals) == 1
+
+
 def _data_columns(rows: pd.DataFrame) -> list[str]:
     generated_prefixes = ("has_",)
     return [
         str(column)
         for column in rows.columns
-        if column not in METADATA_COLUMNS
+        if str(column).split("__")[-1] not in METADATA_COLUMNS
         and not str(column).endswith("_involved")
         and not str(column).startswith(generated_prefixes)
     ]
@@ -297,6 +312,56 @@ def episodes_are_complementary(left: pd.DataFrame, right: pd.DataFrame) -> bool:
         if left_has != right_has:
             return True
     return False
+
+
+def find_incompatible_variables(
+    record_a: pd.DataFrame, record_b: pd.DataFrame
+) -> list[dict[str, object]]:
+    """Find conflicting populated clinical values between two episodes.
+
+    Parameters
+    ----------
+    record_a, record_b : pd.DataFrame
+        Candidate episode rows. Technical and provenance columns are excluded.
+
+    Returns
+    -------
+    list of dict
+        One item per shared variable whose populated values differ.
+    """
+    conflicts: list[dict[str, object]] = []
+    columns = sorted(set(_data_columns(record_a)) & set(_data_columns(record_b)))
+    for column in columns:
+        values_a = _unique_values(record_a[column])
+        values_b = _unique_values(record_b[column])
+        if not values_a or not values_b:
+            continue
+        keys_a = {str(value).strip() for value in values_a}
+        keys_b = {str(value).strip() for value in values_b}
+        if keys_a != keys_b:
+            conflicts.append(
+                {
+                    "variable": column,
+                    "value_a": collapse_values(values_a),
+                    "value_b": collapse_values(values_b),
+                }
+            )
+    return conflicts
+
+
+def _within_30_day_rule(left: pd.DataFrame, right: pd.DataFrame) -> str:
+    """Label an allowed cross-interval merge by interval family."""
+    interval_a = _normalized_interval(left["interval_name"].iloc[0])
+    interval_b = _normalized_interval(right["interval_name"].iloc[0])
+    if (interval_a == NATURAL_HISTORY and _is_15d_optional(interval_b)) or (
+        interval_b == NATURAL_HISTORY and _is_15d_optional(interval_a)
+    ):
+        return "natural_15d_within_30_days"
+    if (_is_optional(interval_a) and interval_b in PHASE_INTERVALS) or (
+        _is_optional(interval_b) and interval_a in PHASE_INTERVALS
+    ):
+        return "optional_phase_within_30_days"
+    return "different_interval_temporal_rescue"
 
 
 def _display(values: Iterable[object]) -> str:
@@ -354,11 +419,9 @@ def _pass_one(
         changed = False
         for i in range(len(episodes)):
             for j in range(i + 1, len(episodes)):
-                if not _episodes_compatible(episodes[i], episodes[j]):
+                if not _episodes_have_same_exact_interval(episodes[i], episodes[j]):
                     continue
-                interval_a = episodes[i]["interval_name"].iloc[0]
-                interval_b = episodes[j]["interval_name"].iloc[0]
-                rule = _compatibility_rule(interval_a, interval_b)
+                rule = "same_exact_interval_same_year"
                 audit.append(
                     _audit_record(
                         patient_id,
@@ -381,7 +444,10 @@ def _pass_one(
 
 
 def _pass_two(
-    patient_id: object, episodes: list[pd.DataFrame], audit: list[dict[str, object]]
+    patient_id: object,
+    episodes: list[pd.DataFrame],
+    audit: list[dict[str, object]],
+    incompatibilities: list[dict[str, object]],
 ) -> list[pd.DataFrame]:
     changed = True
     while changed:
@@ -395,14 +461,30 @@ def _pass_two(
                 continue
             for j in range(i + 1, len(episodes)):
                 date_j = _episode_date(episodes[j])
-                if pd.isna(date_j) or (date_j - date_i).days > 30:
-                    break
+                if pd.isna(date_j):
+                    continue
+                days_apart = abs((date_j - date_i).days)
+                if days_apart > 30:
+                    audit.append(
+                        _audit_record(
+                            patient_id,
+                            episodes[i],
+                            episodes[j],
+                            "temporal_rescue",
+                            "different_interval_gt30_days_no_merge",
+                            False,
+                        )
+                    )
+                    continue
                 complementary = episodes_are_complementary(episodes[i], episodes[j])
-                rule = (
-                    "temporal_rescue_within_30_days"
-                    if complementary
-                    else "not_complementary"
-                )
+                conflicts = find_incompatible_variables(episodes[i], episodes[j])
+                merge = complementary and not conflicts
+                if conflicts:
+                    rule = "different_interval_incompatible_no_merge"
+                elif not complementary:
+                    rule = "different_interval_not_complementary_no_merge"
+                else:
+                    rule = _within_30_day_rule(episodes[i], episodes[j])
                 audit.append(
                     _audit_record(
                         patient_id,
@@ -410,10 +492,26 @@ def _pass_two(
                         episodes[j],
                         "temporal_rescue",
                         rule,
-                        complementary,
+                        merge,
                     )
                 )
-                if complementary:
+                for conflict in conflicts:
+                    incompatibilities.append(
+                        {
+                            "patient_id": patient_id,
+                            "episode_a": _display(episodes[i]["row_id_raw"]),
+                            "episode_b": _display(episodes[j]["row_id_raw"]),
+                            "interval_a": _display(episodes[i]["interval_name"]),
+                            "interval_b": _display(episodes[j]["interval_name"]),
+                            "date_a": date_i,
+                            "date_b": date_j,
+                            "days_apart": days_apart,
+                            **conflict,
+                            "decision": "no_merge",
+                            "reason": "different_interval_value_conflict",
+                        }
+                    )
+                if merge:
                     episodes[i] = _merge(
                         episodes[i], episodes[j], "temporal_rescue", rule
                     )
@@ -439,6 +537,7 @@ def assign_episodes(atomic_units: pd.DataFrame) -> pd.DataFrame:
         prepared[column] = default
     assigned: list[pd.DataFrame] = []
     audit: list[dict[str, object]] = []
+    incompatibilities: list[dict[str, object]] = []
     grouped = prepared.groupby("patient_id", sort=False, dropna=False)
     for patient_id, patient_rows in tqdm(
         grouped,
@@ -450,7 +549,9 @@ def assign_episodes(atomic_units: pd.DataFrame) -> pd.DataFrame:
             "collection_year", sort=True, dropna=False
         ):
             year_episodes = _pass_one(patient_id, year_rows, audit)
-            episodes.extend(_pass_two(patient_id, year_episodes, audit))
+            episodes.extend(
+                _pass_two(patient_id, year_episodes, audit, incompatibilities)
+            )
 
         # Explicitly document compatible intervals rejected by the year boundary.
         for i in range(len(episodes)):
@@ -490,6 +591,9 @@ def assign_episodes(atomic_units: pd.DataFrame) -> pd.DataFrame:
     result = pd.concat(assigned).sort_values("_source_order") if assigned else prepared
     decision_audit = pd.DataFrame(audit, columns=AUDIT_COLUMNS)
     result.attrs["merge_decision_audit"] = decision_audit
+    result.attrs["merge_incompatibilities"] = pd.DataFrame(
+        incompatibilities, columns=INCOMPATIBILITY_COLUMNS
+    )
     result.attrs["performance_metrics"] = {
         "wall_time_seconds": perf_counter() - started,
         "n_candidates_total": len(decision_audit),
@@ -668,6 +772,7 @@ def main() -> None:
     units = build_atomic_activity_units(flagged, provenance)
     assigned_units = assign_episodes(units)
     audit = assigned_units.attrs["merge_decision_audit"]
+    incompatibilities = assigned_units.attrs["merge_incompatibilities"]
     assigned = propagate_episode_assignments(flagged, assigned_units)
     validate_final_assignments(source, assigned)
     manifest = build_manifest(assigned)
@@ -678,6 +783,9 @@ def main() -> None:
     args.qc_dir.mkdir(parents=True, exist_ok=True)
     audit.to_csv(args.qc_dir / MERGE_AUDIT_FILENAME, index=False)
     conflicts.to_csv(args.qc_dir / VALUE_CONFLICTS_FILENAME, index=False)
+    incompatibilities.to_csv(
+        args.qc_dir / MERGE_INCOMPATIBILITIES_FILENAME, index=False
+    )
     summary.to_csv(args.qc_dir / MERGE_SUMMARY_FILENAME, index=False)
     logger.info(
         "Completed: %d raw rows -> %d episodes; %d merges; %d conflicts",
