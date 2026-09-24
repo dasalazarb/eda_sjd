@@ -82,7 +82,7 @@ def test_natural_15d_complementary_uses_natural_identity_and_date() -> None:
     assigned, manifest, audit, _ = _run(
         [
             _row(1, NATURAL, "2024-03-01", essdai=4),
-            _row(2, "15D Optional Evaluation 1", "2024-03-10", essdai=4, crp=3.2),
+            _row(2, "15D Optional Evaluation 1", "2024-08-28", essdai=4, crp=3.2),
         ]
     )
     result = _collapsed(assigned)
@@ -90,7 +90,8 @@ def test_natural_15d_complementary_uses_natural_identity_and_date() -> None:
     assert manifest.loc[0, "representative_interval"] == NATURAL
     assert manifest.loc[0, "clinical_anchor_date"] == pd.Timestamp("2024-03-01")
     assert (
-        audit.loc[audit["merged"], "merge_rule"].iloc[0] == "natural_15d_within_30_days"
+        audit.loc[audit["merged"], "merge_rule"].iloc[0]
+        == "natural_15d_within_180_days"
     )
 
 
@@ -111,15 +112,15 @@ def test_natural_15d_conflict_keeps_natural_and_records_qc() -> None:
     assert conflict["conflict_resolution"] == "preferred_primary_visit"
 
 
-def test_natural_15d_beyond_30_days_does_not_merge() -> None:
+def test_natural_15d_beyond_180_days_does_not_merge() -> None:
     assigned, _, audit, _ = _run(
         [
             _row(1, NATURAL, "2024-03-01"),
-            _row(2, "15D Optional Evaluation 1", "2024-04-02"),
+            _row(2, "15D Optional Evaluation 1", "2024-08-29"),
         ]
     )
     assert assigned["clinical_episode_id"].nunique() == 2
-    assert audit.loc[0, "merge_rule"] == "different_interval_gt30_days_no_merge"
+    assert audit.loc[0, "merge_rule"] == "different_interval_gt180_days_no_merge"
 
 
 def test_phase_optional_complementary_fills_missing_value() -> None:
@@ -156,7 +157,8 @@ def test_initial_phase_beats_second_phase_on_same_day() -> None:
     assert _collapsed(assigned)["essdai"] == 4
     assert manifest.loc[0, "representative_interval"] == INITIAL
     assert (
-        audit.loc[audit["merged"], "merge_rule"].iloc[0] == "phase_phase_within_30_days"
+        audit.loc[audit["merged"], "merge_rule"].iloc[0]
+        == "phase_phase_within_180_days"
     )
 
 
@@ -194,15 +196,26 @@ def test_other_complementary_intervals_merge() -> None:
     assert audit.loc[audit["merged"], "merge_rule"].iloc[0] == "other_temporal_rescue"
 
 
-def test_different_intervals_beyond_30_days_do_not_merge() -> None:
+def test_different_intervals_within_180_days_can_merge() -> None:
     assigned, _, audit, _ = _run(
         [
             _row(1, "Interval X", "2024-01-01", essdai=4),
-            _row(2, "Interval Y", "2024-02-01", esspri=6),
+            _row(2, "Interval Y", "2024-05-30", esspri=6),
+        ]
+    )
+    assert assigned["clinical_episode_id"].nunique() == 1
+    assert audit.loc[0, "merge_rule"] == "other_temporal_rescue"
+
+
+def test_different_intervals_beyond_180_days_do_not_merge() -> None:
+    assigned, _, audit, _ = _run(
+        [
+            _row(1, "Interval X", "2024-01-01", essdai=4),
+            _row(2, "Interval Y", "2024-07-01", esspri=6),
         ]
     )
     assert assigned["clinical_episode_id"].nunique() == 2
-    assert audit.loc[0, "merge_rule"] == "different_interval_gt30_days_no_merge"
+    assert audit.loc[0, "merge_rule"] == "different_interval_gt180_days_no_merge"
 
 
 def test_row_assignment_conservation() -> None:

@@ -2,7 +2,7 @@
 
 PASS 1 joins rows from the same patient, calendar year, and exact source
 interval. PASS 2 joins remaining, complementary and clinically compatible
-episodes no more than 30 days apart. Calendar years are an absolute boundary.
+episodes no more than 180 days apart. Calendar years are an absolute boundary.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ MERGE_INCOMPATIBILITIES_FILENAME = "08c_merge_incompatibilities.csv"
 MERGE_SUMMARY_FILENAME = "08c_merge_summary.csv"
 
 NATURAL_HISTORY = "natural history protocol 478 interval"
+MAX_CROSS_INTERVAL_DAYS = 180
 PHASE_ORDER = {
     "Phase 1: Initial Full Evaluation": 1,
     "Phase 1: Second Full Evaluation": 2,
@@ -411,7 +412,7 @@ def _pair_rule(left: pd.DataFrame, right: pd.DataFrame) -> tuple[str, int, int] 
     kinds = {left_kind, right_kind}
     if kinds == {"natural", "15d_optional"}:
         return (
-            "natural_15d_within_30_days",
+            "natural_15d_within_180_days",
             (0 if left_kind == "natural" else 1),
             (1 if left_kind == "natural" else 0),
         )
@@ -421,12 +422,12 @@ def _pair_rule(left: pd.DataFrame, right: pd.DataFrame) -> tuple[str, int, int] 
     if left_phase and right_phase:
         left_order, right_order = int(left_kind[6:]), int(right_kind[6:])
         primary = 0 if left_order <= right_order else 1
-        return "phase_phase_within_30_days", primary, 1 - primary
+        return "phase_phase_within_180_days", primary, 1 - primary
     if (left_phase and right_kind == "optional") or (
         right_phase and left_kind == "optional"
     ):
         primary = 0 if left_phase else 1
-        return "phase_optional_within_30_days", primary, 1 - primary
+        return "phase_optional_within_180_days", primary, 1 - primary
     return None
 
 
@@ -548,15 +549,18 @@ def _pass_two(
                 if pd.isna(date_j):
                     continue
                 days_apart = (date_j - date_i).days
-                if days_apart > 30:
+                if days_apart > MAX_CROSS_INTERVAL_DAYS:
                     audit.append(
                         _audit_record(
                             patient_id,
                             episodes[i],
                             episodes[j],
-                            "different_interval_gt30_days_no_merge",
+                            "different_interval_gt180_days_no_merge",
                             False,
-                            reason="different intervals more than 30 days apart",
+                            reason=(
+                                "different intervals more than "
+                                f"{MAX_CROSS_INTERVAL_DAYS} days apart"
+                            ),
                         )
                     )
                     break
