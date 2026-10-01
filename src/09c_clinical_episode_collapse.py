@@ -60,6 +60,15 @@ MANIFEST_REQUIRED = {
     "manual_review_reason",
 }
 MANIFEST_OPTIONAL = (
+    "cross_interval_merge",
+    "cross_year_merge",
+    "long_interval_span_warning",
+    "possible_date_entry_error",
+    "optional_adjudication",
+    "optional_cluster_ids",
+    "n_source_dates",
+    "source_dates",
+    "n_raw_rows",
     "has_essdai_form",
     "has_essdai_total",
     "has_esspri_form",

@@ -55,6 +55,15 @@ IMMUTABLE = [
     "clinical_visit",
     "manual_review_required",
     "manual_review_reason",
+    "cross_interval_merge",
+    "cross_year_merge",
+    "long_interval_span_warning",
+    "possible_date_entry_error",
+    "optional_adjudication",
+    "optional_cluster_ids",
+    "n_source_dates",
+    "source_dates",
+    "n_raw_rows",
 ]
 DATE_COLUMNS = ["episode_start_date", "clinical_anchor_date", "episode_end_date"]
 ESSDAI_R_PREFIX = "essdai-_r__"
