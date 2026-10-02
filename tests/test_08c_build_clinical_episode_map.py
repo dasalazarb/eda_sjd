@@ -240,3 +240,88 @@ def test_nearest_date_distance_uses_all_source_dates() -> None:
     left = pd.Series(pd.to_datetime(["2024-01-10", "2026-01-01"]))
     right = pd.Series(pd.to_datetime(["2020-01-01", "2024-01-12", "2030-01-01"]))
     assert EPISODES._nearest_date_distance(left, right) == 2
+
+
+def test_provenance_parquet_normalizes_only_heterogeneous_values(
+    tmp_path: Path,
+) -> None:
+    """Mixed audit values serialize as nullable text without coercing dates or IDs."""
+    provenance = pd.DataFrame(
+        {
+            "patient_id": pd.Series([1, 2, 3, 4, 5, 6], dtype="int64"),
+            "source_date": pd.to_datetime(
+                ["2024-01-01", "2024-01-02", None, None, None, None]
+            ),
+            "source_value": [65, "65", 3.5, "positive", False, pd.NA],
+            "selected_value": [65, "65", 3.5, "positive", False, pd.NA],
+        }
+    )
+    path = tmp_path / "provenance.parquet"
+
+    written = EPISODES.write_provenance_parquet(provenance, path)
+    restored = pd.read_parquet(path)
+
+    assert len(restored) == len(provenance)
+    assert str(written["source_value"].dtype) == "string"
+    assert str(restored["source_value"].dtype).startswith("string")
+    assert restored["source_value"].isna().sum() == 1
+    assert restored["selected_value"].isna().sum() == 1
+    assert restored["patient_id"].dtype == provenance["patient_id"].dtype
+    assert restored["source_date"].dtype == provenance["source_date"].dtype
+
+
+def test_empty_standard_provenance_writes_stable_parquet(tmp_path: Path) -> None:
+    """A no-conflict standard run produces a readable zero-row audit artifact."""
+    _, assigned, _, _ = _run([_row(1, INITIAL, "2024-01-01", essdai=3)])
+    conflicts = EPISODES.build_value_conflicts(assigned)
+    provenance = EPISODES.build_source_value_provenance(
+        assigned, conflict_keys=conflicts
+    )
+    path = tmp_path / "empty.parquet"
+
+    EPISODES.write_provenance_parquet(provenance, path)
+    restored = pd.read_parquet(path)
+
+    assert restored.empty
+    assert list(restored.columns) == list(provenance.columns)
+    assert str(restored["source_value"].dtype).startswith("string")
+
+
+def test_conflicts_preserve_falsey_and_negative_values() -> None:
+    """The candidate prefilter does not redefine clinically informative values."""
+    _, assigned, _, _ = _run(
+        [
+            _row(1, INITIAL, "2024-01-01", essdai=0, esspri=False),
+            _row(2, INITIAL, "2024-01-02", essdai=-1, esspri="0"),
+        ]
+    )
+
+    conflicts = EPISODES.build_value_conflicts(assigned)
+
+    assert set(conflicts["variable"]) == {"essdai", "esspri"}
+    assert conflicts.set_index("variable").loc["essdai", "selected_value"] == 0
+    assert not bool(
+        conflicts.set_index("variable").loc["esspri", "selected_value"]
+    )
+
+
+def test_standard_provenance_keeps_repeated_informative_sources() -> None:
+    """Every source cell for a conflict key remains in the selective audit."""
+    _, assigned, _, _ = _run(
+        [
+            _row(1, INITIAL, "2024-01-01", essdai=3),
+            _row(2, INITIAL, "2024-01-02", essdai=3),
+            _row(3, INITIAL, "2024-01-03", essdai=7),
+        ]
+    )
+    conflicts = EPISODES.build_value_conflicts(assigned)
+
+    provenance = EPISODES.build_source_value_provenance(
+        assigned, conflict_keys=conflicts
+    )
+
+    assert provenance["row_id_raw"].tolist() == [1, 2, 3]
+    assert provenance["source_value"].tolist() == [3, 3, 7]
+    assert provenance["source_date"].tolist() == list(
+        pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])
+    )
