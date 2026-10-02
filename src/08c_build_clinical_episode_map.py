@@ -985,14 +985,21 @@ def build_value_conflicts(assigned: pd.DataFrame) -> pd.DataFrame:
     ]
     records = []
     clinical_columns = _data_columns(assigned)
-    for (patient_id, episode_id), rows in assigned.groupby(["patient_id", "clinical_episode_id"], sort=True):
-        for column in clinical_columns:
+    multi = assigned.loc[
+        assigned.duplicated(["patient_id", "clinical_episode_id"], keep=False)
+    ]
+    for (patient_id, episode_id), rows in multi.groupby(
+        ["patient_id", "clinical_episode_id"], sort=True
+    ):
+        ordered = rows.sort_values(
+            ["episode_precedence", "collection_date", "row_id_raw"],
+            na_position="last",
+        )
+        populated_counts = rows[clinical_columns].notna().sum(axis=0)
+        candidate_columns = populated_counts.index[populated_counts.ge(2)]
+        for column in candidate_columns:
             populated = rows.loc[has_information(rows[column])]
             if len(_unique_values(populated[column])) < 2: continue
-            ordered = rows.sort_values(
-                ["episode_precedence", "collection_date", "row_id_raw"],
-                na_position="last",
-            )
             representative = ordered["representative_interval"].iloc[0]
             primary = ordered.loc[ordered["interval_name"].eq(representative), column]
             secondary = ordered.loc[~ordered["interval_name"].eq(representative), column]
@@ -1045,42 +1052,60 @@ def build_source_value_provenance(
         return pd.DataFrame(columns=output_columns)
     selected: dict[object, pd.Series] = {}
     selected_by_key: dict[tuple[object, str], object] = {}
+    if isinstance(conflict_keys, pd.DataFrame) and {
+        "clinical_episode_id", "variable", "selected_value"
+    }.issubset(conflict_keys):
+        selected_by_key = {
+            (episode_id, variable): selected_value
+            for episode_id, variable, selected_value in conflict_keys[
+                ["clinical_episode_id", "variable", "selected_value"]
+            ].itertuples(index=False, name=None)
+        }
     if keys is None:
         selected = {
             episode_id: collapse_episode_rows(rows)
             for episode_id, rows in assigned.groupby("clinical_episode_id")
         }
     else:
-        episode_groups = {
-            episode_id: rows
-            for episode_id, rows in assigned.groupby("clinical_episode_id", sort=False)
-        }
-        for episode_id, variable in keys:
-            rows = episode_groups[episode_id].sort_values(
-                ["episode_precedence", "collection_date", "row_id_raw"],
-                na_position="last",
-            )
-            representative = rows["representative_interval"].iloc[0]
-            primary = rows.loc[rows["interval_name"].eq(representative), variable]
-            secondary = rows.loc[~rows["interval_name"].eq(representative), variable]
-            selected_by_key[(episode_id, variable)] = resolve_preferred_value(
-                collapse_values(primary), collapse_values(secondary), representative, "secondary"
-            )[0]
+        missing_selected = keys - set(selected_by_key)
+        if missing_selected:
+            episode_groups = {
+                episode_id: rows
+                for episode_id, rows in assigned.groupby("clinical_episode_id", sort=False)
+            }
+            for episode_id, variable in missing_selected:
+                rows = episode_groups[episode_id].sort_values(
+                    ["episode_precedence", "collection_date", "row_id_raw"],
+                    na_position="last",
+                )
+                representative = rows["representative_interval"].iloc[0]
+                primary = rows.loc[rows["interval_name"].eq(representative), variable]
+                secondary = rows.loc[~rows["interval_name"].eq(representative), variable]
+                selected_by_key[(episode_id, variable)] = resolve_preferred_value(
+                    collapse_values(primary), collapse_values(secondary), representative, "secondary"
+                )[0]
     working = assigned.reset_index(drop=True)
-    masks = pd.DataFrame({column: has_information(working[column]) for column in clinical_columns})
-    values = working[clinical_columns].where(masks).rename_axis(index="source_index", columns="variable").stack(dropna=True).rename("source_value").reset_index()
-    if values.empty:
+    value_parts: list[pd.DataFrame] = []
+    for variable in clinical_columns:
+        variable_rows = working
+        if keys is not None:
+            episode_ids = {episode_id for episode_id, key_variable in keys if key_variable == variable}
+            variable_rows = working.loc[
+                working["clinical_episode_id"].isin(episode_ids)
+            ]
+        informative = variable_rows.loc[has_information(variable_rows[variable])]
+        if informative.empty:
+            continue
+        part = informative[
+            ["patient_id", "clinical_episode_id", "row_id_raw", "collection_date", "interval_name", "optional_cluster_id"]
+        ].copy()
+        part["variable"] = variable
+        part["source_value"] = informative[variable]
+        value_parts.append(part)
+    if not value_parts:
         return pd.DataFrame(columns=output_columns)
-    metadata = working[["patient_id", "clinical_episode_id", "row_id_raw", "collection_date", "interval_name", "optional_cluster_id"]].copy()
-    metadata["source_index"] = metadata.index
-    result = values.merge(metadata, on="source_index", validate="many_to_one").drop(columns="source_index")
+    result = pd.concat(value_parts, ignore_index=True)
     result = result.rename(columns={"collection_date": "source_date", "interval_name": "source_interval"})
-    if keys is not None:
-        keep = [
-            (episode_id, variable) in keys
-            for episode_id, variable in zip(result["clinical_episode_id"], result["variable"])
-        ]
-        result = result.loc[keep].copy()
     result["selected_value"] = [
         selected_by_key[(episode_id, variable)]
         if keys is not None
@@ -1129,95 +1154,248 @@ def write_parquet(frame: pd.DataFrame, parquet_path: Path) -> Path:
     return parquet_path
 
 
+def write_parquet_atomic(frame: pd.DataFrame, parquet_path: Path) -> Path:
+    """Publish a Parquet file only after a structural read-back validation."""
+    import pyarrow.parquet as pq
+
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = parquet_path.with_name(parquet_path.name + ".tmp.parquet")
+    serializable = frame.copy(deep=False)
+    serializable.attrs = {}
+    try:
+        serializable.to_parquet(temporary_path, index=False)
+        parquet_file = pq.ParquetFile(temporary_path)
+        if parquet_file.metadata.num_rows != len(serializable):
+            raise RuntimeError(
+                f"Parquet row count differs after serialization: {parquet_path.name}"
+            )
+        if parquet_file.schema_arrow.names != list(serializable.columns):
+            raise RuntimeError(
+                f"Parquet schema columns differ after serialization: {parquet_path.name}"
+            )
+        temporary_path.replace(parquet_path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    return parquet_path
+
+
+def write_provenance_parquet(
+    provenance: pd.DataFrame, provenance_path: Path
+) -> pd.DataFrame:
+    """Write audit values as nullable text while retaining other column dtypes."""
+    serializable = provenance.copy()
+    for column in ("source_value", "selected_value"):
+        if column in serializable:
+            serializable[column] = serializable[column].astype("string")
+    write_parquet_atomic(serializable, provenance_path)
+    return serializable
+
+
+def write_metrics_checkpoint(
+    metrics: dict[str, object], path: Path, status: str, stage: str
+) -> None:
+    """Atomically publish non-clinical performance and run-state metadata."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {**metrics, "status": status, "current_stage": stage}
+    temporary_path = path.with_name(path.name + ".tmp")
+    temporary_path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
+    temporary_path.replace(path)
+
+
+def parquet_artifact_metadata(path: Path, rows: int) -> dict[str, object]:
+    """Return non-clinical publication metadata for a core Parquet artifact."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    stat = path.stat()
+    return {
+        "rows": rows,
+        "sha256": digest.hexdigest(),
+        "mtime_ns": stat.st_mtime_ns,
+        "size_bytes": stat.st_size,
+    }
+
+
 def main() -> None:
     """Build frozen episode assignments and all source-preserving QC products."""
     args = parse_args()
     logger = setup_logger("08c_build_clinical_episode_map")
     total_started = perf_counter()
+    metrics_path = args.qc_dir / PERFORMANCE_FILENAME
     metrics: dict[str, object] = {
         "qc_mode": args.qc_mode,
         "standard_provenance_seconds": 0.0,
         "full_provenance_seconds": 0.0,
     }
 
-    started = perf_counter()
-    logger.info("Reading %s", args.input_path)
-    raw = pd.read_parquet(args.input_path)
-    metrics["read_seconds"] = perf_counter() - started
-    started = perf_counter()
-    source, provenance_columns = prepare_visits(raw)
-    flagged = add_presence_flags(source)
-    clinical_columns = _data_columns(flagged)
-    units = build_atomic_activity_units(flagged, provenance_columns)
-    metrics.update({"presence_masks_seconds": perf_counter() - started, "raw_rows": len(source), "n_rows": len(source), "n_columns": len(source.columns), "n_patients": source["patient_id"].nunique(), "n_optional": int(source["interval_normalized"].map(_is_optional).sum()), "clinical_columns": len(clinical_columns)})
+    def checkpoint(stage: str, status: str = "running") -> None:
+        metrics["elapsed_seconds"] = perf_counter() - total_started
+        write_metrics_checkpoint(metrics, metrics_path, status, stage)
 
-    assigned_units = assign_episodes(
-        units, include_pair_records=args.qc_mode == "full"
-    )
-    assigned = propagate_episode_assignments(flagged, assigned_units)
-    unassigned, multiplied = validate_final_assignments(source, assigned)
-    if args.qc_mode == "full":
-        assigned.attrs["optional_pair_candidates"] = build_optional_pair_qc(
-            assigned, assigned.attrs["optional_pair_candidates"]
-        )
-    metrics.update(assigned.attrs["performance_metrics"])
-    metrics.update({"unassigned": unassigned, "multiplied": multiplied})
-
-    started = perf_counter(); manifest = build_manifest(assigned)
-    metrics.update({"manifest_seconds": perf_counter() - started, "episodes": len(manifest)})
-    started = perf_counter(); conflicts = build_value_conflicts(assigned)
-    metrics.update({"conflict_detection_seconds": perf_counter() - started, "conflict_details_seconds": 0.0, "conflicting_variables": len(conflicts)})
-    started = perf_counter(); dates = build_date_discrepancies(assigned, manifest); long_spans = build_long_interval_spans(assigned, manifest)
-    metrics.update({"date_qc_seconds": perf_counter() - started, "long_spans": len(long_spans)})
-    started = perf_counter()
-    provenance = (
-        build_source_value_provenance(assigned)
-        if args.qc_mode == "full"
-        else build_source_value_provenance(assigned, conflict_keys=conflicts)
-    )
-    provenance_metric = "full_provenance_seconds" if args.qc_mode == "full" else "standard_provenance_seconds"
-    metrics.update({provenance_metric: perf_counter() - started, "informative_cells": len(provenance), "provenance_rows": len(provenance)})
-    audit = assigned.attrs["merge_decision_audit"]
-    summary = build_merge_summary(assigned, manifest, audit)
-
-    started = perf_counter(); write_parquet(assigned, args.row_map_path); write_parquet(manifest, args.manifest_path)
-    metrics["row_map_parquet_write_seconds"] = perf_counter() - started
-    metrics["row_map_csv_write_seconds"] = 0.0
-    if args.write_core_csv:
+    try:
+        checkpoint("read_input")
         started = perf_counter()
-        assigned.to_csv(args.row_map_path.with_suffix(".csv"), index=False)
-        manifest.to_csv(args.manifest_path.with_suffix(".csv"), index=False)
-        metrics["row_map_csv_write_seconds"] = perf_counter() - started
-    args.qc_dir.mkdir(parents=True, exist_ok=True)
-    outputs = {MERGE_AUDIT_FILENAME: audit, VALUE_CONFLICTS_FILENAME: conflicts, MERGE_INCOMPATIBILITIES_FILENAME: assigned.attrs["merge_incompatibilities"], MERGE_SUMMARY_FILENAME: summary, LONG_SPANS_FILENAME: long_spans, OPTIONAL_PAIRS_FILENAME: assigned.attrs["optional_pair_candidates"], OPTIONAL_CLUSTERS_FILENAME: assigned.attrs["optional_clusters"], OPTIONAL_ADJUDICATION_FILENAME: assigned.attrs["optional_adjudication"], UNRESOLVED_FILENAME: assigned.attrs["unresolved_assignments"], DATE_DISCREPANCIES_FILENAME: dates}
-    started = perf_counter()
-    for filename, frame in outputs.items():
-        frame.to_csv(args.qc_dir / filename, index=False)
-    metrics["qc_write_seconds"] = perf_counter() - started
-    provenance_path = args.qc_dir / PROVENANCE_FILENAME
-    started = perf_counter(); provenance.to_parquet(provenance_path, index=False)
-    metrics["provenance_parquet_write_seconds"] = perf_counter() - started
-    if args.export_full_provenance_csv:
-        started = perf_counter(); provenance.to_csv(provenance_path.with_suffix(".csv"), index=False)
-        metrics["provenance_csv_write_seconds"] = perf_counter() - started
-    produced_paths = [args.row_map_path, args.manifest_path, provenance_path]
-    produced_paths.extend(args.qc_dir / filename for filename in outputs)
-    if args.write_core_csv:
-        produced_paths.extend(
-            (args.row_map_path.with_suffix(".csv"), args.manifest_path.with_suffix(".csv"))
+        logger.info("[08c] INPUT START | path=%s", args.input_path)
+        raw = pd.read_parquet(args.input_path)
+        metrics["read_seconds"] = perf_counter() - started
+        logger.info("[08c] INPUT DONE | rows=%d | seconds=%.2f", len(raw), metrics["read_seconds"])
+
+        started = perf_counter()
+        logger.info("[08c] ASSIGNMENT START | matching progress follows")
+        source, provenance_columns = prepare_visits(raw)
+        flagged = add_presence_flags(source)
+        clinical_columns = _data_columns(flagged)
+        units = build_atomic_activity_units(flagged, provenance_columns)
+        metrics.update({
+            "presence_masks_seconds": perf_counter() - started,
+            "raw_rows": len(source),
+            "n_rows": len(source),
+            "n_columns": len(source.columns),
+            "n_patients": source["patient_id"].nunique(),
+            "n_optional": int(source["interval_normalized"].map(_is_optional).sum()),
+            "clinical_columns": len(clinical_columns),
+        })
+        assigned_units = assign_episodes(
+            units, include_pair_records=args.qc_mode == "full"
         )
-    metrics["output_sizes_mb"] = {
-        path.name: round(path.stat().st_size / 1_048_576, 3)
-        for path in produced_paths
-        if path.exists()
-    }
-    metrics["files_produced"] = sorted(metrics["output_sizes_mb"])
-    metrics["total_wall_time_seconds"] = perf_counter() - total_started
-    metrics["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 3)
-    (args.qc_dir / PERFORMANCE_FILENAME).write_text(json.dumps(metrics, indent=2, default=str) + "\n")
-    if args.profile:
-        logger.info("Performance metrics: %s", json.dumps(metrics, default=str))
-    logger.info("Completed: %d raw rows -> %d episodes; %d conflicts", len(assigned), len(manifest), len(conflicts))
+        assigned = propagate_episode_assignments(flagged, assigned_units)
+        unassigned, multiplied = validate_final_assignments(source, assigned)
+        if args.qc_mode == "full":
+            assigned.attrs["optional_pair_candidates"] = build_optional_pair_qc(
+                assigned, assigned.attrs["optional_pair_candidates"]
+            )
+        metrics.update(assigned.attrs["performance_metrics"])
+        metrics.update({"unassigned": unassigned, "multiplied": multiplied})
+        logger.info(
+            "[08c] ASSIGNMENT DONE | patients=%d | rows=%d | seconds=%.2f",
+            source["patient_id"].nunique(), len(assigned),
+            metrics["episode_assignment_seconds"],
+        )
+        checkpoint("assignment_complete")
+
+        started = perf_counter()
+        logger.info("[08c] MANIFEST START")
+        manifest = build_manifest(assigned)
+        metrics.update({"manifest_seconds": perf_counter() - started, "episodes": len(manifest)})
+        logger.info("[08c] MANIFEST DONE | episodes=%d | seconds=%.2f", len(manifest), metrics["manifest_seconds"])
+        checkpoint("manifest_complete")
+
+        started = perf_counter()
+        logger.info("[08c] CORE PARQUET START | QC remains pending")
+        write_parquet_atomic(assigned, args.row_map_path)
+        write_parquet_atomic(manifest, args.manifest_path)
+        metrics["core_parquet_write_seconds"] = perf_counter() - started
+        metrics["core_artifacts"] = {
+            "row_map": parquet_artifact_metadata(args.row_map_path, len(assigned)),
+            "manifest": parquet_artifact_metadata(args.manifest_path, len(manifest)),
+        }
+        metrics["row_map_csv_write_seconds"] = 0.0
+        logger.info(
+            "[08c] CORE PARQUET DONE | rowmap=%d | manifest=%d | rowmap_sha256=%s | manifest_sha256=%s | seconds=%.2f | QC=pending",
+            len(assigned),
+            len(manifest),
+            metrics["core_artifacts"]["row_map"]["sha256"],
+            metrics["core_artifacts"]["manifest"]["sha256"],
+            metrics["core_parquet_write_seconds"],
+        )
+        checkpoint("core_parquet_complete_qc_pending")
+
+        started = perf_counter()
+        logger.info("[08c] CONFLICT DETECTION START")
+        conflicts = build_value_conflicts(assigned)
+        metrics.update({
+            "conflict_detection_seconds": perf_counter() - started,
+            "conflict_details_seconds": 0.0,
+            "conflicting_variables": conflicts["variable"].nunique(),
+            "conflict_keys": len(conflicts),
+        })
+        logger.info("[08c] CONFLICT DETECTION DONE | keys=%d | variables=%d | seconds=%.2f", len(conflicts), metrics["conflicting_variables"], metrics["conflict_detection_seconds"])
+        checkpoint("conflict_detection_complete")
+
+        started = perf_counter()
+        logger.info("[08c] TEMPORAL QC START")
+        dates = build_date_discrepancies(assigned, manifest)
+        long_spans = build_long_interval_spans(assigned, manifest)
+        metrics.update({"date_qc_seconds": perf_counter() - started, "long_spans": len(long_spans)})
+        logger.info("[08c] TEMPORAL QC DONE | discrepancies=%d | long_spans=%d | seconds=%.2f", len(dates), len(long_spans), metrics["date_qc_seconds"])
+        checkpoint("temporal_qc_complete")
+
+        started = perf_counter()
+        logger.info("[08c] PROVENANCE START | qc_mode=%s | conflict_keys=%d", args.qc_mode, len(conflicts))
+        provenance = (
+            build_source_value_provenance(assigned)
+            if args.qc_mode == "full"
+            else build_source_value_provenance(assigned, conflict_keys=conflicts)
+        )
+        provenance_metric = "full_provenance_seconds" if args.qc_mode == "full" else "standard_provenance_seconds"
+        metrics.update({provenance_metric: perf_counter() - started, "informative_cells": len(provenance), "provenance_rows": len(provenance)})
+        logger.info("[08c] PROVENANCE DONE | informative_cells=%d | seconds=%.2f", len(provenance), metrics[provenance_metric])
+        checkpoint("provenance_built")
+
+        audit = assigned.attrs["merge_decision_audit"]
+        summary = build_merge_summary(assigned, manifest, audit)
+        if args.write_core_csv:
+            started = perf_counter()
+            assigned.to_csv(args.row_map_path.with_suffix(".csv"), index=False)
+            manifest.to_csv(args.manifest_path.with_suffix(".csv"), index=False)
+            metrics["row_map_csv_write_seconds"] = perf_counter() - started
+
+        args.qc_dir.mkdir(parents=True, exist_ok=True)
+        outputs = {
+            MERGE_AUDIT_FILENAME: audit,
+            VALUE_CONFLICTS_FILENAME: conflicts,
+            MERGE_INCOMPATIBILITIES_FILENAME: assigned.attrs["merge_incompatibilities"],
+            MERGE_SUMMARY_FILENAME: summary,
+            LONG_SPANS_FILENAME: long_spans,
+            OPTIONAL_PAIRS_FILENAME: assigned.attrs["optional_pair_candidates"],
+            OPTIONAL_CLUSTERS_FILENAME: assigned.attrs["optional_clusters"],
+            OPTIONAL_ADJUDICATION_FILENAME: assigned.attrs["optional_adjudication"],
+            UNRESOLVED_FILENAME: assigned.attrs["unresolved_assignments"],
+            DATE_DISCREPANCIES_FILENAME: dates,
+        }
+        started = perf_counter()
+        logger.info("[08c] QC CSV START")
+        for filename, frame in outputs.items():
+            frame.to_csv(args.qc_dir / filename, index=False)
+        metrics["qc_write_seconds"] = perf_counter() - started
+        logger.info("[08c] QC CSV DONE | files=%d | seconds=%.2f", len(outputs), metrics["qc_write_seconds"])
+        checkpoint("qc_csv_complete")
+
+        provenance_path = args.qc_dir / PROVENANCE_FILENAME
+        started = perf_counter()
+        logger.info("[08c] PROVENANCE PARQUET START | value_dtype=string")
+        provenance = write_provenance_parquet(provenance, provenance_path)
+        metrics["provenance_parquet_write_seconds"] = perf_counter() - started
+        logger.info("[08c] PROVENANCE PARQUET DONE | rows=%d | value_dtype=string | seconds=%.2f", len(provenance), metrics["provenance_parquet_write_seconds"])
+        if args.export_full_provenance_csv:
+            started = perf_counter()
+            provenance.to_csv(provenance_path.with_suffix(".csv"), index=False)
+            metrics["provenance_csv_write_seconds"] = perf_counter() - started
+
+        produced_paths = [args.row_map_path, args.manifest_path, provenance_path]
+        produced_paths.extend(args.qc_dir / filename for filename in outputs)
+        if args.write_core_csv:
+            produced_paths.extend((args.row_map_path.with_suffix(".csv"), args.manifest_path.with_suffix(".csv")))
+        metrics["output_sizes_mb"] = {
+            path.name: round(path.stat().st_size / 1_048_576, 3)
+            for path in produced_paths if path.exists()
+        }
+        metrics["files_produced"] = sorted(metrics["output_sizes_mb"])
+        metrics["total_wall_time_seconds"] = perf_counter() - total_started
+        metrics["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 3)
+        checkpoint("complete", status="complete")
+        if args.profile:
+            logger.info("Performance metrics: %s", json.dumps(metrics, default=str))
+        logger.info("[08c] COMPLETE | raw_rows=%d | episodes=%d | conflicts=%d | seconds=%.2f", len(assigned), len(manifest), len(conflicts), metrics["total_wall_time_seconds"])
+    except Exception as error:
+        metrics["error_type"] = type(error).__name__
+        metrics["error"] = str(error)
+        metrics["total_wall_time_seconds"] = perf_counter() - total_started
+        checkpoint("failed", status="failed")
+        logger.exception("[08c] FAILED | error_type=%s", type(error).__name__)
+        raise
 
 
 if __name__ == "__main__":
