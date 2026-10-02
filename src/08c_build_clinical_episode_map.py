@@ -1104,6 +1104,10 @@ def build_source_value_provenance(
         value_parts.append(part)
     if not value_parts:
         return pd.DataFrame(columns=output_columns)
+    # Avoid pandas comparing non-scalar DataFrame.attrs during concat.
+    # These intermediate attrs are not part of the provenance table.
+    for part in value_parts:
+        part.attrs = {}
     result = pd.concat(value_parts, ignore_index=True)
     result = result.rename(columns={"collection_date": "source_date", "interval_name": "source_interval"})
     result["selected_value"] = [

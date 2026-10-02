@@ -325,3 +325,42 @@ def test_standard_provenance_keeps_repeated_informative_sources() -> None:
     assert provenance["source_date"].tolist() == list(
         pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])
     )
+
+
+def test_provenance_ignores_non_scalar_dataframe_attrs_during_concat() -> None:
+    """Inherited attrs cannot disrupt or alter source-value concatenation."""
+    _, assigned, _, _ = _run(
+        [
+            _row(1, INITIAL, "2024-01-01", essdai=3, esspri=5),
+            _row(2, INITIAL, "2024-01-02", essdai=7, esspri=6),
+        ]
+    )
+    assigned.attrs["nested"] = pd.DataFrame({"metadata": [1, 2]})
+    variables = ["essdai", "esspri"]
+    expected_rows = sum(assigned[variable].notna().sum() for variable in variables)
+
+    provenance = EPISODES.build_source_value_provenance(
+        assigned, variables=variables
+    )
+
+    assert len(provenance) == expected_rows == 4
+    assert list(provenance.columns) == [
+        "patient_id",
+        "clinical_episode_id",
+        "row_id_raw",
+        "variable",
+        "source_value",
+        "source_date",
+        "source_interval",
+        "optional_cluster_id",
+        "selected_value",
+        "selection_rule",
+    ]
+    assert provenance[["row_id_raw", "variable", "source_value"]].to_dict(
+        orient="records"
+    ) == [
+        {"row_id_raw": 1, "variable": "essdai", "source_value": 3},
+        {"row_id_raw": 2, "variable": "essdai", "source_value": 7},
+        {"row_id_raw": 1, "variable": "esspri", "source_value": 5},
+        {"row_id_raw": 2, "variable": "esspri", "source_value": 6},
+    ]
