@@ -5,6 +5,11 @@ The assignment order is deliberate: ordinary intervals are consolidated first,
 records are clustered with complete-link compatibility, and those clusters are
 then compared with (but never allowed to join) principal episodes. Source dates
 and values remain immutable; representative dates are navigation aids only.
+
+The default ``standard`` QC mode writes provenance only for exact
+``(clinical_episode_id, variable)`` conflict keys and skips pair-level detail.
+Use ``--qc-mode full`` for exhaustive provenance and enriched Optional pair QC,
+and ``--write-core-csv`` only when wide compatibility CSVs are required.
 """
 from __future__ import annotations
 
@@ -12,7 +17,9 @@ import argparse
 import hashlib
 import json
 import re
+import resource
 from bisect import bisect_left
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from typing import Iterable
@@ -90,13 +97,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--qc-mode",
         choices=("standard", "full"),
-        default="full",
-        help="full preserves the historical exhaustive-provenance contract",
+        default="standard",
+        help="standard writes conflict-only provenance; full writes exhaustive provenance",
     )
     parser.add_argument(
         "--export-full-provenance-csv",
         action="store_true",
         help="also export the potentially very large exhaustive provenance CSV",
+    )
+    parser.add_argument(
+        "--write-core-csv",
+        action="store_true",
+        help="also write wide CSV copies of the row map and manifest",
     )
     parser.add_argument("--profile", action="store_true", help="log stage metrics")
     return parser.parse_args()
@@ -305,93 +317,182 @@ def _date_stats(rows: pd.DataFrame) -> dict[str, object]:
     return {"start": start, "end": end, "span": span, "dates": dates, "cross_year": len(years) > 1, "possible_error": bool(span is not pd.NA and span >= 365 and same_month_day)}
 
 
-def _cluster_compatible(left: pd.DataFrame, right: pd.DataFrame) -> tuple[bool, str, object]:
-    left_dates, right_dates = left["collection_date"].dropna(), right["collection_date"].dropna()
-    days = min((abs((a - b).days) for a in left_dates for b in right_dates), default=pd.NA)
-    if _documented_independent(left) or _documented_independent(right):
+@dataclass
+class RowSignature:
+    """Compact immutable matching metadata for one source row."""
+
+    position: int
+    patient_id: object
+    row_id: object
+    interval: str
+    date: pd.Timestamp | None
+    informative_mask: int
+    component_mask: int
+    independent: bool
+    explicit_links: frozenset[tuple[str, str]]
+
+
+@dataclass
+class EpisodeState:
+    """Mutable episode aggregate containing indices rather than clinical rows."""
+
+    positions: list[int]
+    informative_mask: int
+    component_mask: int
+    dates: list[pd.Timestamp] = field(default_factory=list)
+    representative_interval: object = ""
+    representative_date: object = pd.NaT
+
+    def add(self, positions: Iterable[int], signatures: list[RowSignature]) -> None:
+        """Add row positions and update compact aggregate signatures."""
+        for position in positions:
+            if position in self.positions:
+                continue
+            signature = signatures[position]
+            self.positions.append(position)
+            self.informative_mask |= signature.informative_mask
+            self.component_mask |= signature.component_mask
+            if signature.date is not None:
+                self.dates.append(signature.date)
+        self.dates.sort()
+
+
+def _truthy_marker(value: object) -> bool:
+    """Return whether a source value explicitly marks an independent visit."""
+    return pd.notna(value) and str(value).strip().casefold() in {"1", "true", "yes", "y"}
+
+
+def build_row_signatures(
+    rows: pd.DataFrame,
+) -> tuple[list[RowSignature], list[str], dict[str, int]]:
+    """Precompute compact per-row clinical and linkage signatures.
+
+    Parameters
+    ----------
+    rows : pd.DataFrame
+        Prepared atomic source rows.
+
+    Returns
+    -------
+    tuple
+        Row signatures, ordered clinical columns, and component bit positions.
+    """
+    clinical_columns = _data_columns(rows)
+    presence = {
+        column: has_information(rows[column]).to_numpy(dtype=bool)
+        for column in clinical_columns
+    }
+    component_columns = sorted(column for column in rows if column.startswith("has_"))
+    component_bits = {column: index for index, column in enumerate(component_columns)}
+    link_columns = [
+        str(column)
+        for column in rows
+        if any(
+            term in str(column).casefold()
+            for term in ("evaluation_id", "visit_id", "event_id", "encounter_id", "accession")
+        )
+    ]
+    marker_columns = [
+        column
+        for column in ("documented_new_visit", "independent_visit", "distinct_clinical_event")
+        if column in rows
+    ]
+    signatures: list[RowSignature] = []
+    for position in range(len(rows)):
+        informative_mask = 0
+        for bit, column in enumerate(clinical_columns):
+            if presence[column][position]:
+                informative_mask |= 1 << bit
+        component_mask = 0
+        for column, bit in component_bits.items():
+            if bool(rows.iloc[position][column]):
+                component_mask |= 1 << bit
+        links = frozenset(
+            (column, str(rows.iloc[position][column]).strip())
+            for column in link_columns
+            if has_information(pd.Series([rows.iloc[position][column]])).iloc[0]
+        )
+        raw_date = rows.iloc[position]["collection_date"]
+        signatures.append(
+            RowSignature(
+                position=position,
+                patient_id=rows.iloc[position]["patient_id"],
+                row_id=rows.iloc[position]["row_id_raw"],
+                interval=rows.iloc[position]["interval_normalized"],
+                date=None if pd.isna(raw_date) else pd.Timestamp(raw_date),
+                informative_mask=informative_mask,
+                component_mask=component_mask,
+                independent=any(_truthy_marker(rows.iloc[position][column]) for column in marker_columns),
+                explicit_links=links,
+            )
+        )
+    return signatures, clinical_columns, component_bits
+
+
+def _signature_compatible(
+    left: RowSignature, right: RowSignature
+) -> tuple[bool, str, int | None]:
+    """Evaluate Optional compatibility using compact signatures only."""
+    days = None if left.date is None or right.date is None else abs((left.date - right.date).days)
+    if left.independent or right.independent:
         return False, "documented distinct clinical event", days
-    complementary = episodes_are_complementary(left, right)
-    shared_components = bool(_components(left) & _components(right))
-    if _has_explicit_link(left, right) and (complementary or shared_components):
+    complementary = (left.informative_mask ^ right.informative_mask) != 0
+    shared_component = (left.component_mask & right.component_mask) != 0
+    if left.explicit_links & right.explicit_links and (complementary or shared_component):
         return True, "explicit same-evaluation linkage", days
-    if pd.isna(days):
+    if days is None:
         return False, "missing date and insufficient explicit linkage", days
     if days >= OPTIONAL_LONG_GAP_DAYS:
         return False, "optional gap >=365 days", days
-    if days <= OPTIONAL_NEAR_DAYS and (complementary or shared_components):
+    if days <= OPTIONAL_NEAR_DAYS and (complementary or shared_component):
         return True, "nearby complementary activity", days
     if days <= OPTIONAL_COMPATIBLE_DAYS and complementary:
         return True, "compatible complementary activity", days
-    if days < OPTIONAL_LONG_GAP_DAYS and complementary and bool(_components(left) & _components(right)):
+    if complementary and shared_component:
         return True, "strong component evidence across long optional gap", days
     return False, "insufficient evidence of same evaluation", days
 
 
-def _row_sort_key(rows: pd.DataFrame) -> tuple[pd.Timestamp, str]:
-    """Return a deterministic chronology key for a one-row activity unit."""
-    date = rows["collection_date"].iloc[0]
-    return (pd.Timestamp.max if pd.isna(date) else pd.Timestamp(date), str(rows["row_id_raw"].iloc[0]))
-
-
-def _has_explicit_link(left: pd.DataFrame, right: pd.DataFrame) -> bool:
-    """Detect an explicit shared evaluation identifier without treating patient ID as a link."""
-    terms = ("evaluation_id", "visit_id", "event_id", "encounter_id", "accession")
-    for column in left.columns.intersection(right.columns):
-        if not any(term in str(column).casefold() for term in terms):
-            continue
-        left_values = {str(value).strip() for value in left.loc[has_information(left[column]), column]}
-        right_values = {str(value).strip() for value in right.loc[has_information(right[column]), column]}
-        if left_values & right_values:
-            return True
-    return False
-
-
-def _candidate_optional_pairs(
-    units: list[pd.DataFrame],
-) -> tuple[list[tuple[pd.DataFrame, pd.DataFrame]], dict[str, int]]:
-    """Generate temporally plausible Optional pairs with a sweep-line index.
-
-    Missing-date and long-gap pairs are emitted only when an explicit evaluation
-    identifier links them or equal month/day values make a year-entry error
-    reproducible. The latter is only a candidate signal; source dates are never
-    changed.
-    """
-    dated = sorted((unit for unit in units if unit["collection_date"].notna().any()), key=_row_sort_key)
-    candidates: list[tuple[pd.DataFrame, pd.DataFrame]] = []
-    candidate_ids: set[frozenset[object]] = set()
+def _candidate_signature_pairs(
+    positions: list[int], signatures: list[RowSignature]
+) -> tuple[list[tuple[int, int]], dict[str, int]]:
+    """Generate sparse Optional candidate pairs without copying source rows."""
+    dated = sorted(
+        (position for position in positions if signatures[position].date is not None),
+        key=lambda position: (signatures[position].date, str(signatures[position].row_id)),
+    )
+    candidates: list[tuple[int, int]] = []
+    seen: set[frozenset[int]] = set()
     left = 0
-    for right, right_unit in enumerate(dated):
-        right_date = pd.Timestamp(right_unit["collection_date"].iloc[0])
-        while left < right and (right_date - pd.Timestamp(dated[left]["collection_date"].iloc[0])).days >= OPTIONAL_LONG_GAP_DAYS:
+    for right_index, right_position in enumerate(dated):
+        right_date = signatures[right_position].date
+        assert right_date is not None
+        while left < right_index:
+            left_date = signatures[dated[left]].date
+            assert left_date is not None
+            if (right_date - left_date).days < OPTIONAL_LONG_GAP_DAYS:
+                break
             left += 1
-        for prior in dated[left:right]:
-            pair_id = frozenset((prior["row_id_raw"].iloc[0], right_unit["row_id_raw"].iloc[0]))
-            candidate_ids.add(pair_id)
-            candidates.append((prior, right_unit))
-
-    # Index exceptional linkage evidence rather than rescanning every distant
-    # pair. A bucket normally contains only the records from one evaluation.
-    exception_buckets: dict[tuple[object, ...], list[pd.DataFrame]] = {}
-    link_terms = ("evaluation_id", "visit_id", "event_id", "encounter_id", "accession")
-    for unit in units:
-        date = unit["collection_date"].iloc[0]
-        if pd.notna(date):
-            exception_buckets.setdefault(("month_day", date.month, date.day), []).append(unit)
-        for column in unit:
-            if not any(term in str(column).casefold() for term in link_terms):
-                continue
-            for value in unit.loc[has_information(unit[column]), column]:
-                exception_buckets.setdefault(("explicit", str(column), str(value).strip()), []).append(unit)
-    for bucket in exception_buckets.values():
+        for prior_position in dated[left:right_index]:
+            pair = frozenset((prior_position, right_position))
+            seen.add(pair)
+            candidates.append((prior_position, right_position))
+    buckets: dict[tuple[object, ...], list[int]] = {}
+    for position in positions:
+        signature = signatures[position]
+        if signature.date is not None:
+            buckets.setdefault(("month_day", signature.date.month, signature.date.day), []).append(position)
+        for link in signature.explicit_links:
+            buckets.setdefault(("explicit", *link), []).append(position)
+    for bucket in buckets.values():
         for index, first in enumerate(bucket):
             for second in bucket[index + 1 :]:
-                pair_id = frozenset((first["row_id_raw"].iloc[0], second["row_id_raw"].iloc[0]))
-                if len(pair_id) < 2 or pair_id in candidate_ids:
+                pair = frozenset((first, second))
+                if len(pair) < 2 or pair in seen:
                     continue
-                candidate_ids.add(pair_id)
+                seen.add(pair)
                 candidates.append((first, second))
-
-    theoretical = len(units) * (len(units) - 1) // 2
+    theoretical = len(positions) * (len(positions) - 1) // 2
     return candidates, {
         "theoretical_pairs": theoretical,
         "candidate_pairs": len(candidates),
@@ -399,181 +500,451 @@ def _candidate_optional_pairs(
     }
 
 
-def _complete_link_clusters(
-    rows: pd.DataFrame, pair_records: list[dict[str, object]]
-) -> tuple[list[pd.DataFrame], dict[str, int | float]]:
-    """Cluster Optional units using complete links from the sparse candidate graph."""
-    started = perf_counter()
-    units = sorted(
-        [group.copy() for _, group in rows.groupby("row_id_raw", sort=False)],
-        key=_row_sort_key,
+def _complete_link_position_clusters(
+    positions: list[int],
+    signatures: list[RowSignature],
+    decision_counts: dict[str, int],
+    pair_records: list[dict[str, object]],
+    include_pair_records: bool,
+) -> tuple[list[list[int]], dict[str, int | float]]:
+    """Cluster Optional row positions with cached complete-link compatibility."""
+    generation_started = perf_counter()
+    candidates, metrics = _candidate_signature_pairs(positions, signatures)
+    metrics["optional_candidate_generation_seconds"] = perf_counter() - generation_started
+    clustering_started = perf_counter()
+    compatible: set[frozenset[int]] = set()
+    for left, right in candidates:
+        accepted, reason, days = _signature_compatible(signatures[left], signatures[right])
+        decision_counts[reason] = decision_counts.get(reason, 0) + 1
+        if accepted:
+            compatible.add(frozenset((left, right)))
+        if include_pair_records:
+            pair_records.append(
+                {
+                "patient_id": signatures[left].patient_id,
+                "row_id_a": signatures[left].row_id,
+                "row_id_b": signatures[right].row_id,
+                "days_apart": days,
+                "decision": "merge_candidate" if accepted else "keep_separate",
+                "reason": reason,
+                "optional_cluster_id": "",
+                }
+            )
+    clusters: list[list[int]] = []
+    ordered = sorted(
+        positions,
+        key=lambda position: (
+            pd.Timestamp.max if signatures[position].date is None else signatures[position].date,
+            str(signatures[position].row_id),
+        ),
     )
-    candidate_pairs, metrics = _candidate_optional_pairs(units)
-    compatible_pairs: set[frozenset[object]] = set()
-    for left, right in candidate_pairs:
-        compatible, reason, days = _cluster_compatible(left, right)
-        left_id, right_id = left["row_id_raw"].iloc[0], right["row_id_raw"].iloc[0]
-        pair_id = frozenset((left_id, right_id))
-        if compatible:
-            compatible_pairs.add(pair_id)
-        pair_records.append({
-            "patient_id": left["patient_id"].iloc[0], "row_id_a": left_id, "row_id_b": right_id,
-            "date_a": left["collection_date"].iloc[0], "date_b": right["collection_date"].iloc[0], "days_apart": days,
-            "components_a": _display(sorted(_components(left))), "components_b": _display(sorted(_components(right))),
-            "incremental_fields_a": _display(sorted(_informative_columns(left) - _informative_columns(right))),
-            "incremental_fields_b": _display(sorted(_informative_columns(right) - _informative_columns(left))),
-            "contradictions": _display(c["variable"] for c in find_incompatible_variables(left, right)),
-            "independent_event_evidence": _documented_independent(left) or _documented_independent(right),
-            "decision": "merge_candidate" if compatible else "keep_separate", "reason": reason, "optional_cluster_id": "",
-        })
-    metrics["evaluated_pairs"] = len(candidate_pairs)
-    clusters: list[list[pd.DataFrame]] = []
-    for unit in units:
-        unit_id = unit["row_id_raw"].iloc[0]
-        compatible_cluster = next(
+    for position in ordered:
+        destination = next(
             (
                 cluster
                 for cluster in clusters
-                if all(
-                    frozenset((unit_id, member["row_id_raw"].iloc[0])) in compatible_pairs
-                    for member in cluster
-                )
+                if all(frozenset((position, member)) in compatible for member in cluster)
             ),
             None,
         )
-        if compatible_cluster is not None:
-            compatible_cluster.append(unit)
+        if destination is None:
+            clusters.append([position])
         else:
-            clusters.append([unit])
-    combined = [pd.concat(cluster).sort_values("row_id_raw") for cluster in clusters]
-    row_to_cluster = {
-        row_id: _stable_id("OC_", cluster["patient_id"].iloc[0], cluster["row_id_raw"])
-        for cluster in combined
-        for row_id in cluster["row_id_raw"]
-    }
-    for record in pair_records[-len(candidate_pairs) :] if candidate_pairs else ():
-        left_cluster = row_to_cluster.get(record["row_id_a"])
-        if left_cluster == row_to_cluster.get(record["row_id_b"]):
-            record["optional_cluster_id"] = left_cluster
-    metrics["clusters"] = len(combined)
-    metrics["pair_generation_clustering_seconds"] = perf_counter() - started
-    return combined, metrics
+            destination.append(position)
+    row_to_cluster: dict[object, str] = {}
+    for cluster in clusters:
+        cluster_id = _stable_id(
+            "OC_", signatures[cluster[0]].patient_id, (signatures[p].row_id for p in cluster)
+        )
+        for position in cluster:
+            row_to_cluster[signatures[position].row_id] = cluster_id
+    recent_records = pair_records[-len(candidates) :] if include_pair_records and candidates else ()
+    for record in recent_records:
+        if row_to_cluster.get(record["row_id_a"]) == row_to_cluster.get(record["row_id_b"]):
+            record["optional_cluster_id"] = row_to_cluster[record["row_id_a"]]
+    metrics.update(
+        {
+            "evaluated_pairs": len(candidates),
+            "clusters": len(clusters),
+            "optional_clustering_seconds": perf_counter() - clustering_started,
+        }
+    )
+    return clusters, metrics
 
 
-def _principal_group(rows: pd.DataFrame, rule: str) -> pd.DataFrame:
-    result = rows.sort_values(["collection_date", "row_id_raw"], na_position="last").copy()
-    result["assignment_rule"] = rule; result["merge_rule"] = rule; result["merge_stage"] = "ordinary_interval"
-    result["representative_interval"] = result["interval_name"].iloc[0]
-    result["representative_date"] = result["collection_date"].dropna().min() if result["collection_date"].notna().any() else pd.NaT
-    result["episode_precedence"] = range(len(result))
-    return result
-
-
-def _nearest_date_distance(left: pd.Series, right: pd.Series) -> int | None:
-    """Return the nearest absolute day distance using binary search."""
-    targets = sorted(pd.Timestamp(value) for value in right.dropna().unique())
-    if not targets:
+def _nearest_signature_distance(cluster: EpisodeState, principal: EpisodeState) -> int | None:
+    """Return minimum distance between two sorted episode date lists."""
+    if not cluster.dates or not principal.dates:
         return None
     nearest: int | None = None
-    for value in left.dropna().unique():
-        date = pd.Timestamp(value)
-        position = bisect_left(targets, date)
+    for date in cluster.dates:
+        position = bisect_left(principal.dates, date)
         for index in (position - 1, position):
-            if 0 <= index < len(targets):
-                distance = abs((date - targets[index]).days)
+            if 0 <= index < len(principal.dates):
+                distance = abs((date - principal.dates[index]).days)
                 nearest = distance if nearest is None else min(nearest, distance)
     return nearest
 
 
-def assign_episodes(atomic_units: pd.DataFrame) -> pd.DataFrame:
-    """Assign episodes through ordinary, 15-D, Optional-cluster, and attachment stages."""
-    started = perf_counter(); prepared = atomic_units.copy()
-    defaults = {"assignment_rule": "standalone_record", "merge_stage": "standalone", "merge_rule": "standalone_record", "manual_review_required": False, "manual_review_reason": "", "optional_cluster_id": "", "optional_adjudication": "not_optional", "visit_type": "clinical_episode", "clinical_visit": True}
-    for column, default in defaults.items(): prepared[column] = default
-    episodes, audits, pairs, clusters_qc, adjudications, unresolved, incompatibilities = [], [], [], [], [], [], []
-    pair_metrics = {
-        "theoretical_pairs": 0,
-        "candidate_pairs": 0,
-        "evaluated_pairs": 0,
-        "filtered_pairs": 0,
-        "clusters": 0,
-        "pair_generation_clustering_seconds": 0.0,
+def assign_episodes(
+    atomic_units: pd.DataFrame, include_pair_records: bool = True
+) -> pd.DataFrame:
+    """Freeze episode assignment from compact row signatures, then materialize once."""
+    total_started = perf_counter()
+    prepared = atomic_units.reset_index(drop=True)
+    signature_started = perf_counter()
+    signatures, clinical_columns, component_bits = build_row_signatures(prepared)
+    signature_seconds = perf_counter() - signature_started
+    n_rows = len(prepared)
+    metadata: dict[str, list[object]] = {
+        "assignment_rule": ["standalone_record"] * n_rows,
+        "merge_stage": ["standalone"] * n_rows,
+        "merge_rule": ["standalone_record"] * n_rows,
+        "manual_review_required": [False] * n_rows,
+        "manual_review_reason": [""] * n_rows,
+        "representative_interval": [""] * n_rows,
+        "representative_date": [pd.NaT] * n_rows,
+        "episode_precedence": [0] * n_rows,
+        "optional_cluster_id": [""] * n_rows,
+        "optional_adjudication": ["not_optional"] * n_rows,
+        "visit_type": ["clinical_episode"] * n_rows,
+        "clinical_visit": [True] * n_rows,
+        "clinical_episode_id": [""] * n_rows,
     }
+    patients: dict[object, list[int]] = {}
+    for signature in signatures:
+        patients.setdefault(signature.patient_id, []).append(signature.position)
+    episodes: list[EpisodeState] = []
+    pairs: list[dict[str, object]] = []
+    clusters_qc: list[dict[str, object]] = []
+    adjudications: list[dict[str, object]] = []
+    unresolved: list[dict[str, object]] = []
+    audits: list[dict[str, object]] = []
+    decision_counts: dict[str, int] = {}
     optional_counts: list[int] = []
-    for patient_id, patient in tqdm(prepared.groupby("patient_id", sort=True), desc="Building clinical episodes"):
-        normalized = patient["interval_normalized"]
-        principal_rows = patient.loc[~normalized.map(_is_optional)]
-        optional_rows = patient.loc[normalized.map(_is_optional)]
-        principals = [_principal_group(group, "same_normalized_interval_all_dates") for _, group in principal_rows.groupby("interval_normalized", sort=True, dropna=False)]
-        natural = next((episode for episode in principals if episode["interval_normalized"].iloc[0] == NATURAL_HISTORY), None)
-        remaining_optional = []
-        for _, row in optional_rows.sort_values("row_id_raw").groupby("row_id_raw"):
-            if _is_15d_optional(row["interval_normalized"].iloc[0]) and natural is not None and not _documented_independent(row):
-                cluster_id = _stable_id("OC_", patient_id, row["row_id_raw"]); row = row.copy()
-                contributed_fields = _informative_columns(row) - _informative_columns(natural)
-                row["optional_cluster_id"] = cluster_id; row["optional_adjudication"] = "attached_to_natural_15d"; row["assignment_rule"] = "15d_optional_to_natural_default"; row["merge_rule"] = row["assignment_rule"]; row["merge_stage"] = "15d_reintegration"; row["representative_interval"] = natural["representative_interval"].iloc[0]; row["representative_date"] = natural["representative_date"].iloc[0]; row["episode_precedence"] = list(range(len(natural), len(natural) + len(row))); natural = pd.concat([natural, row]); principals = [natural if episode["interval_normalized"].iloc[0] == NATURAL_HISTORY else episode for episode in principals]
-                adjudications.append({"patient_id": patient_id, "row_id_raw": row["row_id_raw"].iloc[0], "optional_cluster_id": cluster_id, "candidate_episode_ids": "Natural History", "candidate_distances_days": min((abs((a-b).days) for a in row["collection_date"].dropna() for b in natural["collection_date"].dropna()), default=pd.NA), "new_fields": _display(sorted(contributed_fields)), "decision": "attached_to_natural_15d", "justification": "15-D transversal default; no documented distinct event", "confidence": "provisional"})
+    timings = {
+        "principal_grouping_seconds": 0.0,
+        "natural_15d_seconds": 0.0,
+        "optional_candidate_generation_seconds": 0.0,
+        "optional_clustering_seconds": 0.0,
+        "optional_main_assignment_seconds": 0.0,
+    }
+    pair_metrics = {key: 0 for key in ("theoretical_pairs", "candidate_pairs", "evaluated_pairs", "filtered_pairs", "clusters")}
+
+    for patient_id in tqdm(sorted(patients, key=str), desc="Building clinical episodes"):
+        positions = patients[patient_id]
+        started = perf_counter()
+        principal_groups: dict[str, list[int]] = {}
+        optional_positions: list[int] = []
+        for position in positions:
+            signature = signatures[position]
+            if _is_optional(signature.interval):
+                optional_positions.append(position)
             else:
-                remaining_optional.append(row)
-        remaining = pd.concat(remaining_optional) if remaining_optional else optional_rows.iloc[0:0]
+                principal_groups.setdefault(signature.interval, []).append(position)
+        principals: list[EpisodeState] = []
+        for group_positions in principal_groups.values():
+            first = prepared.iloc[group_positions[0]]
+            dates = sorted(signatures[p].date for p in group_positions if signatures[p].date is not None)
+            state = EpisodeState(
+                positions=list(group_positions),
+                informative_mask=0,
+                component_mask=0,
+                dates=dates,
+                representative_interval=first["interval_name"],
+                representative_date=dates[0] if dates else pd.NaT,
+            )
+            for position in group_positions:
+                state.informative_mask |= signatures[position].informative_mask
+                state.component_mask |= signatures[position].component_mask
+                metadata["assignment_rule"][position] = "same_normalized_interval_all_dates"
+                metadata["merge_rule"][position] = "same_normalized_interval_all_dates"
+                metadata["merge_stage"][position] = "ordinary_interval"
+            principals.append(state)
+        timings["principal_grouping_seconds"] += perf_counter() - started
+
+        started = perf_counter()
+        natural = next(
+            (state for state in principals if signatures[state.positions[0]].interval == NATURAL_HISTORY),
+            None,
+        )
+        eligible_fifteen = [
+            position
+            for position in optional_positions
+            if _is_15d_optional(signatures[position].interval) and not signatures[position].independent
+        ]
+        remaining = [position for position in optional_positions if position not in set(eligible_fifteen)]
+        direct_fifteen: list[list[int]] = []
+        if eligible_fifteen and natural is not None:
+            baseline_mask = natural.informative_mask
+            baseline_dates = list(natural.dates)
+            natural.add(eligible_fifteen, signatures)
+            for offset, position in enumerate(eligible_fifteen):
+                cluster_id = _stable_id("OC_", patient_id, [signatures[position].row_id])
+                metadata["optional_cluster_id"][position] = cluster_id
+                metadata["optional_adjudication"][position] = "attached_to_natural_15d"
+                metadata["assignment_rule"][position] = "15d_optional_to_natural_default"
+                metadata["merge_rule"][position] = "15d_optional_to_natural_default"
+                metadata["merge_stage"][position] = "15d_reintegration"
+                adjudications.append(
+                    {
+                        "patient_id": patient_id,
+                        "row_id_raw": signatures[position].row_id,
+                        "optional_cluster_id": cluster_id,
+                        "candidate_episode_ids": "Natural History",
+                        "candidate_distances_days": _nearest_signature_distance(
+                            EpisodeState([position], signatures[position].informative_mask, signatures[position].component_mask, [signatures[position].date] if signatures[position].date else []),
+                            EpisodeState([], baseline_mask, natural.component_mask, baseline_dates),
+                        ),
+                        "new_fields": "",
+                        "decision": "attached_to_natural_15d",
+                        "justification": "15-D transversal default; no documented distinct event",
+                        "confidence": "provisional",
+                    }
+                )
+        elif eligible_fifteen:
+            direct_fifteen.append(eligible_fifteen)
+        timings["natural_15d_seconds"] += perf_counter() - started
         optional_counts.append(len(remaining))
-        # Without Natural, build the 15-D transversal group directly instead of
-        # generating all of its pair combinations. Documented new visits remain
-        # in the general Optional pool and retain their independent-event rule.
-        direct_fifteen: list[pd.DataFrame] = []
-        if natural is None:
-            fifteen_mask = remaining["interval_normalized"].map(_is_15d_optional)
-            eligible = remaining.loc[fifteen_mask].groupby("row_id_raw", sort=False)
-            fifteen_rows = [group for _, group in eligible if not _documented_independent(group)]
-            if fifteen_rows:
-                direct_fifteen = [pd.concat(fifteen_rows)]
-                direct_ids = {value for group in fifteen_rows for value in group["row_id_raw"]}
-                remaining = remaining.loc[~remaining["row_id_raw"].isin(direct_ids)]
-        optional_clusters, patient_pair_metrics = _complete_link_clusters(remaining, pairs)
+
+        optional_clusters, cluster_metrics = _complete_link_position_clusters(
+            remaining,
+            signatures,
+            decision_counts,
+            pairs,
+            include_pair_records,
+        )
         optional_clusters.extend(direct_fifteen)
-        for metric, value in patient_pair_metrics.items():
-            pair_metrics[metric] += value
-        for cluster in optional_clusters:
-            cluster = cluster.copy(); cluster_id = _stable_id("OC_", patient_id, cluster["row_id_raw"]); cluster["optional_cluster_id"] = cluster_id
-            clinical = _clinical_evidence(cluster) or _documented_independent(cluster)
+        for key in pair_metrics:
+            pair_metrics[key] += int(cluster_metrics.get(key, 0))
+        timings["optional_candidate_generation_seconds"] += float(cluster_metrics.get("optional_candidate_generation_seconds", 0.0))
+        timings["optional_clustering_seconds"] += float(cluster_metrics.get("optional_clustering_seconds", 0.0))
+
+        started = perf_counter()
+        for cluster_positions in optional_clusters:
+            cluster_mask = 0
+            component_mask = 0
+            cluster_dates: list[pd.Timestamp] = []
+            independent = False
+            for position in cluster_positions:
+                signature = signatures[position]
+                cluster_mask |= signature.informative_mask
+                component_mask |= signature.component_mask
+                independent |= signature.independent
+                if signature.date is not None:
+                    cluster_dates.append(signature.date)
+            cluster_dates.sort()
+            cluster = EpisodeState(cluster_positions, cluster_mask, component_mask, cluster_dates)
+            cluster_id = _stable_id("OC_", patient_id, (signatures[p].row_id for p in cluster_positions))
+            for position in cluster_positions:
+                metadata["optional_cluster_id"][position] = cluster_id
+            clinical = independent or (
+                component_mask.bit_count() >= 3
+                and any(
+                    component_mask & (1 << component_bits.get(f"has_{name}", 10_000))
+                    for name in ("essdai", "systems_review", "visit_summary", "physical_examination")
+                    if f"has_{name}" in component_bits
+                )
+                and any(
+                    component_mask & (1 << component_bits.get(f"has_{name}", 10_000))
+                    for name in ("eye_examination", "salivary_flow", "oral_examination", "esspri")
+                    if f"has_{name}" in component_bits
+                )
+            )
             candidates = []
             for index, principal in enumerate(principals):
-                distance = _nearest_date_distance(cluster["collection_date"], principal["collection_date"])
-                if distance is not None: candidates.append((distance, index, principal))
-            candidates.sort(key=lambda item: (item[0], str(item[2]["interval_normalized"].iloc[0])))
+                distance = _nearest_signature_distance(cluster, principal)
+                if distance is not None:
+                    candidates.append((distance, index, principal))
+            candidates.sort(key=lambda item: (item[0], str(item[2].representative_interval)))
             tied = len(candidates) > 1 and candidates[0][0] == candidates[1][0]
-            complementary = bool(candidates and episodes_are_complementary(cluster, candidates[0][2]))
-            attach = bool(candidates and not tied and not _documented_independent(cluster) and complementary and (candidates[0][0] <= OPTIONAL_COMPATIBLE_DAYS or (candidates[0][0] < OPTIONAL_LONG_GAP_DAYS and bool(_components(cluster)))))
+            complementary = bool(candidates and (cluster_mask ^ candidates[0][2].informative_mask))
+            attach = bool(
+                candidates
+                and not tied
+                and not independent
+                and complementary
+                and (
+                    candidates[0][0] <= OPTIONAL_COMPATIBLE_DAYS
+                    or (candidates[0][0] < OPTIONAL_LONG_GAP_DAYS and component_mask)
+                )
+            )
             if attach:
-                distance, index, principal = candidates[0]; cluster["optional_adjudication"] = "attached_to_main"; cluster["assignment_rule"] = "optional_cluster_to_main"; cluster["merge_rule"] = cluster["assignment_rule"]; cluster["merge_stage"] = "optional_to_main"; cluster["representative_interval"] = principal["representative_interval"].iloc[0]; cluster["representative_date"] = principal["representative_date"].iloc[0]; cluster["episode_precedence"] = list(range(len(principal), len(principal) + len(cluster))); principals[index] = pd.concat([principal, cluster]); decision, visit_type = "attached_to_main", "clinical_episode"
+                distance, _, principal = candidates[0]
+                precedence = len(principal.positions)
+                principal.add(cluster_positions, signatures)
+                decision = "attached_to_main"
+                for offset, position in enumerate(cluster_positions):
+                    metadata["optional_adjudication"][position] = decision
+                    metadata["assignment_rule"][position] = "optional_cluster_to_main"
+                    metadata["merge_rule"][position] = "optional_cluster_to_main"
+                    metadata["merge_stage"][position] = "optional_to_main"
+                    metadata["episode_precedence"][position] = precedence + offset
             else:
-                decision = "independent_clinical" if clinical else ("unresolved" if tied or cluster["collection_date"].isna().all() else "partial_unattached")
-                visit_type = "optional_independent_clinical" if clinical else ("optional_unresolved" if decision == "unresolved" else "optional_partial_unattached")
-                cluster["optional_adjudication"] = decision; cluster["assignment_rule"] = decision; cluster["merge_rule"] = decision; cluster["merge_stage"] = "optional_residual"; cluster["representative_interval"] = cluster["interval_name"].iloc[0]; cluster["representative_date"] = cluster["collection_date"].dropna().min() if cluster["collection_date"].notna().any() else pd.NaT; cluster["episode_precedence"] = range(len(cluster)); cluster["visit_type"] = visit_type; cluster["clinical_visit"] = clinical; cluster["manual_review_required"] = not clinical; cluster["manual_review_reason"] = "ambiguous principal candidates" if tied else ("missing source date" if cluster["collection_date"].isna().all() else "partial Optional evidence")
+                decision = "independent_clinical" if clinical else (
+                    "unresolved" if tied or not cluster_dates else "partial_unattached"
+                )
+                visit_type = "optional_independent_clinical" if clinical else (
+                    "optional_unresolved" if decision == "unresolved" else "optional_partial_unattached"
+                )
+                first = prepared.iloc[cluster_positions[0]]
+                cluster.representative_interval = first["interval_name"]
+                cluster.representative_date = cluster_dates[0] if cluster_dates else pd.NaT
                 principals.append(cluster)
-                if decision == "unresolved": unresolved.append({"patient_id": patient_id, "optional_cluster_id": cluster_id, "row_ids": _display(cluster["row_id_raw"]), "reason": cluster["manual_review_reason"].iloc[0], "candidate_intervals": _display(item[2]["representative_interval"].iloc[0] for item in candidates)})
-            clusters_qc.append({"patient_id": patient_id, "optional_cluster_id": cluster_id, "row_ids": _display(cluster["row_id_raw"]), "source_dates": _display(cluster["collection_date"]), "sources": _display(cluster.get("source_file", pd.Series(dtype=object))), "components": _display(sorted(_components(cluster))), "clinical_potential": clinical, "destination": candidates[0][2]["representative_interval"].iloc[0] if attach else "", "classification": "clinical" if clinical else ("ambiguous" if decision == "unresolved" else "complementary")})
-            for row_id in cluster["row_id_raw"]:
-                adjudications.append({"patient_id": patient_id, "row_id_raw": row_id, "optional_cluster_id": cluster_id, "candidate_episode_ids": _display(item[2]["representative_interval"].iloc[0] for item in candidates), "candidate_distances_days": _display(item[0] for item in candidates), "new_fields": _display(sorted(_informative_columns(cluster) - (_informative_columns(candidates[0][2]) if candidates else set()))), "decision": decision, "justification": cluster["assignment_rule"].iloc[0], "confidence": "high" if clinical or attach else "review"})
-        for episode in principals: episodes.append(episode)
-    # Stable episode IDs depend on patient, representative identity, and immutable row IDs, not input order.
+                reason = "ambiguous principal candidates" if tied else (
+                    "missing source date" if not cluster_dates else "partial Optional evidence"
+                )
+                for offset, position in enumerate(cluster_positions):
+                    metadata["optional_adjudication"][position] = decision
+                    metadata["assignment_rule"][position] = decision
+                    metadata["merge_rule"][position] = decision
+                    metadata["merge_stage"][position] = "optional_residual"
+                    metadata["episode_precedence"][position] = offset
+                    metadata["visit_type"][position] = visit_type
+                    metadata["clinical_visit"][position] = clinical
+                    metadata["manual_review_required"][position] = not clinical
+                    metadata["manual_review_reason"][position] = reason
+                if decision == "unresolved":
+                    unresolved.append(
+                        {
+                            "patient_id": patient_id,
+                            "optional_cluster_id": cluster_id,
+                            "row_ids": _display(signatures[p].row_id for p in cluster_positions),
+                            "reason": reason,
+                            "candidate_intervals": _display(item[2].representative_interval for item in candidates),
+                        }
+                    )
+            destination = candidates[0][2].representative_interval if attach else ""
+            clusters_qc.append(
+                {
+                    "patient_id": patient_id,
+                    "optional_cluster_id": cluster_id,
+                    "row_ids": _display(signatures[p].row_id for p in cluster_positions),
+                    "source_dates": _display(cluster_dates),
+                    "components": component_mask,
+                    "clinical_potential": clinical,
+                    "destination": destination,
+                    "classification": "clinical" if clinical else ("ambiguous" if decision == "unresolved" else "complementary"),
+                }
+            )
+            for position in cluster_positions:
+                adjudications.append(
+                    {
+                        "patient_id": patient_id,
+                        "row_id_raw": signatures[position].row_id,
+                        "optional_cluster_id": cluster_id,
+                        "candidate_episode_ids": _display(item[2].representative_interval for item in candidates),
+                        "candidate_distances_days": _display(item[0] for item in candidates),
+                        "new_fields": "",
+                        "decision": decision,
+                        "justification": metadata["assignment_rule"][position],
+                        "confidence": "high" if clinical or attach else "review",
+                    }
+                )
+        timings["optional_main_assignment_seconds"] += perf_counter() - started
+        episodes.extend(principals)
+
+    freeze_started = perf_counter()
     for episode in episodes:
-        episode["clinical_episode_id"] = _stable_id("EP_", episode["patient_id"].iloc[0], episode["row_id_raw"])
-        stats = _date_stats(episode)
-        if len(episode) > 1:
-            audits.append({"patient_id": episode["patient_id"].iloc[0], "clinical_episode_id": episode["clinical_episode_id"].iloc[0], "row_ids": _display(episode["row_id_raw"]), "intervals": _display(episode["interval_name"]), "merge_rule": _display(episode["merge_rule"]), "merged": True, "episode_span_days": stats["span"], "reason": "staged reconstruction"})
-    result = pd.concat(episodes).sort_values(["patient_id", "row_id_raw"]) if episodes else prepared
-    elapsed = perf_counter() - started
+        episode_id = _stable_id(
+            "EP_", signatures[episode.positions[0]].patient_id, (signatures[p].row_id for p in episode.positions)
+        )
+        representative_interval = episode.representative_interval
+        representative_date = episode.representative_date
+        for precedence, position in enumerate(episode.positions):
+            metadata["clinical_episode_id"][position] = episode_id
+            metadata["representative_interval"][position] = representative_interval
+            metadata["representative_date"][position] = representative_date
+            if metadata["episode_precedence"][position] == 0:
+                metadata["episode_precedence"][position] = precedence
+        if len(episode.positions) > 1:
+            episode_rows = prepared.iloc[episode.positions]
+            stats = _date_stats(episode_rows)
+            audits.append(
+                {
+                    "patient_id": signatures[episode.positions[0]].patient_id,
+                    "clinical_episode_id": episode_id,
+                    "row_ids": _display(signatures[p].row_id for p in episode.positions),
+                    "intervals": _display(episode_rows["interval_name"]),
+                    "merge_rule": _display(metadata["merge_rule"][p] for p in episode.positions),
+                    "merged": True,
+                    "episode_span_days": stats["span"],
+                    "reason": "staged reconstruction",
+                }
+            )
+    result = prepared.assign(**metadata).sort_values(["patient_id", "row_id_raw"])
     optional_series = pd.Series(optional_counts, dtype="int64")
-    result.attrs.update({"merge_decision_audit": pd.DataFrame(audits), "merge_incompatibilities": pd.DataFrame(incompatibilities), "optional_pair_candidates": pd.DataFrame(pairs), "optional_clusters": pd.DataFrame(clusters_qc), "optional_adjudication": pd.DataFrame(adjudications), "unresolved_assignments": pd.DataFrame(unresolved), "performance_metrics": {"episode_assignment_seconds": elapsed, "n_candidates_total": len(audits)+len(pairs), "n_merges_total": len(audits), **pair_metrics, "optional_per_patient_p50": float(optional_series.quantile(0.50)) if len(optional_series) else 0.0, "optional_per_patient_p95": float(optional_series.quantile(0.95)) if len(optional_series) else 0.0, "optional_per_patient_max": int(optional_series.max()) if len(optional_series) else 0}})
+    performance = {
+        "episode_assignment_seconds": perf_counter() - total_started,
+        "metadata_signatures_seconds": signature_seconds,
+        "freeze_assignment_seconds": perf_counter() - freeze_started,
+        "n_candidates_total": pair_metrics["candidate_pairs"],
+        "n_merges_total": len(audits),
+        "clinical_columns": len(clinical_columns),
+        "decision_counts": decision_counts,
+        **pair_metrics,
+        **timings,
+        "optional_per_patient_p50": float(optional_series.quantile(0.50)) if len(optional_series) else 0.0,
+        "optional_per_patient_p95": float(optional_series.quantile(0.95)) if len(optional_series) else 0.0,
+        "optional_per_patient_max": int(optional_series.max()) if len(optional_series) else 0,
+    }
+    result.attrs.update(
+        {
+            "merge_decision_audit": pd.DataFrame(audits),
+            "merge_incompatibilities": pd.DataFrame(),
+            "optional_pair_candidates": pd.DataFrame(pairs),
+            "optional_clusters": pd.DataFrame(clusters_qc),
+            "optional_adjudication": pd.DataFrame(adjudications),
+            "unresolved_assignments": pd.DataFrame(unresolved),
+            "performance_metrics": performance,
+        }
+    )
     return result
-
-
 def propagate_episode_assignments(flagged_rows: pd.DataFrame, assigned_units: pd.DataFrame) -> pd.DataFrame:
     """Propagate assignment metadata without modifying original source values."""
     columns = ["row_id_raw", "clinical_episode_id", "assignment_rule", "merge_stage", "merge_rule", "manual_review_required", "manual_review_reason", "representative_interval", "representative_date", "episode_precedence", "optional_cluster_id", "optional_adjudication", "visit_type", "clinical_visit"]
     result = flagged_rows.merge(assigned_units[columns], on="row_id_raw", how="left", validate="one_to_one").sort_values("_source_order")
     result.attrs.update(assigned_units.attrs); return result
+
+
+def build_optional_pair_qc(
+    assigned: pd.DataFrame, pair_decisions: pd.DataFrame
+) -> pd.DataFrame:
+    """Enrich frozen Optional pair decisions without changing assignments."""
+    if pair_decisions.empty:
+        return pair_decisions.copy()
+    rows_by_id = {
+        row_id: rows
+        for row_id, rows in assigned.groupby("row_id_raw", sort=False)
+    }
+    records: list[dict[str, object]] = []
+    for decision in pair_decisions.to_dict("records"):
+        left = rows_by_id[decision["row_id_a"]]
+        right = rows_by_id[decision["row_id_b"]]
+        record = dict(decision)
+        record.update(
+            {
+                "date_a": left["collection_date"].iloc[0],
+                "date_b": right["collection_date"].iloc[0],
+                "components_a": _display(sorted(_components(left))),
+                "components_b": _display(sorted(_components(right))),
+                "incremental_fields_a": _display(
+                    sorted(_informative_columns(left) - _informative_columns(right))
+                ),
+                "incremental_fields_b": _display(
+                    sorted(_informative_columns(right) - _informative_columns(left))
+                ),
+                "contradictions": _display(
+                    conflict["variable"]
+                    for conflict in find_incompatible_variables(left, right)
+                ),
+                "independent_event_evidence": (
+                    _documented_independent(left) or _documented_independent(right)
+                ),
+            }
+        )
+        records.append(record)
+    return pd.DataFrame(records)
 
 
 def build_manifest(assigned: pd.DataFrame, source_intervals: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -598,18 +969,42 @@ def collapse_episode_rows(rows: pd.DataFrame) -> pd.Series:
 
 def build_value_conflicts(assigned: pd.DataFrame) -> pd.DataFrame:
     """Record every conflicting clinical value with row/date/source provenance."""
+    output_columns = [
+        "patient_id",
+        "clinical_episode_id",
+        "variable",
+        "source_values",
+        "source_dates",
+        "source_intervals",
+        "source_row_ids",
+        "source_protocols",
+        "merge_rule",
+        "conflict_type",
+        "selected_value",
+        "selection_rule",
+    ]
     records = []
     clinical_columns = _data_columns(assigned)
     for (patient_id, episode_id), rows in assigned.groupby(["patient_id", "clinical_episode_id"], sort=True):
-        collapsed_episode: pd.Series | None = None
         for column in clinical_columns:
             populated = rows.loc[has_information(rows[column])]
             if len(_unique_values(populated[column])) < 2: continue
-            if collapsed_episode is None:
-                collapsed_episode = collapse_episode_rows(rows)
+            ordered = rows.sort_values(
+                ["episode_precedence", "collection_date", "row_id_raw"],
+                na_position="last",
+            )
+            representative = ordered["representative_interval"].iloc[0]
+            primary = ordered.loc[ordered["interval_name"].eq(representative), column]
+            secondary = ordered.loc[~ordered["interval_name"].eq(representative), column]
+            selected_value, _ = resolve_preferred_value(
+                collapse_values(primary),
+                collapse_values(secondary),
+                representative,
+                "secondary",
+            )
             intervals = populated["interval_normalized"]; conflict_type = "same_interval_conflict" if intervals.nunique() == 1 else ("15d_natural_conflict" if intervals.eq(NATURAL_HISTORY).any() and intervals.map(_is_15d_optional).any() else ("optional_main_conflict" if intervals.map(_is_optional).any() else "temporal_value_change"))
-            records.append({"patient_id": patient_id, "clinical_episode_id": episode_id, "variable": column, "source_values": _display(populated[column]), "source_dates": _display(populated["collection_date"]), "source_intervals": _display(populated["interval_name"]), "source_row_ids": _display(populated["row_id_raw"]), "source_protocols": _display(populated.get("source_protocol", pd.Series(dtype=object))), "merge_rule": _display(populated["merge_rule"]), "conflict_type": conflict_type, "selected_value": collapsed_episode.get(column), "selection_rule": "principal_precedence_preserve_all_sources"})
-    return pd.DataFrame(records)
+            records.append({"patient_id": patient_id, "clinical_episode_id": episode_id, "variable": column, "source_values": _display(populated[column]), "source_dates": _display(populated["collection_date"]), "source_intervals": _display(populated["interval_name"]), "source_row_ids": _display(populated["row_id_raw"]), "source_protocols": _display(populated.get("source_protocol", pd.Series(dtype=object))), "merge_rule": _display(populated["merge_rule"]), "conflict_type": conflict_type, "selected_value": selected_value, "selection_rule": "principal_precedence_preserve_all_sources"})
+    return pd.DataFrame(records, columns=output_columns)
 
 
 def build_date_discrepancies(assigned: pd.DataFrame, manifest: pd.DataFrame) -> pd.DataFrame:
@@ -625,14 +1020,52 @@ def build_date_discrepancies(assigned: pd.DataFrame, manifest: pd.DataFrame) -> 
 
 
 def build_source_value_provenance(
-    assigned: pd.DataFrame, variables: Iterable[str] | None = None
+    assigned: pd.DataFrame,
+    variables: Iterable[str] | None = None,
+    conflict_keys: pd.DataFrame | Iterable[tuple[object, str]] | None = None,
 ) -> pd.DataFrame:
-    """Return informative source values using column masks and a vectorized stack."""
-    clinical_columns = list(variables) if variables is not None else _data_columns(assigned)
+    """Return source values, optionally restricted to exact conflict keys."""
+    keys: set[tuple[object, str]] | None = None
+    if conflict_keys is not None:
+        if isinstance(conflict_keys, pd.DataFrame):
+            keys = (
+                set(conflict_keys[["clinical_episode_id", "variable"]].itertuples(index=False, name=None))
+                if {"clinical_episode_id", "variable"}.issubset(conflict_keys)
+                else set()
+            )
+        else:
+            keys = set(conflict_keys)
+    clinical_columns = (
+        sorted({variable for _, variable in keys})
+        if keys is not None
+        else (list(variables) if variables is not None else _data_columns(assigned))
+    )
     output_columns = ["patient_id", "clinical_episode_id", "row_id_raw", "variable", "source_value", "source_date", "source_interval", "optional_cluster_id", "selected_value", "selection_rule"]
     if not clinical_columns:
         return pd.DataFrame(columns=output_columns)
-    selected = {episode_id: collapse_episode_rows(rows) for episode_id, rows in assigned.groupby("clinical_episode_id")}
+    selected: dict[object, pd.Series] = {}
+    selected_by_key: dict[tuple[object, str], object] = {}
+    if keys is None:
+        selected = {
+            episode_id: collapse_episode_rows(rows)
+            for episode_id, rows in assigned.groupby("clinical_episode_id")
+        }
+    else:
+        episode_groups = {
+            episode_id: rows
+            for episode_id, rows in assigned.groupby("clinical_episode_id", sort=False)
+        }
+        for episode_id, variable in keys:
+            rows = episode_groups[episode_id].sort_values(
+                ["episode_precedence", "collection_date", "row_id_raw"],
+                na_position="last",
+            )
+            representative = rows["representative_interval"].iloc[0]
+            primary = rows.loc[rows["interval_name"].eq(representative), variable]
+            secondary = rows.loc[~rows["interval_name"].eq(representative), variable]
+            selected_by_key[(episode_id, variable)] = resolve_preferred_value(
+                collapse_values(primary), collapse_values(secondary), representative, "secondary"
+            )[0]
     working = assigned.reset_index(drop=True)
     masks = pd.DataFrame({column: has_information(working[column]) for column in clinical_columns})
     values = working[clinical_columns].where(masks).rename_axis(index="source_index", columns="variable").stack(dropna=True).rename("source_value").reset_index()
@@ -642,7 +1075,18 @@ def build_source_value_provenance(
     metadata["source_index"] = metadata.index
     result = values.merge(metadata, on="source_index", validate="many_to_one").drop(columns="source_index")
     result = result.rename(columns={"collection_date": "source_date", "interval_name": "source_interval"})
-    result["selected_value"] = [selected[episode_id].get(variable) for episode_id, variable in zip(result["clinical_episode_id"], result["variable"])]
+    if keys is not None:
+        keep = [
+            (episode_id, variable) in keys
+            for episode_id, variable in zip(result["clinical_episode_id"], result["variable"])
+        ]
+        result = result.loc[keep].copy()
+    result["selected_value"] = [
+        selected_by_key[(episode_id, variable)]
+        if keys is not None
+        else selected[episode_id].get(variable)
+        for episode_id, variable in zip(result["clinical_episode_id"], result["variable"])
+    ]
     result["selection_rule"] = "principal_precedence_preserve_all_sources"
     return result[output_columns]
 
@@ -676,59 +1120,100 @@ def write_parquet_and_csv(frame: pd.DataFrame, parquet_path: Path) -> tuple[Path
     parquet_path.parent.mkdir(parents=True, exist_ok=True); csv_path = parquet_path.with_suffix(".csv"); serializable = frame.copy(deep=False); serializable.attrs = {}; serializable.to_parquet(parquet_path, index=False); serializable.to_csv(csv_path, index=False); return parquet_path, csv_path
 
 
+def write_parquet(frame: pd.DataFrame, parquet_path: Path) -> Path:
+    """Write a dataframe to Parquet without duplicating it as a wide CSV."""
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    serializable = frame.copy(deep=False)
+    serializable.attrs = {}
+    serializable.to_parquet(parquet_path, index=False)
+    return parquet_path
+
+
 def main() -> None:
     """Build frozen episode assignments and all source-preserving QC products."""
     args = parse_args()
     logger = setup_logger("08c_build_clinical_episode_map")
     total_started = perf_counter()
-    metrics: dict[str, object] = {"qc_mode": args.qc_mode}
+    metrics: dict[str, object] = {
+        "qc_mode": args.qc_mode,
+        "standard_provenance_seconds": 0.0,
+        "full_provenance_seconds": 0.0,
+    }
 
     started = perf_counter()
     logger.info("Reading %s", args.input_path)
-    source, provenance_columns = prepare_visits(pd.read_parquet(args.input_path))
+    raw = pd.read_parquet(args.input_path)
+    metrics["read_seconds"] = perf_counter() - started
+    started = perf_counter()
+    source, provenance_columns = prepare_visits(raw)
     flagged = add_presence_flags(source)
     clinical_columns = _data_columns(flagged)
     units = build_atomic_activity_units(flagged, provenance_columns)
-    metrics.update({"read_normalize_flags_seconds": perf_counter() - started, "raw_rows": len(source), "clinical_columns": len(clinical_columns)})
+    metrics.update({"presence_masks_seconds": perf_counter() - started, "raw_rows": len(source), "n_rows": len(source), "n_columns": len(source.columns), "n_patients": source["patient_id"].nunique(), "n_optional": int(source["interval_normalized"].map(_is_optional).sum()), "clinical_columns": len(clinical_columns)})
 
-    assigned_units = assign_episodes(units)
+    assigned_units = assign_episodes(
+        units, include_pair_records=args.qc_mode == "full"
+    )
     assigned = propagate_episode_assignments(flagged, assigned_units)
     unassigned, multiplied = validate_final_assignments(source, assigned)
+    if args.qc_mode == "full":
+        assigned.attrs["optional_pair_candidates"] = build_optional_pair_qc(
+            assigned, assigned.attrs["optional_pair_candidates"]
+        )
     metrics.update(assigned.attrs["performance_metrics"])
     metrics.update({"unassigned": unassigned, "multiplied": multiplied})
 
     started = perf_counter(); manifest = build_manifest(assigned)
     metrics.update({"manifest_seconds": perf_counter() - started, "episodes": len(manifest)})
     started = perf_counter(); conflicts = build_value_conflicts(assigned)
-    metrics.update({"conflicts_seconds": perf_counter() - started, "conflicting_variables": len(conflicts)})
+    metrics.update({"conflict_detection_seconds": perf_counter() - started, "conflict_details_seconds": 0.0, "conflicting_variables": len(conflicts)})
     started = perf_counter(); dates = build_date_discrepancies(assigned, manifest); long_spans = build_long_interval_spans(assigned, manifest)
-    metrics.update({"temporal_qc_seconds": perf_counter() - started, "long_spans": len(long_spans)})
-    provenance_variables = None if args.qc_mode == "full" else sorted(set(conflicts.get("variable", pd.Series(dtype=str))))
-    started = perf_counter(); provenance = build_source_value_provenance(assigned, provenance_variables)
-    metrics.update({"provenance_seconds": perf_counter() - started, "informative_cells": len(provenance), "provenance_rows": len(provenance)})
+    metrics.update({"date_qc_seconds": perf_counter() - started, "long_spans": len(long_spans)})
+    started = perf_counter()
+    provenance = (
+        build_source_value_provenance(assigned)
+        if args.qc_mode == "full"
+        else build_source_value_provenance(assigned, conflict_keys=conflicts)
+    )
+    provenance_metric = "full_provenance_seconds" if args.qc_mode == "full" else "standard_provenance_seconds"
+    metrics.update({provenance_metric: perf_counter() - started, "informative_cells": len(provenance), "provenance_rows": len(provenance)})
     audit = assigned.attrs["merge_decision_audit"]
     summary = build_merge_summary(assigned, manifest, audit)
 
-    started = perf_counter(); write_parquet_and_csv(assigned, args.row_map_path); write_parquet_and_csv(manifest, args.manifest_path)
-    metrics["core_parquet_csv_write_seconds"] = perf_counter() - started
+    started = perf_counter(); write_parquet(assigned, args.row_map_path); write_parquet(manifest, args.manifest_path)
+    metrics["row_map_parquet_write_seconds"] = perf_counter() - started
+    metrics["row_map_csv_write_seconds"] = 0.0
+    if args.write_core_csv:
+        started = perf_counter()
+        assigned.to_csv(args.row_map_path.with_suffix(".csv"), index=False)
+        manifest.to_csv(args.manifest_path.with_suffix(".csv"), index=False)
+        metrics["row_map_csv_write_seconds"] = perf_counter() - started
     args.qc_dir.mkdir(parents=True, exist_ok=True)
     outputs = {MERGE_AUDIT_FILENAME: audit, VALUE_CONFLICTS_FILENAME: conflicts, MERGE_INCOMPATIBILITIES_FILENAME: assigned.attrs["merge_incompatibilities"], MERGE_SUMMARY_FILENAME: summary, LONG_SPANS_FILENAME: long_spans, OPTIONAL_PAIRS_FILENAME: assigned.attrs["optional_pair_candidates"], OPTIONAL_CLUSTERS_FILENAME: assigned.attrs["optional_clusters"], OPTIONAL_ADJUDICATION_FILENAME: assigned.attrs["optional_adjudication"], UNRESOLVED_FILENAME: assigned.attrs["unresolved_assignments"], DATE_DISCREPANCIES_FILENAME: dates}
     started = perf_counter()
     for filename, frame in outputs.items():
         frame.to_csv(args.qc_dir / filename, index=False)
-    metrics["qc_csv_write_seconds"] = perf_counter() - started
+    metrics["qc_write_seconds"] = perf_counter() - started
     provenance_path = args.qc_dir / PROVENANCE_FILENAME
     started = perf_counter(); provenance.to_parquet(provenance_path, index=False)
     metrics["provenance_parquet_write_seconds"] = perf_counter() - started
     if args.export_full_provenance_csv:
         started = perf_counter(); provenance.to_csv(provenance_path.with_suffix(".csv"), index=False)
         metrics["provenance_csv_write_seconds"] = perf_counter() - started
+    produced_paths = [args.row_map_path, args.manifest_path, provenance_path]
+    produced_paths.extend(args.qc_dir / filename for filename in outputs)
+    if args.write_core_csv:
+        produced_paths.extend(
+            (args.row_map_path.with_suffix(".csv"), args.manifest_path.with_suffix(".csv"))
+        )
     metrics["output_sizes_mb"] = {
         path.name: round(path.stat().st_size / 1_048_576, 3)
-        for path in (args.row_map_path, args.manifest_path, provenance_path)
+        for path in produced_paths
         if path.exists()
     }
+    metrics["files_produced"] = sorted(metrics["output_sizes_mb"])
     metrics["total_wall_time_seconds"] = perf_counter() - total_started
+    metrics["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 3)
     (args.qc_dir / PERFORMANCE_FILENAME).write_text(json.dumps(metrics, indent=2, default=str) + "\n")
     if args.profile:
         logger.info("Performance metrics: %s", json.dumps(metrics, default=str))
