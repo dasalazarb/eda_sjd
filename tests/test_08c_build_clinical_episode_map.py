@@ -185,6 +185,57 @@ def test_standard_conflict_provenance_preserves_all_conflicting_values() -> None
     assert EPISODES.build_date_discrepancies(assigned, manifest).shape[0] == 1
 
 
+def test_standard_provenance_is_restricted_by_episode_and_variable() -> None:
+    """A conflict in one episode must not expand provenance in another episode."""
+    _, assigned, _, _ = _run(
+        [
+            _row(1, INITIAL, "2024-01-01", essdai=3),
+            _row(2, INITIAL, "2024-01-02", essdai=7),
+            _row(3, SECOND, "2024-06-01", essdai=9),
+        ]
+    )
+    conflicts = EPISODES.build_value_conflicts(assigned)
+    standard = EPISODES.build_source_value_provenance(
+        assigned, conflict_keys=conflicts
+    )
+    conflict_episode = conflicts.loc[0, "clinical_episode_id"]
+    assert set(standard["clinical_episode_id"]) == {conflict_episode}
+    assert set(standard["row_id_raw"]) == {1, 2}
+
+
+def test_matching_does_not_scan_conflicting_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Detailed contradictions belong to QC and cannot run in matching."""
+    monkeypatch.setattr(
+        EPISODES,
+        "find_incompatible_variables",
+        lambda *_args, **_kwargs: pytest.fail("conflict scan entered matching"),
+    )
+    _, assigned, _, _ = _run(
+        [
+            _row(1, "Optional Evaluation A", "2024-05-01", esspri=5),
+            _row(2, "Optional Evaluation B", "2024-05-02", eye_examination="done"),
+        ]
+    )
+    assert assigned["optional_cluster_id"].nunique() == 1
+
+
+def test_signatures_preserve_falsey_information_and_exclude_patient_link() -> None:
+    source, provenance = EPISODES.prepare_visits(
+        pd.DataFrame(
+            [
+                _row(1, "Optional Evaluation A", "2024-01-01", essdai=0),
+                _row(2, "Optional Evaluation B", "2024-01-02", essdai=False),
+            ]
+        )
+    )
+    units = EPISODES.build_atomic_activity_units(
+        EPISODES.add_presence_flags(source), provenance
+    )
+    signatures, _, _ = EPISODES.build_row_signatures(units)
+    assert all(signature.informative_mask for signature in signatures)
+    assert all(not signature.explicit_links for signature in signatures)
+
+
 def test_nearest_date_distance_uses_all_source_dates() -> None:
     left = pd.Series(pd.to_datetime(["2024-01-10", "2026-01-01"]))
     right = pd.Series(pd.to_datetime(["2020-01-01", "2024-01-12", "2030-01-01"]))
