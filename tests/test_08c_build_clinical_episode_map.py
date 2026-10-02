@@ -128,3 +128,64 @@ def test_conservation_and_unique_manifest_contract() -> None:
 def test_invalid_duplicate_raw_ids_are_rejected() -> None:
     with pytest.raises(ValueError, match="row_id_raw must be complete and unique"):
         EPISODES.prepare_visits(pd.DataFrame([_row(1, "A", "2024-01-01"), _row(1, "B", "2024-01-02")]))
+
+
+def test_sparse_candidates_filter_distant_optional_pairs() -> None:
+    rows = [
+        _row(
+            index,
+            f"Optional Evaluation {index}",
+            (
+                pd.Timestamp("2000-01-01")
+                + pd.DateOffset(years=index // 50)
+                + pd.Timedelta(days=index % 50)
+            ).strftime("%Y-%m-%d"),
+            esspri=index,
+        )
+        for index in range(500)
+    ]
+    _, assigned, _, units = _run(rows)
+    metrics = units.attrs["performance_metrics"]
+    assert len(assigned) == 500
+    assert metrics["theoretical_pairs"] == 500 * 499 // 2
+    assert metrics["evaluated_pairs"] < 20_000
+    assert metrics["filtered_pairs"] == metrics["theoretical_pairs"] - metrics["candidate_pairs"]
+
+
+def test_explicit_link_is_exception_to_temporal_window() -> None:
+    rows = [
+        _row(1, "Optional Evaluation A", None, esspri=4, evaluation_id="E-10"),
+        _row(2, "Optional Evaluation B", "2028-01-01", eye_examination="done", evaluation_id="E-10"),
+    ]
+    _, assigned, _, units = _run(rows)
+    assert assigned["optional_cluster_id"].nunique() == 1
+    pair = units.attrs["optional_pair_candidates"].iloc[0]
+    assert pair["reason"] == "explicit same-evaluation linkage"
+
+
+def test_15d_without_natural_is_built_directly() -> None:
+    rows = [
+        _row(1, "15D Optional Evaluation A", "2021-01-01", esspri=4),
+        _row(2, "15D Optional Evaluation B", "2025-01-01", eye_examination="done"),
+    ]
+    _, assigned, _, units = _run(rows)
+    assert assigned["clinical_episode_id"].nunique() == 1
+    assert units.attrs["performance_metrics"]["evaluated_pairs"] == 0
+
+
+def test_standard_conflict_provenance_preserves_all_conflicting_values() -> None:
+    _, assigned, manifest, _ = _run(
+        [_row(1, INITIAL, "2024-01-01", essdai=3), _row(2, INITIAL, "2024-01-02", essdai=7)]
+    )
+    conflicts = EPISODES.build_value_conflicts(assigned)
+    full = EPISODES.build_source_value_provenance(assigned)
+    standard = EPISODES.build_source_value_provenance(assigned, conflicts["variable"])
+    assert set(standard["source_value"]) == {3, 7}
+    assert standard.equals(full.loc[full["variable"].eq("essdai")].reset_index(drop=True))
+    assert EPISODES.build_date_discrepancies(assigned, manifest).shape[0] == 1
+
+
+def test_nearest_date_distance_uses_all_source_dates() -> None:
+    left = pd.Series(pd.to_datetime(["2024-01-10", "2026-01-01"]))
+    right = pd.Series(pd.to_datetime(["2020-01-01", "2024-01-12", "2030-01-01"]))
+    assert EPISODES._nearest_date_distance(left, right) == 2
