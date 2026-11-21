@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 from pathlib import Path
 import sys
 
@@ -118,3 +119,34 @@ def test_write_outputs_creates_csv_and_parquet_pairs(tmp_path: Path) -> None:
     assert len(pd.read_csv(paths["output_sjd_csv_path"])) == len(spine_sjd)
     assert pd.read_parquet(paths["qc_parquet_path"]).equals(qc)
     assert pd.read_csv(paths["qc_path"]).columns.tolist() == qc.columns.tolist()
+
+
+
+def test_cli_preserves_numeric_looking_patient_ids(tmp_path: Path, monkeypatch) -> None:
+    """Step 10 CSV IDs retain their raw spelling when joined to 09d."""
+    patient_ids = {"p1": "0001", "p2": "1", "p3": "003"}
+    source, comparison = episodes(), baselines()
+    for frame in (source, comparison):
+        frame["patient_id"] = frame["patient_id"].map(patient_ids)
+    input_path = tmp_path / "episodes.parquet"
+    baseline_path = tmp_path / "baseline.csv"
+    output_path = tmp_path / "sjd.parquet"
+    source.to_parquet(input_path, index=False)
+    comparison.to_csv(baseline_path, index=False)
+    monkeypatch.setattr(module, "setup_logger", logging.getLogger)
+    monkeypatch.setattr(sys, "argv", [
+        str(MODULE_PATH),
+        "--input-path", str(input_path),
+        "--baseline-path", str(baseline_path),
+        "--output-all-path", str(tmp_path / "all.parquet"),
+        "--output-all-csv-path", str(tmp_path / "all.csv"),
+        "--output-sjd-path", str(output_path),
+        "--output-sjd-csv-path", str(tmp_path / "sjd.csv"),
+        "--qc-path", str(tmp_path / "qc.csv"),
+        "--qc-parquet-path", str(tmp_path / "qc.parquet"),
+    ])
+    module.main()
+
+    restored = pd.read_parquet(output_path)
+    assert restored["patient_id"].tolist() == ["0001", "0001", "1"]
+    assert restored["is_clinical_baseline"].tolist() == [False, True, False]

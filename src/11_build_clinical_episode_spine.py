@@ -141,10 +141,12 @@ def build_spines(
         raise ValueError("hard QC: clinical episode IDs changed during baseline merge")
 
     spine_all["sjd_ever_1_2_4"] = spine_all["sjd_ever_1_2_4"].fillna(False)
+    baseline_ids = spine_all["clinical_baseline_episode_id"].dropna()
     spine_all["is_clinical_baseline"] = (
-        spine_all["clinical_baseline_episode_id"].notna()
-        & spine_all["clinical_episode_id"].eq(spine_all["clinical_baseline_episode_id"])
-    ).astype(bool)
+        spine_all.loc[baseline_ids.index, "clinical_episode_id"]
+        .eq(baseline_ids)
+        .reindex(spine_all.index, fill_value=False)
+    )
     hard_qc(spine_all)
 
     spine_sjd = spine_all.loc[spine_all["sjd_ever_1_2_4"]].copy()
@@ -256,7 +258,10 @@ def main() -> None:
     logger.info("Reading finalized 09d episodes from %s", args.input_path)
     episodes = pd.read_parquet(args.input_path)
     logger.info("Reading step-10 patient baseline data from %s", args.baseline_path)
-    baseline = pd.read_csv(args.baseline_path)
+    baseline = pd.read_csv(
+        args.baseline_path,
+        dtype={"patient_id": str, "clinical_baseline_episode_id": str},
+    )
     spine_all, spine_sjd = build_spines(episodes, baseline)
     qc = build_qc(episodes, spine_all, spine_sjd)
 

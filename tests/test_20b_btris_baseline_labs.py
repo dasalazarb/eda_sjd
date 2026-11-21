@@ -462,6 +462,7 @@ def test_identical_results_without_strong_identity_are_not_specimen_deduplicated
                 "",
                 result_numeric=3,
                 reference_low=4,
+                reference_high=11,
                 observation_identifier="a",
                 specimen_type="Blood",
                 assay="assay-a",
@@ -472,6 +473,7 @@ def test_identical_results_without_strong_identity_are_not_specimen_deduplicated
                 "",
                 result_numeric=3,
                 reference_low=4,
+                reference_high=11,
                 observation_identifier="b",
                 specimen_type="Blood",
                 assay="assay-b",
@@ -727,10 +729,15 @@ def test_core_input_evidence_qc_counts_only_aggregate_availability() -> None:
                 "result_text": pd.NA,
                 "reported_interpretation": pd.NA,
                 "reference_low": pd.NA,
-                "reference_high": 40,
+                "reference_high": pd.NA,
                 "unit": "mg/dL",
             },
         ]
+    )
+    labs = labs.assign(
+        reference_operator=[pd.NA, "<", pd.NA],
+        reference_bound=[pd.NA, 1.0, pd.NA],
+        reference_range_parse_status=["missing", "parsed_one_sided", "missing"],
     )
     qc = MODULE.build_core_input_evidence_qc(labs)
     assert "patient_id" not in qc.columns

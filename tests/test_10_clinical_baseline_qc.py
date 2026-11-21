@@ -40,6 +40,9 @@ def episodes() -> pd.DataFrame:
             "manual_review_required": [False, False, True, False],
             "essdai__essdai_total_score": [pd.NA, 4, 2, pd.NA],
             "esspri_questionnaire__pain": [pd.NA, 3, pd.NA, pd.NA],
+            "esspri_questionnaire__dryness": [pd.NA, 4, pd.NA, pd.NA],
+            "esspri_questionnaire__fatigue": [pd.NA, 5, pd.NA, pd.NA],
+            "visit_summary_form__sjogrens_class": [pd.NA, 1, 2, pd.NA],
         }
     )
 
