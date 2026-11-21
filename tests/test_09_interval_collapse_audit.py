@@ -38,9 +38,10 @@ def test_merge_same_date_intervals_prefers_non_natural_history_values() -> None:
     )
 
     assert len(result) == 1
-    assert result.loc[0, "ids__interval_name"] == "Year 1"
-    assert result.loc[0, "vital_signs__pulse"] == "80"
-    assert result.loc[0, "lab__result"] == "negative | positive"
+    merged = result.iloc[0]
+    assert merged["ids__interval_name"] == "Year 1"
+    assert merged["vital_signs__pulse"] == "80"
+    assert merged["lab__result"] == "negative | positive"
     assert report.loc[0, "action"] == "merged_prefer_non_natural_history"
 
 

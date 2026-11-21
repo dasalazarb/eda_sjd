@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
+from itertools import combinations
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +13,7 @@ MODULE_PATH = Path(__file__).parents[1] / "src" / "08c_build_clinical_episode_ma
 SPEC = importlib.util.spec_from_file_location("clinical_episode_map", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 EPISODES = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = EPISODES
 SPEC.loader.exec_module(EPISODES)
 
 NATURAL = "Natural History Protocol 478 Interval"
@@ -148,7 +151,14 @@ def test_sparse_candidates_filter_distant_optional_pairs() -> None:
     metrics = units.attrs["performance_metrics"]
     assert len(assigned) == 500
     assert metrics["theoretical_pairs"] == 500 * 499 // 2
-    assert metrics["evaluated_pairs"] < 20_000
+    dates = [pd.Timestamp(row["collection_date"]) for row in rows]
+    expected = sum(
+        abs((a - b).days) < EPISODES.OPTIONAL_LONG_GAP_DAYS
+        or (a.month, a.day) == (b.month, b.day)
+        for a, b in combinations(dates, 2)
+    )
+    assert metrics["evaluated_pairs"] == metrics["candidate_pairs"] == expected
+    assert expected < metrics["theoretical_pairs"]
     assert metrics["filtered_pairs"] == metrics["theoretical_pairs"] - metrics["candidate_pairs"]
 
 
@@ -237,9 +247,13 @@ def test_signatures_preserve_falsey_information_and_exclude_patient_link() -> No
 
 
 def test_nearest_date_distance_uses_all_source_dates() -> None:
-    left = pd.Series(pd.to_datetime(["2024-01-10", "2026-01-01"]))
-    right = pd.Series(pd.to_datetime(["2020-01-01", "2024-01-12", "2030-01-01"]))
-    assert EPISODES._nearest_date_distance(left, right) == 2
+    left = EPISODES.EpisodeState(
+        [], 0, 0, list(pd.to_datetime(["2024-01-10", "2026-01-01"]))
+    )
+    right = EPISODES.EpisodeState(
+        [], 0, 0, list(pd.to_datetime(["2020-01-01", "2024-01-12", "2030-01-01"]))
+    )
+    assert EPISODES._nearest_signature_distance(left, right) == 2
 
 
 def test_provenance_parquet_normalizes_only_heterogeneous_values(
@@ -299,10 +313,9 @@ def test_conflicts_preserve_falsey_and_negative_values() -> None:
     conflicts = EPISODES.build_value_conflicts(assigned)
 
     assert set(conflicts["variable"]) == {"essdai", "esspri"}
-    assert conflicts.set_index("variable").loc["essdai", "selected_value"] == 0
-    assert not bool(
-        conflicts.set_index("variable").loc["esspri", "selected_value"]
-    )
+    selected = conflicts.set_index("variable")["selected_value"]
+    assert selected["essdai"] == "0 | -1"
+    assert selected["esspri"] == "False | 0"
 
 
 def test_standard_provenance_keeps_repeated_informative_sources() -> None:

@@ -644,7 +644,11 @@ def test_semantic_intent_distinguishes_reviewed_unused_from_unexpected() -> None
         "unexpected_unmapped",
         "unexpected_unmapped",
     ]
-    assert qc["semantic_mapping_complete"].tolist() == [True, False, False]
+    assert qc.set_index("order_name_canonical")["semantic_mapping_complete"].to_dict() == {
+        "CBC + Diff": True,
+        "Acute Care Panel": False,
+        "Anti-N SARS-CoV-2 Antibodies": False,
+    }
     assert len(btris.build_semantic_unresolved_qc(output)) == 2
 
 

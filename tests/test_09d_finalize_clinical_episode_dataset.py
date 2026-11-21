@@ -101,8 +101,10 @@ def test_preexisting_source_pipe_is_missing_and_unresolved():
 
     assert pd.isna(result.loc[0, "esspri_questionnaire__mental_fatigue_rank"])
     assert records[0]["resolution_status"] == "unresolved"
-    assert records[0]["resolution_method"] == "preexisting_source_pipe"
-    assert records[0]["conflict_origin"] == "preexisting_source_pipe"
+    # ddec924 routes source tokens through the generic conflict resolver.
+    assert records[0]["resolution_method"] == "unresolved_same_day_conflict"
+    assert records[0]["conflict_origin"] == "09c_multirow_conflict"
+    assert records[0]["source_values"] == "2 | 5"
 
 
 @pytest.mark.parametrize("column", sorted(module.PROVENANCE_PIPE_COLUMNS))
