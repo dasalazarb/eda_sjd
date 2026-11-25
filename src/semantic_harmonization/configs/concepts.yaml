@@ -1,0 +1,31 @@
+version: local-assay-routing-v1
+protected_prefixes: [demo__, spine__sjogrens_class]
+protected_names: [spine__sjd_ever_1_2_4]
+identifier_tokens: [id, ids, identifier, identifiers, mrn, uuid, guid]
+ana: [ana_status, ana_hep2_status, ana_hep2_titer, ana_hep2_pattern]
+qualitative:
+  [anti_ccp, anti_dsdna, anti_dsdna_igg, anti_ro52, anti_ro60, anti_ro_ssa, anti_la_ssb,
+   anticardiolipin_igg, anticardiolipin_igm, anti_cardiolipin_igg, anti_cardiolipin_igm,
+   anti_endomysial_iga, vzv_igg, varicella_zoster_igg, rheumatoid_factor, anti_tpo,
+   anti_thyroglobulin, quantiferon, quantiferon_tb_gold, beta_hcg]
+narrative:
+  immunofixation: [immunofixation, immunofixation_serum, serum_immunofixation, immunofixation_urine, monoclonal_band, m_spike]
+  cryoglobulin: [cryoglobulins, cryoglobulin]
+hla_loci: [A, B, C, DPB, DPB1, DQB1, DRB, DRB1]
+urine_nominal:
+  urine_color: [yellow, dark yellow, light yellow, pale yellow, amber, colorless, brown, red, orange]
+  urine_clarity: [clear, hazy, cloudy, turbid, slightly cloudy]
+  urine_appearance: [clear, hazy, cloudy, turbid, slightly cloudy]
+urine_microscopy: [urine_bacteria, urine_mucus, urine_crystals]
+urine_graded:
+  [urine_blood, urine_hemoglobin, urine_ketones, urine_leukocyte_esterase, urine_protein,
+   urine_glucose, urine_bilirubin, urine_urobilinogen, urine_nitrite]
+medication_delimiter: ';'
+medications:
+  medication__ctdb_reported_names: [CTDB, reported, episode]
+  medication__btris_order_within_episode_names: [BTRIS, order, within_episode]
+  medication__btris_order_before_episode_1y_names: [BTRIS, order, before_episode_1y]
+  medication__btris_order_after_episode_1y_names: [BTRIS, order, after_episode_1y]
+  medication__btris_order_nearby_1y_names: [BTRIS, order, nearby_1y]
+  medication__btris_consent_only_review_names: [BTRIS, consent_review, null]
+  medication__chart_review_candidate_names: [null, candidate, null]

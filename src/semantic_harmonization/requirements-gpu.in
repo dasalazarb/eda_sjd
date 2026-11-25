@@ -1,0 +1,4 @@
+-r requirements.in
+huggingface-hub
+openai-harmony
+vllm==0.11.2
