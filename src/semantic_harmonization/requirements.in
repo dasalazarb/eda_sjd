@@ -1,0 +1,10 @@
+pandas==2.3.3
+pyarrow
+pydantic>=2,<3
+PyYAML
+openpyxl
+numpy
+rank-bm25
+rapidfuzz
+Jinja2
+pytest

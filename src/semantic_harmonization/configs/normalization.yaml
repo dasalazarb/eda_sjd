@@ -1,0 +1,41 @@
+version: clinical-lexical-v1
+qualitative:
+  neg: negative
+  negative: negative
+  pos: positive
+  positive: positive
+  equivocal: equivocal
+  indeterminate: indeterminate
+  borderline: borderline
+  reactive: reactive
+  nonreactive: nonreactive
+  non-reactive: nonreactive
+  normal: normal
+availability:
+  not done: not_performed
+  not performed: not_performed
+  test not performed: not_performed
+  cancelled: not_performed
+  pending: pending
+  unable to interpret: not_interpretable
+  see below: not_interpretable
+  see comment: not_interpretable
+  see note: not_interpretable
+specimen:
+  hemolyzed: hemolyzed
+  haemolysed: hemolyzed
+  specimen hemolyzed: hemolyzed
+  clotted: clotted
+  specimen rejected: rejected
+  quantity insufficient: insufficient
+  qns: insufficient
+microscopy:
+  occassional: occasional
+  occasional: occasional
+  mod: moderate
+  moderate: moderate
+  few: few
+  rare: rare
+  many: many
+  none seen: none seen
+ana_patterns: [homogeneous, speckled, nucleolar, centromere, cytoplasmic, nuclear dots, dense fine speckled]

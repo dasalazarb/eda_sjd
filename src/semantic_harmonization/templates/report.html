@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>SjD semantic harmonization</title>
+<style>
+:root{color-scheme:light;--ink:#182a30;--secondary:#496168;--line:#ccd9d9;--accent:#075f63;--surface:#f2f8f7}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);font:15px/1.55 system-ui,sans-serif;background:#fbfdfc}header,main{max-width:1460px;margin:auto;padding:1.6rem clamp(1rem,4vw,4rem)}header{padding-top:2.4rem;border-bottom:1px solid var(--line)}h1,h2,h3{line-height:1.15}h1{font-size:clamp(2rem,6vw,3.8rem);margin:0 0 .5rem}h2{font-size:1.65rem;margin:.4rem 0 .8rem}h3{margin:1.4rem 0 .4rem}section{margin-bottom:2.6rem;scroll-margin-top:1rem}p{max-width:90ch}a{color:var(--accent)}nav{display:flex;gap:.5rem 1.1rem;flex-wrap:wrap;margin-top:1.1rem}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:.7rem;margin:1rem 0}.metric{border:1px solid var(--line);background:var(--surface);padding:.85rem;border-radius:.4rem}.metric span{display:block;font-size:1.55rem;font-weight:700}.controls,.pager{display:flex;gap:.7rem;align-items:end;flex-wrap:wrap;margin:.75rem 0}.controls label{display:grid;gap:.25rem;font-weight:600}button,input,select{font:inherit;padding:.45rem .62rem;border:1px solid #708b90;border-radius:.3rem;color:var(--ink);background:white}button{cursor:pointer}button:disabled{opacity:.55;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.table-wrap{max-height:33rem;overflow:auto;border:1px solid var(--line);border-radius:.35rem}table{width:100%;border-collapse:separate;border-spacing:0;text-align:left;background:white}th,td{padding:.5rem .62rem;border-bottom:1px solid #e4eded;vertical-align:top;min-width:5rem;max-width:28rem;overflow-wrap:anywhere;white-space:pre-wrap}th{background:#e8f2f1;position:sticky;top:0;z-index:1}tbody tr:nth-child(even){background:#f8fbfa}.small{color:var(--secondary)}.bars{display:grid;grid-template-columns:minmax(8rem,19rem) minmax(7rem,30rem) 5rem;gap:.45rem;align-items:center}.track{background:#e4eeee;height:13px;border-radius:2px}.bar{height:100%;background:var(--accent);border-radius:2px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface);padding:1rem;border-radius:.35rem}.linkbutton{border:0;background:transparent;padding:0;text-align:left;color:var(--accent);text-decoration:underline}details{margin:.65rem 0}@media(max-width:600px){.controls label{width:100%}nav{gap:.5rem}.bars{grid-template-columns:minmax(6rem,12rem) minmax(4rem,1fr) 3rem}}
+</style>
+</head>
+<body>
+<header>
+<h1>SjD semantic harmonization</h1>
+<p class="small" id="run"></p>
+<nav aria-label="Sections"><a href="#summary">Summary</a><a href="#variables">Variables</a><a href="#detail">Before and after</a><a href="#specialized">Specialized views</a><a href="#derived">Derived variables</a><a href="#downstream">Downstream compatibility</a><a href="#methods">Methods</a></nav>
+</header>
+<main>
+<section id="summary"><h2>Executive summary</h2><div id="metrics" class="metrics"></div><p class="small">Patient and episode totals refer to Step 10. Mapping counts distinguish exact source values and assay contexts. Observation counts distinguish episode-variable rows and laboratory source events.</p><details><summary>Strategies and field coverage</summary><pre id="coverage"></pre></details></section>
+<section id="variables"><h2>Variable explorer</h2>
+<div class="controls"><label>Search<input id="search" type="search" placeholder="Variable, raw value or result"></label><label>Family<select id="family"></select></label><label>Namespace<select id="namespace"></select></label><label>Strategy<select id="strategy"></select></label><label>Sort<select id="sort"><option value="variable">Variable name</option><option value="distinct">Raw cardinality</option><option value="n_interpreted">Interpreted episodes</option><option value="n_semantic_null">Missing semantic fields</option></select></label></div>
+<div id="variableTable"></div></section>
+<section id="detail"><h2>Before and after</h2><div class="controls"><label>Variable<select id="which"></select></label><button data-export="variable-csv">Variable CSV</button><button data-export="variable-json">Variable JSON</button><button data-export="all-csv">All CSV</button><button data-export="all-json">All JSON</button></div>
+<div class="bars" id="bars"></div><p class="small">Bars share the Step 10 denominator for the selected variable. The detail table includes all eligible raw types and context keys. Patients may occur in multiple rows.</p><div id="detailsTable"></div></section>
+<section id="specialized"><h2>Specialized views</h2><div class="controls"><label>View<select id="kind"><option value="numeric">Numeric and censored results</option><option value="ana">ANA titers and patterns</option><option value="immunofixation">Immunofixation</option><option value="cryoglobulin">Cryoglobulin readings</option><option value="hla">HLA loci and resolution</option><option value="urine">Urinalysis</option><option value="medication">Medication evidence and timing</option></select></label></div><p class="small">Counts describe observations represented by each mapping. Individual findings, alleles and medication entities can overlap within an observation.</p><div id="specialTable"></div></section>
+<section id="derived"><h2>Derived variables</h2><div id="derivedTable"></div></section>
+<section id="downstream"><h2>Downstream compatibility</h2><div id="downTable"></div></section>
+<section id="methods"><h2>Methods and reproducibility</h2><p>Exact parsing preserves the type, source text, censoring and interpretation evidence. Candidate semantic fields use local rules and verified source spans. Prospective derived features require a source result-availability time. Clinical free text may be sensitive. Keep this document within the authorized environment.</p><details open><summary>Run provenance and source hashes</summary><pre id="provenance"></pre></details><details><summary>Resource versions and licenses</summary><pre id="resources"></pre></details></section>
+</main>
+<script id="payload" type="application/json">{{ payload }}</script>
+<script>
+"use strict";
+const data = JSON.parse(document.getElementById("payload").textContent);
+const get = id => document.getElementById(id);
+const label = key => key.replaceAll("_", " ");
+const display = value => value === null || value === undefined ? "—" : typeof value === "object" ? JSON.stringify(value) : String(value);
+const text = (node, value) => { node.textContent = value; return node; };
+const el = (tag, value = "") => text(document.createElement(tag), value);
+const columns = list => list.map(key => [key, label(key)]);
+function setOptions(id, values) {
+  const select = get(id);
+  select.replaceChildren(...values.map(([value, title]) => {
+    const option = el("option", title); option.value = value; return option;
+  }));
+}
+function pager(id, rows, fields, action, requestedPage = 0) {
+  const root = get(id), size = data.page_size, pages = Math.max(1, Math.ceil(rows.length / size));
+  const page = Math.min(requestedPage, pages - 1);
+  const table = el("table"), head = el("thead"), header = el("tr"), body = el("tbody");
+  for (const [, title] of fields) { const th = el("th", title); th.scope = "col"; header.append(th); }
+  head.append(header);
+  for (const row of rows.slice(page * size, (page + 1) * size)) {
+    const tr = el("tr");
+    for (const [key] of fields) {
+      const td = el("td");
+      if (action && key === "variable") {
+        const button = el("button", row[key]); button.type = "button"; button.className = "linkbutton";
+        button.addEventListener("click", () => action(row[key])); td.append(button);
+      } else td.textContent = key === "raw" && typeof row[key] === "string" ? JSON.stringify(row[key]) : display(row[key]);
+      tr.append(td);
+    }
+    body.append(tr);
+  }
+  table.append(head, body);
+  const wrap = el("div"); wrap.className = "table-wrap"; wrap.tabIndex = 0; wrap.append(table);
+  const controls = el("div"); controls.className = "pager";
+  const prev = el("button", "Previous"), next = el("button", "Next");
+  prev.disabled = page === 0; next.disabled = page + 1 >= pages;
+  prev.addEventListener("click", () => pager(id, rows, fields, action, page - 1));
+  next.addEventListener("click", () => pager(id, rows, fields, action, page + 1));
+  const status = el("span", rows.length ? `Page ${page + 1} of ${pages} · ${rows.length.toLocaleString()} rows` : "No rows");
+  status.setAttribute("role", "status");
+  controls.append(prev, next, status); root.replaceChildren(wrap, controls);
+}
+const variableFields = columns(["variable","family","dtype","dtype_after","nonnull","nonempty","n_interpreted","n_semantic_null","n_raw_null","n_raw_empty","distinct","distinct_semantic","strategy_counts","rule_sources"]);
+const detailFields = columns(["variable","raw","raw_type","context","episodes","patients","observations","source_events","baseline","structured","strategy","evidence","knowledge_document_ids","note"]);
+const names = [...new Set(data.details.map(r => r.variable))].sort();
+const unique = values => [...new Set(values)].sort().map(value => [value, label(value)]);
+const byName = new Map(names.map(name => [name, []]));
+for (const row of data.details) byName.get(row.variable).push(row);
+setOptions("family", [["focus","Laboratory, medication and derived"],["all","All variables"],...unique(data.variables.map(r => r.family))]);
+setOptions("namespace", [["all","All namespaces"],...unique(names.map(name => name.split("__")[0]))]);
+setOptions("strategy", [["all","All strategies"],...unique(data.details.map(r => r.strategy))]);
+setOptions("which", names.map(name => [name, name]));
+function selectVariable(name) { get("which").value = name; showDetails(); get("detail").scrollIntoView(); }
+function showVariables() {
+  const query = get("search").value.trim().toLowerCase(), family = get("family").value, namespace = get("namespace").value;
+  const strategy = get("strategy").value, sort = get("sort").value;
+  const list = data.variables.filter(row => {
+    if (family === "focus" && row.family === "other" || !["focus","all"].includes(family) && row.family !== family) return false;
+    if (namespace !== "all" && !row.variable.startsWith(namespace + "__")) return false;
+    const details = byName.get(row.variable) || [];
+    if (strategy === "all" && (!query || row.variable.toLowerCase().includes(query))) return true;
+    return details.some(item => (strategy === "all" || item.strategy === strategy) &&
+      (!query || row.variable.toLowerCase().includes(query) || JSON.stringify([item.raw,item.structured]).toLowerCase().includes(query)));
+  }).sort((a,b) => sort === "variable" ? a.variable.localeCompare(b.variable) : b[sort] - a[sort] || a.variable.localeCompare(b.variable));
+  pager("variableTable", list, variableFields, selectVariable);
+}
+function showDetails() {
+  const name = get("which").value;
+  const row = data.variables.find(item => item.variable === name);
+  const stats = row ? [["Nonempty source",row.nonempty],["Structured interpretation",row.n_interpreted]] : [];
+  get("bars").replaceChildren(...stats.flatMap(([title, value]) => {
+    const track = el("div"), bar = el("div"); track.className = "track"; bar.className = "bar";
+    bar.style.width = (100 * value / Math.max(1,row.episodes)) + "%"; track.append(bar);
+    track.setAttribute("aria-hidden","true"); return [el("span",title), track, el("span",`${value}/${row.episodes}`)];
+  }));
+  pager("detailsTable", byName.get(name) || [], detailFields);
+}
+function special() {
+  const kind = get("kind").value;
+  const rows = data.details.filter(row => kind === "numeric" ? row.structured.comparator !== undefined || row.family === "lab_numeric"
+    : kind === "urine" ? row.family.startsWith("urin") : row.family === kind);
+  pager("specialTable", rows, detailFields);
+}
+function csvCell(value) {
+  let cell = value === null || value === undefined ? "" : display(value);
+  if (typeof value === "string" && (/^[\s\u0000-\u0020]*[=+\-@]/u.test(cell) || /^[\t\n\r]/u.test(cell))) cell = "'" + cell;
+  return '"' + cell.replaceAll('"','""') + '"';
+}
+function exportRows(scope, format) {
+  const rows = scope === "all" ? data.details : (byName.get(get("which").value) || []);
+  const keys = detailFields.map(([key]) => key);
+  const content = format === "json" ? JSON.stringify(rows,null,2) :
+    [keys.map(csvCell).join(","), ...rows.map(row => keys.map(key => csvCell(row[key])).join(","))].join("\r\n") + "\r\n";
+  const url = URL.createObjectURL(new Blob([content],{type: format === "json" ? "application/json" : "text/csv;charset=utf-8"}));
+  const a = el("a"); a.href=url; a.download="sjd-" + scope + "." + format; a.click(); setTimeout(() => URL.revokeObjectURL(url),1000);
+}
+for (const id of ["family","namespace","strategy","sort"]) get(id).addEventListener("change",showVariables);
+get("search").addEventListener("input",showVariables); get("which").addEventListener("change",showDetails);
+get("kind").addEventListener("change",special);
+for (const button of document.querySelectorAll("[data-export]")) button.addEventListener("click",() => exportRows(...button.dataset.export.split("-")));
+text(get("run"), `Run ${data.run.run_id} · ${data.run.started_at} · restricted local report`);
+for (const key of ["patients","episodes","variables_processed","variables_protected","unique_raw_pairs","episode_context_keys","unique_mappings","new_candidate_features"]) {
+  const card=el("div"); card.className="metric"; card.append(el("span",data.summary[key].toLocaleString()), el("div",label(key))); get("metrics").append(card);
+}
+text(get("coverage"), JSON.stringify(data.summary,null,2)); text(get("provenance"),JSON.stringify(data.run,null,2));
+text(get("resources"),JSON.stringify(data.resources,null,2));
+pager("derivedTable",data.derived,columns(["variable","recomputed","evaluated_episodes","before","after","transitions","before_distinct","after_distinct","rule"]));
+pager("downTable",data.downstream,columns(["study","feature","observed_before","observed_after","eligibility_before","eligibility_after","status"]));
+showVariables(); showDetails(); special();
+</script>
+</body>
+</html>
