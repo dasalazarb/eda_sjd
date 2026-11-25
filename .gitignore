@@ -17,4 +17,3 @@ restricted/
 *.npy
 *.safetensors
 *.log
-src/semantic_harmonization/configs/local.yaml
