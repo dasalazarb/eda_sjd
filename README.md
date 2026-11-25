@@ -29,5 +29,3 @@ Los productores verifican sus entradas, la cobertura de asignación, la unicidad
 La validación de la segunda pasada reprodujo los 15 fallos de la referencia y los resolvió en la suite activa. El paso 11 conserva los IDs textuales al leer el CSV de baseline, incluidos los ceros a la izquierda. Para comparar reproducciones fija `PYTHONHASHSEED=0` en ambas ejecuciones. El paso 09c todavía deriva parte del orden de columnas de un conjunto y falta el snapshot operativo que permitiría fijar el orden contractual.
 
 La equivalencia operativa sigue pendiente de datos congelados y procedencia. El paso 09b es el único escritor automático del Parquet por intervalo. `11_codebook_value_audit.py` conserva su ruta en revisión hasta que el custodio identifique el productor del snapshot legado.
-
-[Armonización semántica clínica](src/semantic_harmonization/README.md) prepara un candidato independiente a Step 10 y, cuando está disponible, aplica el diccionario a las observaciones de EDA Step 20 antes de su agregación.
